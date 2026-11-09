@@ -1,0 +1,1496 @@
+[
+  {
+    "method": "GET",
+    "path": "/session",
+    "guard": "adminOnly",
+    "handler": "session"
+  },
+  {
+    "method": "GET",
+    "path": "/connect-info",
+    "guard": "adminOnly",
+    "handler": "connectInfo"
+  },
+  {
+    "method": "GET",
+    "path": "/tables",
+    "guard": "adminOnly",
+    "handler": "tables"
+  },
+  {
+    "method": "POST",
+    "path": "/sql",
+    "guard": "adminOnly",
+    "handler": "sql"
+  },
+  {
+    "method": "POST",
+    "path": "/sql/readonly",
+    "guard": "adminOnly",
+    "handler": "sqlReadonly"
+  },
+  {
+    "method": "GET",
+    "path": "/schema/table-stats",
+    "guard": "adminOnly",
+    "handler": "tableStats"
+  },
+  {
+    "method": "GET",
+    "path": "/schema/indexes",
+    "guard": "adminOnly",
+    "handler": "schemaIndexes"
+  },
+  {
+    "method": "GET",
+    "path": "/schema/enums",
+    "guard": "adminOnly",
+    "handler": "listEnums"
+  },
+  {
+    "method": "POST",
+    "path": "/schema/enums",
+    "guard": "adminOnly",
+    "handler": "createEnum"
+  },
+  {
+    "method": "PATCH",
+    "path": "/schema/enums/:name",
+    "guard": "adminOnly",
+    "handler": "alterEnum"
+  },
+  {
+    "method": "DELETE",
+    "path": "/schema/enums/:name",
+    "guard": "adminOnly",
+    "handler": "dropEnum"
+  },
+  {
+    "method": "GET",
+    "path": "/database/roles",
+    "guard": "adminOnly",
+    "handler": "listRoles"
+  },
+  {
+    "method": "POST",
+    "path": "/database/roles",
+    "guard": "adminOnly",
+    "handler": "createRole"
+  },
+  {
+    "method": "PATCH",
+    "path": "/database/roles/:name",
+    "guard": "adminOnly",
+    "handler": "updateRole"
+  },
+  {
+    "method": "DELETE",
+    "path": "/database/roles/:name",
+    "guard": "adminOnly",
+    "handler": "dropRole"
+  },
+  {
+    "method": "GET",
+    "path": "/database/column-privileges",
+    "guard": "adminOnly",
+    "handler": "columnPrivileges"
+  },
+  {
+    "method": "PUT",
+    "path": "/database/column-privileges",
+    "guard": "adminOnly",
+    "handler": "setColumnPrivilege"
+  },
+  {
+    "method": "GET",
+    "path": "/database/publications",
+    "guard": "adminOnly",
+    "handler": "listPublications"
+  },
+  {
+    "method": "POST",
+    "path": "/database/publications",
+    "guard": "adminOnly",
+    "handler": "createPublication"
+  },
+  {
+    "method": "PATCH",
+    "path": "/database/publications/:name",
+    "guard": "adminOnly",
+    "handler": "updatePublication"
+  },
+  {
+    "method": "DELETE",
+    "path": "/database/publications/:name",
+    "guard": "adminOnly",
+    "handler": "dropPublication"
+  },
+  {
+    "method": "GET",
+    "path": "/database/config",
+    "guard": "adminOnly",
+    "handler": "postgresConfig"
+  },
+  {
+    "method": "PATCH",
+    "path": "/database/config",
+    "guard": "adminOnly",
+    "handler": "updatePostgresConfig"
+  },
+  {
+    "method": "GET",
+    "path": "/db/migrations",
+    "guard": "adminOnly",
+    "handler": "migrationHistory"
+  },
+  {
+    "method": "POST",
+    "path": "/db/migrations",
+    "guard": "adminOnly",
+    "handler": "pushMigration"
+  },
+  {
+    "method": "POST",
+    "path": "/db/migrations/:version/repair",
+    "guard": "adminOnly",
+    "handler": "repairMigration"
+  },
+  {
+    "method": "POST",
+    "path": "/db/diff",
+    "guard": "adminOnly",
+    "handler": "diffSchema"
+  },
+  {
+    "method": "POST",
+    "path": "/db/dump",
+    "guard": "adminOnly",
+    "handler": "dumpDatabase"
+  },
+  {
+    "method": "POST",
+    "path": "/db/seed",
+    "guard": "adminOnly",
+    "handler": "seedDatabase"
+  },
+  {
+    "method": "POST",
+    "path": "/db/reset",
+    "guard": "adminOnly",
+    "handler": "resetDatabase"
+  },
+  {
+    "method": "POST",
+    "path": "/db/test",
+    "guard": "adminOnly",
+    "handler": "testDatabase"
+  },
+  {
+    "method": "GET",
+    "path": "/git/status",
+    "guard": "adminOnly",
+    "handler": "gitStatus"
+  },
+  {
+    "method": "GET",
+    "path": "/git/authorize",
+    "guard": "adminOnly",
+    "handler": "gitAuthorize"
+  },
+  {
+    "method": "POST",
+    "path": "/git/callback",
+    "guard": "adminOnly",
+    "handler": "gitCallback"
+  },
+  {
+    "method": "GET",
+    "path": "/git/repos",
+    "guard": "adminOnly",
+    "handler": "gitRepos"
+  },
+  {
+    "method": "POST",
+    "path": "/git/link",
+    "guard": "adminOnly",
+    "handler": "gitLink"
+  },
+  {
+    "method": "DELETE",
+    "path": "/git/link",
+    "guard": "adminOnly",
+    "handler": "gitUnlink"
+  },
+  {
+    "method": "POST",
+    "path": "/git/sync",
+    "guard": "adminOnly",
+    "handler": "gitSync"
+  },
+  {
+    "method": "GET",
+    "path": "/logs",
+    "guard": "[apiKeyMiddleware, secretKeyOrAdmin]",
+    "handler": "logs"
+  },
+  {
+    "method": "GET",
+    "path": "/realtime/queue",
+    "guard": "adminOnly",
+    "handler": "realtimeQueue"
+  },
+  {
+    "method": "GET",
+    "path": "/realtime/channels",
+    "guard": "adminOnly",
+    "handler": "realtimeChannels"
+  },
+  {
+    "method": "GET",
+    "path": "/realtime/events",
+    "guard": "adminOnly",
+    "handler": "realtimeEvents"
+  },
+  {
+    "method": "GET",
+    "path": "/realtime/channels/:channel/presence",
+    "guard": "adminOnly",
+    "handler": "realtimePresence"
+  },
+  {
+    "method": "GET",
+    "path": "/realtime/config",
+    "guard": "adminOnly",
+    "handler": "realtimeConfig"
+  },
+  {
+    "method": "PATCH",
+    "path": "/realtime/config",
+    "guard": "adminOnly",
+    "handler": "updateRealtimeConfig"
+  },
+  {
+    "method": "PATCH",
+    "path": "/realtime/config/respect-rls",
+    "guard": "adminOnly",
+    "handler": "updateRealtimeRespectRls"
+  },
+  {
+    "method": "GET",
+    "path": "/stats",
+    "guard": "adminOnly",
+    "handler": "stats"
+  },
+  {
+    "method": "GET",
+    "path": "/metrics/requests",
+    "guard": "adminOnly",
+    "handler": "requestMetrics"
+  },
+  {
+    "method": "GET",
+    "path": "/metrics/timeseries",
+    "guard": "adminOnly",
+    "handler": "metricsTimeseries"
+  },
+  {
+    "method": "GET",
+    "path": "/performance",
+    "guard": "adminOnly",
+    "handler": "performance"
+  },
+  {
+    "method": "GET",
+    "path": "/performance/index-advisor",
+    "guard": "adminOnly",
+    "handler": "indexAdvisorStatus"
+  },
+  {
+    "method": "POST",
+    "path": "/performance/index-advisor/enable",
+    "guard": "adminOnly",
+    "handler": "enableIndexAdvisor"
+  },
+  {
+    "method": "POST",
+    "path": "/performance/index-advisor",
+    "guard": "adminOnly",
+    "handler": "adviseIndexes"
+  },
+  {
+    "method": "GET",
+    "path": "/backups",
+    "guard": "adminOnly",
+    "handler": "backups"
+  },
+  {
+    "method": "GET",
+    "path": "/backups/list",
+    "guard": "adminOnly",
+    "handler": "backupsList"
+  },
+  {
+    "method": "GET",
+    "path": "/backups/config",
+    "guard": "adminOnly",
+    "handler": "backupConfig"
+  },
+  {
+    "method": "PUT",
+    "path": "/backups/config",
+    "guard": "adminOnly",
+    "handler": "updateBackupConfig"
+  },
+  {
+    "method": "POST",
+    "path": "/backups/run",
+    "guard": "adminOnly",
+    "handler": "runBackup"
+  },
+  {
+    "method": "POST",
+    "path": "/backups",
+    "guard": "adminOnly",
+    "handler": "createBackup"
+  },
+  {
+    "method": "POST",
+    "path": "/backups/restore",
+    "guard": "adminOnly",
+    "handler": "restoreBackup"
+  },
+  {
+    "method": "GET",
+    "path": "/backups/download",
+    "guard": "adminOnly",
+    "handler": "downloadBackup"
+  },
+  {
+    "method": "POST",
+    "path": "/backups/upload",
+    "guard": "adminBackupUpload",
+    "handler": "uploadBackupFile"
+  },
+  {
+    "method": "POST",
+    "path": "/backups/export",
+    "guard": "adminOnly",
+    "handler": "exportProject"
+  },
+  {
+    "method": "POST",
+    "path": "/backups/export-full",
+    "guard": "adminOnly",
+    "handler": "exportFullProject"
+  },
+  {
+    "method": "POST",
+    "path": "/backups/extract",
+    "guard": "adminOnly",
+    "handler": "extractBackupArchive"
+  },
+  {
+    "method": "POST",
+    "path": "/backups/clone-staging",
+    "guard": "adminOnly",
+    "handler": "cloneStaging"
+  },
+  {
+    "method": "GET",
+    "path": "/cron/pg/jobs",
+    "guard": "adminOnly",
+    "handler": "listPgCronJobs"
+  },
+  {
+    "method": "GET",
+    "path": "/cron/pg/jobs/:id",
+    "guard": "adminOnly",
+    "handler": "getPgCronJobById"
+  },
+  {
+    "method": "POST",
+    "path": "/cron/pg/jobs",
+    "guard": "adminOnly",
+    "handler": "createPgCronJob"
+  },
+  {
+    "method": "PATCH",
+    "path": "/cron/pg/jobs/:id",
+    "guard": "adminOnly",
+    "handler": "togglePgCronJob"
+  },
+  {
+    "method": "POST",
+    "path": "/cron/pg/jobs/:id/run",
+    "guard": "adminOnly",
+    "handler": "runPgCronJob"
+  },
+  {
+    "method": "DELETE",
+    "path": "/cron/pg/jobs/:id",
+    "guard": "adminOnly",
+    "handler": "deletePgCronJob"
+  },
+  {
+    "method": "GET",
+    "path": "/cron/pg/jobs/:id/runs",
+    "guard": "adminOnly",
+    "handler": "pgCronJobRuns"
+  },
+  {
+    "method": "GET",
+    "path": "/cron/app/jobs",
+    "guard": "adminOnly",
+    "handler": "listAppCronJobs"
+  },
+  {
+    "method": "GET",
+    "path": "/jobs/runs",
+    "guard": "adminOnly",
+    "handler": "listJobRuns"
+  },
+  {
+    "method": "POST",
+    "path": "/jobs/:id/run",
+    "guard": "adminOnly",
+    "handler": "runJobNow"
+  },
+  {
+    "method": "PATCH",
+    "path": "/jobs/:id",
+    "guard": "adminOnly",
+    "handler": "configureJob"
+  },
+  {
+    "method": "GET",
+    "path": "/jobs/alerts",
+    "guard": "adminOnly",
+    "handler": "listJobAlerts"
+  },
+  {
+    "method": "GET",
+    "path": "/migrations",
+    "guard": "adminOnly",
+    "handler": "listMigrations"
+  },
+  {
+    "method": "POST",
+    "path": "/migrations",
+    "guard": "adminOnly",
+    "handler": "createMigration"
+  },
+  {
+    "method": "GET",
+    "path": "/migrations/diff",
+    "guard": "adminOnly",
+    "handler": "migrationsDiff"
+  },
+  {
+    "method": "GET",
+    "path": "/migrations/:id",
+    "guard": "adminOnly",
+    "handler": "getMigration"
+  },
+  {
+    "method": "POST",
+    "path": "/migrations/:id/apply",
+    "guard": "adminOnly",
+    "handler": "applyMigration"
+  },
+  {
+    "method": "POST",
+    "path": "/migrations/:id/rollback",
+    "guard": "adminOnly",
+    "handler": "rollbackMigration"
+  },
+  {
+    "method": "POST",
+    "path": "/import/supabase",
+    "guard": "adminOnly",
+    "handler": "importSupabase"
+  },
+  {
+    "method": "GET",
+    "path": "/tables/:model/rows",
+    "guard": "adminOnly",
+    "handler": "rows"
+  },
+  {
+    "method": "POST",
+    "path": "/tables/:model/rows",
+    "guard": "adminOnly",
+    "handler": "createRow"
+  },
+  {
+    "method": "PATCH",
+    "path": "/tables/:model/rows/:id",
+    "guard": "adminOnly",
+    "handler": "updateRow"
+  },
+  {
+    "method": "DELETE",
+    "path": "/tables/:model/rows/:id",
+    "guard": "adminOnly",
+    "handler": "deleteRow"
+  },
+  {
+    "method": "GET",
+    "path": "/schema/schemas",
+    "guard": "adminOnly",
+    "handler": "schemaList"
+  },
+  {
+    "method": "GET",
+    "path": "/schema/tables",
+    "guard": "adminOnly",
+    "handler": "schemaTables"
+  },
+  {
+    "method": "GET",
+    "path": "/schema/graph",
+    "guard": "adminOnly",
+    "handler": "schemaGraph"
+  },
+  {
+    "method": "GET",
+    "path": "/schema/types",
+    "guard": "adminOnly",
+    "handler": "schemaTypes"
+  },
+  {
+    "method": "POST",
+    "path": "/schema/tables",
+    "guard": "adminOnly",
+    "handler": "createTable"
+  },
+  {
+    "method": "DELETE",
+    "path": "/schema/tables/:table",
+    "guard": "adminOnly",
+    "handler": "dropTable"
+  },
+  {
+    "method": "POST",
+    "path": "/schema/tables/:table/columns",
+    "guard": "adminOnly",
+    "handler": "addColumn"
+  },
+  {
+    "method": "PATCH",
+    "path": "/schema/tables/:table/columns/:column/rename",
+    "guard": "adminOnly",
+    "handler": "renameColumn"
+  },
+  {
+    "method": "PATCH",
+    "path": "/schema/tables/:table/columns/:column/nullable",
+    "guard": "adminOnly",
+    "handler": "setColumnNullable"
+  },
+  {
+    "method": "PATCH",
+    "path": "/schema/tables/:table/columns/:column/default",
+    "guard": "adminOnly",
+    "handler": "setColumnDefault"
+  },
+  {
+    "method": "DELETE",
+    "path": "/schema/tables/:table/columns/:column",
+    "guard": "adminOnly",
+    "handler": "dropColumn"
+  },
+  {
+    "method": "GET",
+    "path": "/schema/tables/:table/indexes",
+    "guard": "adminOnly",
+    "handler": "listIndexes"
+  },
+  {
+    "method": "POST",
+    "path": "/schema/tables/:table/indexes",
+    "guard": "adminOnly",
+    "handler": "createIndex"
+  },
+  {
+    "method": "DELETE",
+    "path": "/schema/indexes/:name",
+    "guard": "adminOnly",
+    "handler": "dropIndex"
+  },
+  {
+    "method": "GET",
+    "path": "/schema/functions",
+    "guard": "adminOnly",
+    "handler": "listFunctions"
+  },
+  {
+    "method": "POST",
+    "path": "/schema/functions",
+    "guard": "adminOnly",
+    "handler": "createFunction"
+  },
+  {
+    "method": "DELETE",
+    "path": "/schema/functions/:signature",
+    "guard": "adminOnly",
+    "handler": "dropFunction"
+  },
+  {
+    "method": "GET",
+    "path": "/schema/triggers",
+    "guard": "adminOnly",
+    "handler": "listTriggers"
+  },
+  {
+    "method": "GET",
+    "path": "/schema/trigger-functions",
+    "guard": "adminOnly",
+    "handler": "listTriggerFunctions"
+  },
+  {
+    "method": "POST",
+    "path": "/schema/triggers",
+    "guard": "adminOnly",
+    "handler": "createSchemaTrigger"
+  },
+  {
+    "method": "POST",
+    "path": "/schema/triggers/:name/enabled",
+    "guard": "adminOnly",
+    "handler": "setSchemaTriggerEnabled"
+  },
+  {
+    "method": "DELETE",
+    "path": "/schema/triggers/:name",
+    "guard": "adminOnly",
+    "handler": "dropSchemaTrigger"
+  },
+  {
+    "method": "GET",
+    "path": "/rest/resources",
+    "guard": "adminOnly",
+    "handler": "listRestResources"
+  },
+  {
+    "method": "GET",
+    "path": "/schema/extensions",
+    "guard": "adminOnly",
+    "handler": "listExtensions"
+  },
+  {
+    "method": "POST",
+    "path": "/schema/extensions/:name",
+    "guard": "adminOnly",
+    "handler": "enableExtension"
+  },
+  {
+    "method": "DELETE",
+    "path": "/schema/extensions/:name",
+    "guard": "adminOnly",
+    "handler": "disableExtension"
+  },
+  {
+    "method": "GET",
+    "path": "/rls/tables",
+    "guard": "adminOnly",
+    "handler": "rlsTables"
+  },
+  {
+    "method": "GET",
+    "path": "/rls/access",
+    "guard": "adminOnly",
+    "handler": "rlsAccess"
+  },
+  {
+    "method": "POST",
+    "path": "/rls/policies",
+    "guard": "adminOnly",
+    "handler": "rlsCreatePolicy"
+  },
+  {
+    "method": "PUT",
+    "path": "/rls/policies",
+    "guard": "adminOnly",
+    "handler": "rlsReplacePolicy"
+  },
+  {
+    "method": "DELETE",
+    "path": "/rls/policies",
+    "guard": "adminOnly",
+    "handler": "rlsDropPolicy"
+  },
+  {
+    "method": "GET",
+    "path": "/realtime/policies",
+    "guard": "adminOnly",
+    "handler": "realtimePolicies"
+  },
+  {
+    "method": "POST",
+    "path": "/realtime/policies",
+    "guard": "adminOnly",
+    "handler": "realtimeCreatePolicy"
+  },
+  {
+    "method": "DELETE",
+    "path": "/realtime/policies/:name",
+    "guard": "adminOnly",
+    "handler": "realtimeDropPolicy"
+  },
+  {
+    "method": "POST",
+    "path": "/rls/tables/:table/rls",
+    "guard": "adminOnly",
+    "handler": "rlsToggle"
+  },
+  {
+    "method": "POST",
+    "path": "/rls/tables/:table/preset",
+    "guard": "adminOnly",
+    "handler": "rlsApplyPreset"
+  },
+  {
+    "method": "POST",
+    "path": "/rls/simulate",
+    "guard": "adminOnly",
+    "handler": "rlsSimulate"
+  },
+  {
+    "method": "POST",
+    "path": "/rls/simulate/diff",
+    "guard": "adminOnly",
+    "handler": "rlsSimulateDiff"
+  },
+  {
+    "method": "GET",
+    "path": "/advisor",
+    "guard": "adminOnly",
+    "handler": "advisor"
+  },
+  {
+    "method": "GET",
+    "path": "/shield",
+    "guard": "adminOnly",
+    "handler": "shield"
+  },
+  {
+    "method": "GET",
+    "path": "/edge-secrets",
+    "guard": "adminOnly",
+    "handler": "listSecrets"
+  },
+  {
+    "method": "PUT",
+    "path": "/edge-secrets",
+    "guard": "adminOnly",
+    "handler": "setSecret"
+  },
+  {
+    "method": "DELETE",
+    "path": "/edge-secrets/:name",
+    "guard": "adminOnly",
+    "handler": "deleteSecret"
+  },
+  {
+    "method": "GET",
+    "path": "/api-keys",
+    "guard": "adminOnly",
+    "handler": "listApiKeys"
+  },
+  {
+    "method": "POST",
+    "path": "/api-keys",
+    "guard": "adminOnly",
+    "handler": "createApiKey"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api-keys/:id",
+    "guard": "adminOnly",
+    "handler": "revokeApiKey"
+  },
+  {
+    "method": "GET",
+    "path": "/database/connection",
+    "guard": "adminOnly",
+    "handler": "databaseConnection"
+  },
+  {
+    "method": "GET",
+    "path": "/storage/connection",
+    "guard": "adminOnly",
+    "handler": "storageConnection"
+  },
+  {
+    "method": "GET",
+    "path": "/webhooks/events",
+    "guard": "adminOnly",
+    "handler": "listWebhookEvents"
+  },
+  {
+    "method": "GET",
+    "path": "/webhooks",
+    "guard": "adminOnly",
+    "handler": "webhooks"
+  },
+  {
+    "method": "POST",
+    "path": "/webhooks",
+    "guard": "adminOnly",
+    "handler": "createWebhook"
+  },
+  {
+    "method": "PATCH",
+    "path": "/webhooks/:id",
+    "guard": "adminOnly",
+    "handler": "updateWebhook"
+  },
+  {
+    "method": "DELETE",
+    "path": "/webhooks/:id",
+    "guard": "adminOnly",
+    "handler": "deleteWebhook"
+  },
+  {
+    "method": "POST",
+    "path": "/webhooks/:id/test",
+    "guard": "adminOnly",
+    "handler": "testWebhook"
+  },
+  {
+    "method": "GET",
+    "path": "/webhooks/:id/deliveries",
+    "guard": "adminOnly",
+    "handler": "webhookDeliveries"
+  },
+  {
+    "method": "GET",
+    "path": "/settings",
+    "guard": "adminOnly",
+    "handler": "settingsList"
+  },
+  {
+    "method": "GET",
+    "path": "/settings/:group",
+    "guard": "adminOnly",
+    "handler": "settingsGet"
+  },
+  {
+    "method": "PUT",
+    "path": "/settings/:group",
+    "guard": "adminOnly",
+    "handler": "settingsPut"
+  },
+  {
+    "method": "DELETE",
+    "path": "/settings/:group",
+    "guard": "adminOnly",
+    "handler": "settingsDelete"
+  },
+  {
+    "method": "GET",
+    "path": "/auth/audit-logs",
+    "guard": "adminOnly",
+    "handler": "auditLogs"
+  },
+  {
+    "method": "GET",
+    "path": "/auth/status",
+    "guard": "adminOnly",
+    "handler": "authStatus"
+  },
+  {
+    "method": "POST",
+    "path": "/settings/email/test",
+    "guard": "adminOnly",
+    "handler": "settingsEmailTest"
+  },
+  {
+    "method": "POST",
+    "path": "/settings/sms/test",
+    "guard": "adminOnly",
+    "handler": "settingsSmsTest"
+  },
+  {
+    "method": "POST",
+    "path": "/settings/push/test",
+    "guard": "adminOnly",
+    "handler": "settingsPushTest"
+  },
+  {
+    "method": "GET",
+    "path": "/storage/files",
+    "guard": "adminOnly",
+    "handler": "storageFiles"
+  },
+  {
+    "method": "GET",
+    "path": "/storage/files/:id/url",
+    "guard": "adminOnly",
+    "handler": "storageFileUrl"
+  },
+  {
+    "method": "GET",
+    "path": "/storage/files/:id/raw",
+    "guard": "adminOnly",
+    "handler": "storageFileRaw"
+  },
+  {
+    "method": "GET",
+    "path": "/storage/files/:id/render",
+    "guard": "adminOnly",
+    "handler": "storageFileRender"
+  },
+  {
+    "method": "POST",
+    "path": "/storage/files",
+    "guard": "adminUpload",
+    "handler": "storageUpload"
+  },
+  {
+    "method": "DELETE",
+    "path": "/storage/files/:id",
+    "guard": "adminOnly",
+    "handler": "storageDelete"
+  },
+  {
+    "method": "GET",
+    "path": "/storage/buckets",
+    "guard": "adminOnly",
+    "handler": "listBuckets"
+  },
+  {
+    "method": "POST",
+    "path": "/storage/buckets",
+    "guard": "adminOnly",
+    "handler": "createBucket"
+  },
+  {
+    "method": "GET",
+    "path": "/storage/buckets/:slug",
+    "guard": "adminOnly",
+    "handler": "getBucket"
+  },
+  {
+    "method": "PATCH",
+    "path": "/storage/buckets/:slug",
+    "guard": "adminOnly",
+    "handler": "updateBucket"
+  },
+  {
+    "method": "DELETE",
+    "path": "/storage/buckets/:slug",
+    "guard": "adminOnly",
+    "handler": "deleteBucket"
+  },
+  {
+    "method": "GET",
+    "path": "/storage/bucket-deletions",
+    "guard": "adminOnly",
+    "handler": "bucketDeletions"
+  },
+  {
+    "method": "GET",
+    "path": "/storage/bucket-deletions/:id",
+    "guard": "adminOnly",
+    "handler": "bucketDeletionStatus"
+  },
+  {
+    "method": "GET",
+    "path": "/storage/buckets/:slug/files",
+    "guard": "adminOnly",
+    "handler": "bucketFiles"
+  },
+  {
+    "method": "GET",
+    "path": "/storage/buckets/:slug/objects",
+    "guard": "adminOnly",
+    "handler": "listBucketObjects"
+  },
+  {
+    "method": "GET",
+    "path": "/storage/buckets/:slug/objects/*",
+    "guard": "adminOnly",
+    "handler": "bucketObjectRaw"
+  },
+  {
+    "method": "DELETE",
+    "path": "/storage/buckets/:slug/objects/*",
+    "guard": "adminOnly",
+    "handler": "removeBucketObject"
+  },
+  {
+    "method": "POST",
+    "path": "/storage/buckets/:slug/copy",
+    "guard": "adminOnly",
+    "handler": "copyBucketObject"
+  },
+  {
+    "method": "POST",
+    "path": "/storage/buckets/:slug/move",
+    "guard": "adminOnly",
+    "handler": "moveBucketObject"
+  },
+  {
+    "method": "GET",
+    "path": "/storage/buckets/:slug/cors",
+    "guard": "adminOnly",
+    "handler": "getBucketCors"
+  },
+  {
+    "method": "PUT",
+    "path": "/storage/buckets/:slug/cors",
+    "guard": "adminOnly",
+    "handler": "upsertBucketCors"
+  },
+  {
+    "method": "DELETE",
+    "path": "/storage/buckets/:slug/cors",
+    "guard": "adminOnly",
+    "handler": "deleteBucketCors"
+  },
+  {
+    "method": "GET",
+    "path": "/storage/buckets/:slug/tokens",
+    "guard": "adminOnly",
+    "handler": "listBucketTokens"
+  },
+  {
+    "method": "POST",
+    "path": "/storage/buckets/:slug/tokens",
+    "guard": "adminOnly",
+    "handler": "createBucketToken"
+  },
+  {
+    "method": "DELETE",
+    "path": "/storage/buckets/:slug/tokens/:id",
+    "guard": "adminOnly",
+    "handler": "revokeBucketToken"
+  },
+  {
+    "method": "GET",
+    "path": "/storage/buckets/:slug/webhooks",
+    "guard": "adminOnly",
+    "handler": "listBucketWebhooks"
+  },
+  {
+    "method": "POST",
+    "path": "/storage/buckets/:slug/webhooks",
+    "guard": "adminOnly",
+    "handler": "addBucketWebhook"
+  },
+  {
+    "method": "DELETE",
+    "path": "/storage/buckets/:slug/webhooks/:id",
+    "guard": "adminOnly",
+    "handler": "removeBucketWebhook"
+  },
+  {
+    "method": "GET",
+    "path": "/storage/s3",
+    "guard": "adminOnly",
+    "handler": "connection"
+  },
+  {
+    "method": "GET",
+    "path": "/storage/s3/keys",
+    "guard": "adminOnly",
+    "handler": "listKeys"
+  },
+  {
+    "method": "POST",
+    "path": "/storage/s3/keys",
+    "guard": "adminOnly",
+    "handler": "createKey"
+  },
+  {
+    "method": "DELETE",
+    "path": "/storage/s3/keys/:id",
+    "guard": "adminOnly",
+    "handler": "revokeKey"
+  },
+  {
+    "method": "GET",
+    "path": "/users",
+    "guard": "adminOnly",
+    "handler": "users"
+  },
+  {
+    "method": "POST",
+    "path": "/users",
+    "guard": "adminOnly",
+    "handler": "createUser"
+  },
+  {
+    "method": "GET",
+    "path": "/users/sessions",
+    "guard": "adminOnly",
+    "handler": "sessions"
+  },
+  {
+    "method": "GET",
+    "path": "/users/:id",
+    "guard": "adminOnly",
+    "handler": "user"
+  },
+  {
+    "method": "PATCH",
+    "path": "/users/:id",
+    "guard": "adminOnly",
+    "handler": "updateUser"
+  },
+  {
+    "method": "POST",
+    "path": "/users/:id/email-verification",
+    "guard": "adminOnly",
+    "handler": "setEmailVerified"
+  },
+  {
+    "method": "POST",
+    "path": "/users/:id/reset-password",
+    "guard": "adminOnly",
+    "handler": "resetPassword"
+  },
+  {
+    "method": "POST",
+    "path": "/users/:id/revoke-sessions",
+    "guard": "adminOnly",
+    "handler": "revokeSessions"
+  },
+  {
+    "method": "DELETE",
+    "path": "/users/:id/sessions/:sessionId",
+    "guard": "adminOnly",
+    "handler": "revokeSession"
+  },
+  {
+    "method": "POST",
+    "path": "/users/:id/impersonate",
+    "guard": "adminOnly",
+    "handler": "impersonate"
+  },
+  {
+    "method": "POST",
+    "path": "/users/:id/impersonate/stop",
+    "guard": "adminOnly",
+    "handler": "stopImpersonating"
+  },
+  {
+    "method": "POST",
+    "path": "/users/:id/promote",
+    "guard": "adminOnly",
+    "handler": "promote"
+  },
+  {
+    "method": "POST",
+    "path": "/users/:id/demote",
+    "guard": "adminOnly",
+    "handler": "demote"
+  },
+  {
+    "method": "DELETE",
+    "path": "/users/:id",
+    "guard": "adminOnly",
+    "handler": "deleteUser"
+  },
+  {
+    "method": "GET",
+    "path": "/auth/signing-keys",
+    "guard": "adminOnly",
+    "handler": "signingKeys"
+  },
+  {
+    "method": "POST",
+    "path": "/auth/signing-keys",
+    "guard": "adminOnly",
+    "handler": "createSigningKey"
+  },
+  {
+    "method": "POST",
+    "path": "/auth/signing-keys/:id/rotate",
+    "guard": "adminOnly",
+    "handler": "rotateSigningKey"
+  },
+  {
+    "method": "POST",
+    "path": "/auth/signing-keys/:id/revoke",
+    "guard": "adminOnly",
+    "handler": "revokeSigningKey"
+  },
+  {
+    "method": "DELETE",
+    "path": "/auth/signing-keys/:id",
+    "guard": "adminOnly",
+    "handler": "deleteSigningKey"
+  },
+  {
+    "method": "GET",
+    "path": "/network-restrictions",
+    "guard": "adminOnly",
+    "handler": "networkRestrictions"
+  },
+  {
+    "method": "PUT",
+    "path": "/network-restrictions",
+    "guard": "adminOnly",
+    "handler": "updateNetworkRestrictions"
+  },
+  {
+    "method": "GET",
+    "path": "/ssl-enforcement",
+    "guard": "adminOnly",
+    "handler": "sslEnforcement"
+  },
+  {
+    "method": "PUT",
+    "path": "/ssl-enforcement",
+    "guard": "adminOnly",
+    "handler": "updateSslEnforcement"
+  },
+  {
+    "method": "GET",
+    "path": "/log-drains",
+    "guard": "adminOnly",
+    "handler": "logDrains"
+  },
+  {
+    "method": "POST",
+    "path": "/log-drains",
+    "guard": "adminOnly",
+    "handler": "createLogDrain"
+  },
+  {
+    "method": "PATCH",
+    "path": "/log-drains/:id",
+    "guard": "adminOnly",
+    "handler": "updateLogDrain"
+  },
+  {
+    "method": "DELETE",
+    "path": "/log-drains/:id",
+    "guard": "adminOnly",
+    "handler": "deleteLogDrain"
+  },
+  {
+    "method": "POST",
+    "path": "/log-drains/:id/test",
+    "guard": "adminOnly",
+    "handler": "testLogDrain"
+  },
+  {
+    "method": "GET",
+    "path": "/queues",
+    "guard": "adminOnly",
+    "handler": "listQueues"
+  },
+  {
+    "method": "POST",
+    "path": "/queues/enable",
+    "guard": "adminOnly",
+    "handler": "enableQueues"
+  },
+  {
+    "method": "PUT",
+    "path": "/queues/expose",
+    "guard": "adminOnly",
+    "handler": "exposeQueues"
+  },
+  {
+    "method": "POST",
+    "path": "/queues",
+    "guard": "adminOnly",
+    "handler": "createQueue"
+  },
+  {
+    "method": "DELETE",
+    "path": "/queues/:name",
+    "guard": "adminOnly",
+    "handler": "dropQueue"
+  },
+  {
+    "method": "POST",
+    "path": "/queues/:name/purge",
+    "guard": "adminOnly",
+    "handler": "purgeQueue"
+  },
+  {
+    "method": "GET",
+    "path": "/queues/:name/messages",
+    "guard": "adminOnly",
+    "handler": "browseMessages"
+  },
+  {
+    "method": "POST",
+    "path": "/queues/:name/messages",
+    "guard": "adminOnly",
+    "handler": "sendMessage"
+  },
+  {
+    "method": "POST",
+    "path": "/queues/:name/read",
+    "guard": "adminOnly",
+    "handler": "readMessages"
+  },
+  {
+    "method": "POST",
+    "path": "/queues/:name/messages/:msgId/archive",
+    "guard": "adminOnly",
+    "handler": "archiveMessage"
+  },
+  {
+    "method": "DELETE",
+    "path": "/queues/:name/messages/:msgId",
+    "guard": "adminOnly",
+    "handler": "deleteMessage"
+  },
+  {
+    "method": "GET",
+    "path": "/queues/:name/permissions",
+    "guard": "adminOnly",
+    "handler": "queuePermissions"
+  },
+  {
+    "method": "PUT",
+    "path": "/queues/:name/permissions",
+    "guard": "adminOnly",
+    "handler": "setQueuePermissions"
+  },
+  {
+    "method": "GET",
+    "path": "/vault",
+    "guard": "adminOnly",
+    "handler": "listSecrets"
+  },
+  {
+    "method": "POST",
+    "path": "/vault/enable",
+    "guard": "adminOnly",
+    "handler": "enableVault"
+  },
+  {
+    "method": "POST",
+    "path": "/vault/secrets",
+    "guard": "adminOnly",
+    "handler": "createSecret"
+  },
+  {
+    "method": "GET",
+    "path": "/vault/secrets/:id/reveal",
+    "guard": "adminOnly",
+    "handler": "revealSecret"
+  },
+  {
+    "method": "PATCH",
+    "path": "/vault/secrets/:id",
+    "guard": "adminOnly",
+    "handler": "updateSecret"
+  },
+  {
+    "method": "DELETE",
+    "path": "/vault/secrets/:id",
+    "guard": "adminOnly",
+    "handler": "deleteSecret"
+  },
+  {
+    "method": "GET",
+    "path": "/wrappers",
+    "guard": "adminOnly",
+    "handler": "listWrappers"
+  },
+  {
+    "method": "POST",
+    "path": "/wrappers/:wrapper/enable",
+    "guard": "adminOnly",
+    "handler": "enableWrapper"
+  },
+  {
+    "method": "POST",
+    "path": "/wrappers/servers",
+    "guard": "adminOnly",
+    "handler": "createForeignServer"
+  },
+  {
+    "method": "PUT",
+    "path": "/wrappers/servers/:name/credentials",
+    "guard": "adminOnly",
+    "handler": "setForeignServerCredentials"
+  },
+  {
+    "method": "POST",
+    "path": "/wrappers/servers/:name/import",
+    "guard": "adminOnly",
+    "handler": "importForeignSchema"
+  },
+  {
+    "method": "DELETE",
+    "path": "/wrappers/servers/:name",
+    "guard": "adminOnly",
+    "handler": "dropForeignServer"
+  },
+  {
+    "method": "POST",
+    "path": "/wrappers/tables",
+    "guard": "adminOnly",
+    "handler": "createForeignTable"
+  },
+  {
+    "method": "DELETE",
+    "path": "/wrappers/tables/:schema/:name",
+    "guard": "adminOnly",
+    "handler": "dropForeignTable"
+  },
+  {
+    "method": "GET",
+    "path": "/content",
+    "guard": "adminOnly",
+    "handler": "listContent"
+  },
+  {
+    "method": "GET",
+    "path": "/content/:id",
+    "guard": "adminOnly",
+    "handler": "getContent"
+  },
+  {
+    "method": "POST",
+    "path": "/content",
+    "guard": "adminOnly",
+    "handler": "createContent"
+  },
+  {
+    "method": "PATCH",
+    "path": "/content/:id",
+    "guard": "adminOnly",
+    "handler": "updateContent"
+  },
+  {
+    "method": "DELETE",
+    "path": "/content/:id",
+    "guard": "adminOnly",
+    "handler": "deleteContent"
+  },
+  {
+    "method": "GET",
+    "path": "/content-folders",
+    "guard": "adminOnly",
+    "handler": "listFolders"
+  },
+  {
+    "method": "POST",
+    "path": "/content-folders",
+    "guard": "adminOnly",
+    "handler": "createFolder"
+  },
+  {
+    "method": "PATCH",
+    "path": "/content-folders/:id",
+    "guard": "adminOnly",
+    "handler": "renameFolder"
+  },
+  {
+    "method": "DELETE",
+    "path": "/content-folders/:id",
+    "guard": "adminOnly",
+    "handler": "deleteFolder"
+  }
+]

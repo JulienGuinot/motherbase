@@ -1,0 +1,117 @@
+---
+title: "Code Conventions"
+description: "Folder and naming conventions on the server and in Studio, and the patterns worth following when adding code."
+order: 4
+---
+
+## Server folders
+
+`apps/server` is organized by role, not by feature:
+
+| Folder | Contains |
+|---|---|
+| `controllers/` | `*.controller.ts` — routes, auto-loaded by `awilix-express` |
+| `services/` | Business logic, registered in `services/index.ts` |
+| `middlewares/` | Express middleware |
+| `validators/` | `express-validator` chains |
+| `schemas/` | Zod schemas |
+| `models/` | Prisma client and shared in-memory models |
+| `helpers/` | Stateless utilities |
+| `lib/` | Cross-cutting infrastructure (RLS pool, log buffer, telemetry, process safety) |
+| `exceptions/` | Error classes |
+| `config/` | Environment, settings registry, OpenAPI, integrations catalogue |
+| `context/` | DI container typing |
+| `console/` | The Platform Console, mirroring the same structure |
+
+### Adding a route
+
+Create `controllers/<name>.controller.ts` — nothing else. `loadControllers('controllers/*.ts')` mounts it. There is no central router to edit.
+
+```ts
+@route('/api/admin')
+export default class ThingController {
+  constructor(private di: IContextContainer) {}
+
+  @GET()
+  @route('/things')
+  @before(adminOnly)
+  async list(req: Request, res: Response, next: NextFunction) {
+    try {
+      return apiResponse.successResponseWithData(res, 'OK', await this.di.ThingService.list());
+    } catch (error: unknown) {
+      return next(error);
+    }
+  }
+}
+```
+
+Conventions visible in every controller:
+
+- `@before(adminOnly)` for admin routes, `authMiddleware` / `optionalAuthMiddleware` otherwise.
+- Always `try { … } catch (error: unknown) { return next(error) }` — never format an error inline. The single error handler owns the envelope and production masking.
+- Respond through `helpers/api-response.helper.ts`, never `res.json` directly.
+
+### Adding a service
+
+Write the class, extend `BaseContext`, then register it in `services/index.ts` **and** add it to `IServiceContainer`. Dependencies are read from `this.di`.
+
+Awilix runs in PROXY mode, so a constructor parameter with a default value silently receives the cradle instead — read `process.env` in the body rather than defaulting a parameter (see the comment in `lib/rls-pool.ts`).
+
+### Adding a setting
+
+Add a `GroupDef` in `config/settings/{auth,messaging,platform}.groups.ts` and register it in `config/settings/index.ts`. Field metadata drives the console UI, the Zod schema drives validation, `envFallback()` drives the pre-database default. Secrets need `secret: true` (or `secretKeys` for JSON fields).
+
+## Studio folders
+
+Feature-first, with a fixed shape inside each feature:
+
+```text
+app/                    Next App Router route files — thin, one re-export each
+src/features/<name>/{api,components,hooks,lib,pages,types.ts}
+src/shell/              layouts and guards
+src/shared/             cross-feature ui, lib, types
+src/mocks/              MSW handlers and fixtures
+```
+
+Route components live in `src/features/<name>/pages/`. The file under `app/` is a
+one-line re-export, so a route never accumulates logic of its own:
+
+```tsx
+// app/p/[id]/tables/page.tsx
+'use client';
+
+export { default } from '@/features/tables/pages/Tables';
+```
+
+API calls belong in `api/<name>.api.ts` as a single exported object of thin functions.
+Screens do not call `fetch` directly.
+
+## Linting
+
+Flat ESLint config per workspace, run through `npm run lint` at the root (Turborepo fans it out to all nine workspaces). CI runs it before the build.
+
+| Workspace | Config |
+|---|---|
+| `apps/server` | `eslint.config.mjs` — TypeScript, Node globals |
+| `apps/studio` | `eslint.config.js` — TypeScript + React |
+| `packages/{client,ssr,ai,contracts}` | `eslint.config.mjs` — TypeScript |
+| `packages/cli` | `eslint.config.mjs` — plain CommonJS JavaScript |
+
+## Security patterns to preserve
+
+These are load-bearing, not stylistic:
+
+| Pattern | Where |
+|---|---|
+| Constant-time comparison for any secret | `lib/safe-equal.ts` |
+| Outbound requests on operator-supplied URLs go through `OutboundHttpClient` | `services/http/outbound-http-client.service.ts` |
+| Data-plane queries run through `RlsPool`, never Prisma | `lib/rls-pool.ts` |
+| Admin payloads pass through `maskRow` | `constants/admin.constants.ts` |
+| Audit detail passes through `sanitizeAuditDetail` | `console/services/audit.service.ts` |
+| New proxied admin surfaces get an explicit capability | `console/routes/proxy.routes.ts` |
+
+The last one matters most when adding endpoints: the capability map fails closed, but an unclassified route lands on `settings.write` — decide deliberately rather than inheriting it.
+
+## Documentation
+
+Deep dives live in `docs/` in the backend repo; the site you are reading is `motherbase-web`, with one MDX file per page under `content/docs/<section>/`. Frontmatter is `title`, `description` and `order`; navigation is derived from those, so adding a page is enough to make it appear.

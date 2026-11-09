@@ -1,0 +1,169 @@
+---
+title: "Updates"
+description: "Update the Platform Console, project stacks, images, and migrations without losing project data."
+order: 5
+---
+
+This page is the procedure. What each script does step by step, and the bundle install's
+checksum handling, is in [Upgrades](/docs/self-hosting/upgrades/).
+
+Motherbase has two update paths:
+
+1. **Platform update**: update the repository, rebuild shared images, and restart Traefik plus the Platform Console.
+2. **Project update**: recreate one project stack from its existing `.env.prod` and the configured images.
+
+Project Postgres and MinIO data live in Docker volumes. Normal updates preserve those volumes.
+
+## Before updating
+
+Run updates from the VPS that owns Docker and the Motherbase installation. For a one-line install:
+
+```bash
+cd ~/motherbase
+```
+
+For a source checkout, change to that checkout and check `git status --short` before updating.
+
+Then take the project backup that matches your risk level: use Project Studio database backups, copy offsite backup artifacts, or snapshot the VPS before a major upgrade.
+
+<Warning>
+Do not use `./setup.sh --reset`, `deploy/reset.sh`, or `docker compose down -v` as an update step. Those commands are for fresh resets and can delete project data.
+</Warning>
+
+## Update the platform
+
+One script, VPS or local:
+
+```bash
+./deploy/update.sh              # pull the current branch, then redeploy
+./deploy/update.sh --no-pull    # redeploy the working tree as it is
+```
+
+It pulls, then runs `./setup.sh --yes`. It refuses to start when `.env` is missing
+or the repo has uncommitted changes — the two states where an update turns into a
+reinstall with fresh secrets that no longer open the existing database volume. On an
+install made from the published bundle (no `.git`), "pull" means downloading the bundle of
+the latest release and checking its SHA-256 before unpacking it; see [Upgrades](/docs/self-hosting/upgrades/#upgrade-the-platform).
+
+By hand, that is:
+
+```bash
+git pull
+./setup.sh --yes           # add --prod on a VPS install
+```
+
+When an existing install is detected, `setup.sh` keeps the current environment files and redeploys the stack. It pulls the prebuilt images for the commit (or rebuilds them when none are published), recreates every running project's API, then recreates Traefik and the Platform Console containers.
+
+This does not create, delete, or reset project stacks.
+
+## Update projects
+
+After the platform images are current, update each project that should move to the new runtime.
+
+From the Platform Console, open the project runtime controls and click **Update**.
+
+From the CLI:
+
+```bash
+motherbase login --url https://console.example.com
+motherbase projects update todo
+```
+
+`projects update` runs `docker compose pull` and then `docker compose up -d` for that project, using the project file under `/srv/projects/<name>/.env.prod`.
+
+Use **Rebuild** or `motherbase projects rebuild <id>` when the project should rebuild from the local source/Compose build context instead of only pulling configured images.
+
+```bash
+motherbase projects rebuild todo
+```
+
+## Database migrations
+
+Runtime updates do not replace your application schema. Apply project schema changes with the migration workflow:
+
+```bash
+motherbase migrations list
+motherbase migrations diff
+motherbase migrations apply <id>
+```
+
+Motherbase's own schema (`auth`, `storage`, `platform`) is migrated by each project's API
+container when it starts, so recreating it on update is the whole procedure. There is no
+Prisma command to run on the host.
+
+### Bucket token rotation
+
+The secure bucket-token migration keeps legacy token records so operators can identify and
+rotate them, but their stored bcrypt hashes cannot be converted to the indexed
+`<lookupId>.<secret>` format. The token-listing API marks these records with
+`needsRotation: true`.
+
+Create replacement tokens, update the clients that use them, then revoke the legacy records.
+
+<Warning>
+Legacy bucket tokens are rejected on purpose. There is no linear-scan compatibility fallback,
+so a client still holding one stops working until it is issued a new token.
+</Warning>
+
+## Configure update checks
+
+The Platform Console can show a read-only release status card when `UPDATE_CHECK_URL` is configured in `deploy/console/.env`.
+
+```env
+UPDATE_CHECK_URL=https://releases.example.com/motherbase.json
+```
+
+The URL may return any of these JSON shapes:
+
+```json
+{ "version": "1.2.3" }
+```
+
+```json
+{ "tags": ["1.1.0", "1.2.3", "latest"] }
+```
+
+```json
+{ "results": [{ "name": "1.2.3" }] }
+```
+
+Only semver tags are considered. Tags such as `latest` are ignored, and the highest semver is shown as the newest version.
+
+Restart the Console after changing the env file:
+
+```bash
+docker compose -f deploy/console/docker-compose.yml --env-file deploy/console/.env up -d --force-recreate
+```
+
+<Note>
+The Console update card checks versions only. Applying a platform update is still `./deploy/update.sh` on the host.
+</Note>
+
+## Rollback
+
+If a project update fails, inspect the project logs first:
+
+```bash
+motherbase projects logs todo
+```
+
+Then either rebuild the project from the local source or pin `API_IMAGE` to a known-good image and run the project update again.
+
+```bash
+motherbase projects rebuild todo
+motherbase projects update todo
+```
+
+For platform rollback, check out the previous repository revision and redeploy without
+pulling it forward again:
+
+```bash
+git checkout <previous-sha>
+./deploy/update.sh --no-pull
+```
+
+<Warning>
+A rollback changes code, not data. Platform migrations already applied by the newer API stay
+applied, and the older API starts against that schema. Take the backup *before* the upgrade
+(see [Before updating](#before-updating)): restoring it is the only way back to the old schema.
+</Warning>

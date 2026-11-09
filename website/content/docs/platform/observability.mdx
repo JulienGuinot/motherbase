@@ -1,0 +1,153 @@
+---
+title: "Observability"
+description: "Logs, request metrics, latency time series, the security/performance advisor, the job ledger and its alerts."
+order: 23
+---
+
+Everything here is **in-process and ephemeral by design**: no external collector, no persistence, history resets on restart. That is the trade for zero operational dependencies on a single-VPS deployment.
+
+<Note>
+The log buffer, request meter, metrics series and shield telemetry are all single-instance structures — as is rate limiting and realtime presence. Scheduled work is not: the realtime outbox and the bucket-deletion queue take database leases, so two processes never run the same job twice.
+
+One API container per project is the supported topology, and the Shield report now says so when it is not: every connection is tagged `motherbase-api:<instanceId>`, `runtime.instances` counts them, and more than one raises a warning naming the multiplier. See `apps/server/lib/instance.ts` and [known issues](/docs/contributing/known-issues/).
+</Note>
+
+## Logs
+
+`lib/log-buffer.ts` is a fixed-capacity ring buffer (`CONSOLE_LOG_BUFFER_SIZE`, default 500) that emits an `entry` event so Studio can stream new lines live.
+
+```ts
+interface LogEntry {
+  id: number; at: string; level: 'info' | 'warn' | 'error'
+  source: string        // the subsystem that wrote it: http, sql, job, edge, …
+  service: LogService   // the fixed Logs Explorer taxonomy below
+  message: string
+  // Structured detail, all optional; the request logger fills them all in
+  method?; path?; status?; durationMs?; ip?; userAgent?; requestId?; userId?
+}
+```
+
+`service` is the taxonomy the Logs screen, the CLI and the MCP `get_logs` tool filter on, named after Supabase's:
+`api`, `rest`, `postgres`, `pooler`, `auth`, `storage`, `realtime`, `edge-function`, `cron`, `platform`
+(`lib/log-services.ts`). A request line is filed under the service its path reached (`/rest/v1` → `rest`,
+`/api/auth` → `auth`, `/api/storage` and `/api/files` → `storage`, `/realtime/v1` → `realtime`, `/api/edge` →
+`edge-function`), and under `api` when it reached none of them. Any other line follows its `source` (`sql` and `schema`
+→ `postgres`, `job` → `cron`, `edge` → `edge-function`, …), and what matches nothing is `platform`.
+
+Who writes to it:
+
+| Source | Writer |
+|---|---|
+| `http` | `middlewares/request-logger.ts`, one line per finished request |
+| `sql` | `SqlService.audit` — every statement run from the SQL editor |
+| `edge`, `job`, `webhook`, `auth`, `storage`, `shield`, `realtime` | `lib/activity-log.ts` → `logActivity(level, source, message)` |
+| `events` | The event dispatcher's own failures |
+
+The request logger deliberately **skips** `/api/admin/*` and `/api/health-check`, so the Logs screen shows real external traffic instead of your own Studio browsing; scanner probes (`/.env`, `/wp-login.php`, `POST /`…) are answered with a bare `404` before the logger runs at all (see [Request lifecycle](/docs/architecture/request-lifecycle/)). Background work has no request line at all, which is exactly why `logActivity` exists: without it you could not tell "the backup never ran" from "the backup ran fine".
+
+`logActivity` truncates at 2000 characters and never throws — a broken log write must not fail the operation it describes.
+
+## Log drains
+
+A log drain copies the project's log stream — every line the Logs screen shows — to a destination that keeps it.
+Manage them under **Project Settings → Log drains**, or through the admin API:
+
+```text
+GET    /api/admin/log-drains
+POST   /api/admin/log-drains          { name, type, config, enabled? }
+PATCH  /api/admin/log-drains/:id      { name?, config?, enabled? }
+DELETE /api/admin/log-drains/:id
+POST   /api/admin/log-drains/:id/test   sends one test line now
+```
+
+| `type` | `config` | What is sent |
+|---|---|---|
+| `webhook` | `url` (http or https), `headers` | `POST` of the batch as a JSON array of log entries |
+| `datadog` | `apiKey`, `site` (`datadoghq.com`, `us3.datadoghq.com`, `us5.datadoghq.com`, `datadoghq.eu`, `ap1.datadoghq.com`, `ddog-gov.com`; default `datadoghq.com`), `service` (default `motherbase`) | `POST https://http-intake.logs.<site>/api/v2/logs` with `DD-API-KEY`, one record per line (`ddsource: motherbase`, `status` = level) |
+| `loki` | `url`, `username`, `password`, `headers`, `labels` | `POST <url>/loki/api/v1/push`, Basic auth when a username is set; one stream per label set, with `job: motherbase`, your `labels`, `level` and `source` as labels and the full entry as the line |
+
+`apiKey`, `password` and every header value are credentials: the API never returns them, and an edit that leaves one
+masked keeps the stored value. `LogDrainService` (see [Background jobs](/docs/architecture/background-jobs/)) flushes
+every 2 s in batches of 500, with a 10 s timeout per delivery. Each drain has its own queue of at most 10,000 lines and
+its own retries: a failing batch is retried as-is (lines are never reordered) with exponential backoff from 2 s up to
+5 minutes, jittered, and dropped after 6 attempts. The dropped count is the drain's delivery status in Studio.
+
+## Request meter
+
+`services/admin/request-metrics.service.ts` keeps a cumulative total plus a rolling 60 s window, served at `GET /api/admin/metrics/requests` (in memory, per API process, reset on restart):
+
+```ts
+requestMeter.snapshot()  // { total, perMinute, windowSec }
+```
+
+It counts everything except health probes, and it runs **before** the Studio-noise skip, so admin API calls are still metered. It is a module-level singleton because the middleware runs outside the Awilix request scope.
+
+## Shield telemetry
+
+`lib/shield-telemetry.ts` keeps the last 2000 traffic events and rate-limit hits, and derives:
+
+- **Per-route metrics** — `count`, `errors`, `slow` (> 1000 ms), `avgMs`, `p95Ms`.
+- **Rate-limit hits** — scope, bucket key, IP, user, method, path.
+- **Abuse candidates** — keys with the most requests/errors/rate-limit hits and their top path.
+
+Each event is classified by path into a source: `/api/auth` → `auth`, `/rest/v1` → `rest`, `/api/edge` → `edge`, `/api/files` → `files`, everything else `api`. For REST and edge paths the table (or function) name is extracted, and the HTTP method is mapped to `select` / `insert` / `update` / `delete`.
+
+## Metrics time series
+
+`services/admin/metrics.service.ts` samples every 10 s into a 360-sample ring (~1 hour):
+
+| Field | Meaning |
+|---|---|
+| `rps` | Requests per second over the trailing 60 s |
+| `p95` | p95 latency (ms) |
+| `errorRate` | Fraction of 4xx/5xx responses, 0–1 |
+| `memMb` | Resident set size |
+| `reqs` | Request count in the window |
+
+The sampler is idempotent and `unref`'d, so it never keeps the event loop alive on its own.
+
+## Advisor
+
+`services/admin/advisor.service.ts` runs catalogue queries against your database and returns findings with a `category` (`security` / `performance`) and `level` (`critical` / `warning` / `info`):
+
+| Finding | `id` | Category · level |
+|---|---|---|
+| Table is fully open over REST | `sec_rls_disabled` | security · critical |
+| Table has RLS on with no policy | `sec_no_policy` | security · info |
+| Policy depends on an unprotected table | `sec_policy_joins_unprotected` | security · critical |
+| Sensitive columns publicly readable | `sec_anon_read_sensitive` | security · critical |
+| Public read access | `sec_anon_read_open` | security · warning |
+| Unauthenticated writes allowed | `sec_anon_write` | security · critical |
+| Authenticated write is not row-scoped | `sec_auth_write_unscoped` | security · warning |
+| `SECURITY DEFINER` function callable by anon | `sec_definer_callable_by_anon` | security · critical |
+| Policy filters on an unindexed column | `perf_policy_unindexed_column` | performance · warning |
+| Table without primary key | `perf_no_pk` | performance · warning |
+| Foreign key without index | `perf_unindexed_fk` | performance · warning |
+| Unused index | `perf_unused_index` | performance · info |
+| Table needs vacuum | `perf_bloat` | performance · info |
+
+## Job ledger and alerts
+
+`services/admin/job-ledger.service.ts` records every background job run:
+
+```ts
+await jobLedger.record('backup', async () => { … })   // wraps and times the run
+await jobLedger.note('backup', 'failed', 'disk full') // record without wrapping
+```
+
+A `JobRun` is `{ id, job, startedAt, finishedAt, status: 'running'|'ok'|'failed', error }`.
+
+Alert rules (`DEFAULT_ALERT_RULES`) evaluate a snapshot of the ledger:
+
+| Alert kind | Default trigger |
+|---|---|
+| `consecutive_failures` | 3 failures in a row |
+| `dead_letter_depth` | 100 items stuck |
+| `backup_older_than_rpo` | Newest backup older than 26 h (a daily backup with 2 h slack); `0` disables |
+| `missed_window` | A job declared a `maxIntervalMs` and exceeded it |
+
+Alerts carry `level` (`critical` / `warning`), a human message, and a small machine-readable `detail` object — small on purpose, because it is embedded in webhook payloads. `prune(retentionDays)` trims the history.
+
+## Where to see it
+
+All of the above is exposed under `/api/admin/*` (see [Admin & HTTP API reference](/docs/reference/admin-api/)) and rendered in Studio's **Logs**, **Reports** and **Security** screens.

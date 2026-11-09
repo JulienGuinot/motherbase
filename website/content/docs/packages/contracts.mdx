@@ -1,0 +1,136 @@
+---
+title: "Shared Contracts"
+description: "HTTP, storage, and realtime contracts shared between the Motherbase server and TypeScript client."
+order: 5
+---
+
+`@motherbase/contracts` is a small TypeScript package with one source file: `packages/contracts/src/index.ts`. It owns route constants, path builders, payload interfaces, realtime protocol types, and lightweight runtime guards. It has no runtime dependency.
+
+## HTTP routes
+
+`HTTP_ROUTES` is an `as const` map:
+
+| Key | Value | Main consumers |
+|-----|-------|----------------|
+| `auth` | `/api/auth` | `apps/server/app.ts`, `apps/server/auth/routes.ts`, `apps/server/middlewares/captcha-guard.ts`, `packages/client/src/auth/`, `packages/client/src/http/` |
+| `authAdmin` | `/api/auth/admin` | `apps/server/auth/routes.ts`, `apps/server/controllers/auth-admin.controller.ts`, `packages/client/src/admin/` |
+| `authSignIn` | `/api/auth/sign-in/email` | `apps/server/config/openapi.ts` |
+| `authSession` | `/api/auth/get-session` | `apps/server/config/openapi.ts` |
+| `authSignOut` | `/api/auth/sign-out` | `apps/server/config/openapi.ts` |
+| `authSignUp` | `/api/auth/sign-up/email` | `apps/server/config/openapi.ts` |
+| `authRequestPasswordReset` | `/api/auth/email-otp/request-password-reset` | `apps/server/config/openapi.ts` |
+| `authResetPassword` | `/api/auth/email-otp/reset-password` | `apps/server/config/openapi.ts` |
+| `authSendOtp` | `/api/auth/email-otp/send-verification-otp` | `apps/server/config/openapi.ts` |
+| `authSignInEmailOtp` | `/api/auth/sign-in/email-otp` | `apps/server/config/openapi.ts` |
+| `authSignInSocial` | `/api/auth/sign-in/social` | `apps/server/config/openapi.ts`, `packages/client/src/auth/` |
+| `authUpdateUser` | `/api/auth/update-user` | — |
+| `authChangePassword` | `/api/auth/change-password` | — |
+| `authDeleteUser` | `/api/auth/delete-user` | — |
+| `authListAccounts` | `/api/auth/list-accounts` | — |
+| `authLinkSocial` | `/api/auth/link-social` | — |
+| `authUnlinkAccount` | `/api/auth/unlink-account` | — |
+| `authToken` | `/api/auth/token` | — |
+| `authSendPhoneOtp` | `/api/auth/phone-number/send-otp` | — |
+| `authVerifyPhoneOtp` | `/api/auth/phone-number/verify` | — |
+| `authSignInAnonymous` | `/api/auth/sign-in/anonymous` | — |
+| `authReauthenticate` | `/api/auth/reauthenticate` | — |
+| `authUpdateUserCredentials` | `/api/auth/update-user-credentials` | — |
+| `authExchangeCode` | `/api/auth/exchange-code` | — |
+| `files` | `/api/files` | `apps/server/controllers/file.controller.ts`, `apps/server/controllers/storage-bucket.controller.ts`, `apps/server/lib/route-manifest.ts`, `packages/client/src/storage/` |
+| `storage` | `/api/storage` | `apps/server/controllers/storage-public.controller.ts`, `apps/server/middlewares/bucketCors.middleware.ts` |
+| `storageV1` | `/storage/v1` | `apps/server/controllers/storage-render.controller.ts`, `apps/server/lib/storage-protocol-routes.ts`, `apps/server/middlewares/bucketCors.middleware.ts`, `apps/server/services/storage/image-render.service.ts`, `packages/client/src/storage/` |
+| `rest` | `/rest/v1` | `apps/server/controllers/rest-api.controller.ts`, `apps/server/lib/route-manifest.ts` |
+| `edge` | `/api/edge` | `apps/server/controllers/edge-invoke.controller.ts` |
+| `realtimeBroadcast` | `/realtime/v1/api/broadcast` | `apps/server/controllers/realtime-broadcast.controller.ts` |
+
+Most auth keys name Better Auth endpoints. Since `@motherbase/client` 2.0, `client.auth` is Better Auth's own client
+and builds those paths itself, so the SDK imports only `auth`, `authAdmin` and `authSignInSocial` from here; the
+server's OpenAPI document (`config/openapi.ts`) is what reads the rest. Keys marked `—` are not imported anywhere
+outside the package.
+
+The server mounts its routes from the same map (`auth/routes.ts`, `app.ts`, the file, storage, REST, edge and realtime controllers, `lib/storage-protocol-routes.ts`), so route ownership does not drift from the client.
+
+## Path builders
+
+`contractPath` derives encoded paths from the constants:
+
+```ts
+contractPath.edge(name)
+contractPath.file(id)
+contractPath.file(id, 'raw')
+contractPath.file(id, 'url')
+contractPath.publicFile(bucket, path)
+contractPath.rest(model)
+contractPath.realtime(model, 'created')
+```
+
+| Builder | Shape | Consumers |
+|---------|-------|-----------|
+| `edge(name)` | `/api/edge/:encodedName` | `packages/client/src/functions/` |
+| `file(id, action?)` | `/api/files/:encodedId` with optional `/raw` or `/url` | `packages/client/src/storage/` |
+| `publicFile(bucket, path)` | `/api/storage/:encodedBucket/files/:encodedPath` | `packages/client/src/storage/` |
+| `rest(model)` | `/rest/v1/:encodedModel` | `packages/client/src/index.ts`, `packages/client/src/postgrest/`, and `packages/client/src/realtime/` |
+| `realtime(model, mutation)` | `lowercaseModel:mutation` | `packages/client/src/realtime/` and `apps/server/services/realtime/realtime-broadcast.service.ts` |
+
+`RealtimeMutation` is the union `'created' | 'updated' | 'deleted'` used by `contractPath.realtime`.
+
+## HTTP and storage payload contracts
+
+| Export | Shape | Consumers |
+|--------|-------|-----------|
+| `AuthUserContract` | Required `id` and `email` plus arbitrary fields | Base type for `AuthSessionContract`; no external source import |
+| `AuthSessionContract` | `token` and `user` | Public package contract; no external source import in this revision |
+| `FileContract` | Required `id` plus arbitrary fields | Generic constraint for uploads |
+| `StorageUploadContract<TFile>` | `{ file: TFile, url: string }` | `apps/server/controllers/file.controller.ts` and `packages/client/src/types.ts` |
+| `StorageRemoveContract` | `{ deleted: true }` | `apps/server/controllers/file.controller.ts`, `apps/server/services/storage/storage.service.ts`, and `packages/client/src/types.ts` |
+| `ApiEnvelopeContract<T>` | `status` is `0` or `1`, `message`, optional `data` | Public envelope contract; the client keeps its parallel `ApiEnvelope` in `packages/client/src/types.ts` |
+
+`StorageUploadContract` defaults its generic to `FileContract`. The client specializes it with `FileObject` and re-exports the alias as `StorageUploadResponse`.
+
+## Runtime guards
+
+`isApiEnvelope(value)` returns true only for a non-null object whose `status` is `0` or `1` and whose `message` is a string.
+
+`isStorageUpload(value)` returns true only for an object with `file.id` and `url` strings.
+
+The SDK/server contract integration test consumes both guards in `apps/server/tests/sdk-server-contract.integration.test.ts`. They are also available to external packages validating unknown JSON.
+
+## Legacy table realtime
+
+`REALTIME_SOCKET_EVENTS` defines:
+
+```ts
+{
+  subscribe: 'realtime:subscribe',
+  unsubscribe: 'realtime:unsubscribe',
+}
+```
+
+`normalizeRealtimeModel(model)` trims, lowercases, and accepts only a PostgreSQL-style identifier beginning with a letter or underscore and containing at most 63 letters, digits, or underscores. Invalid names return `null`.
+
+The client uses both exports in `packages/client/src/realtime/`. The server uses them in `apps/server/services/socket.service.ts` and validates models again in `apps/server/services/realtime/realtime-postgres.service.ts`.
+
+## Topic realtime protocol
+
+`REALTIME_TOPIC_EVENTS` defines `join: 'rt:join'`, `leave: 'rt:leave'`, and `message: 'rt:msg'`.
+
+| Export | Shape | Consumers |
+|--------|-------|-----------|
+| `RealtimeTopicMessageType` | `broadcast`, `presence`, `postgres_changes`, or `system` | `packages/client/src/realtime/` |
+| `RealtimePostgresChangeConfig` | Event, optional schema, table, optional filter | `packages/client/src/realtime/channel.ts` and `apps/server/services/realtime/realtime-postgres.service.ts` |
+| `RealtimeJoinConfig` | Optional broadcast, presence, and Postgres-change configuration | `packages/client/src/realtime/channel.ts`, `packages/client/src/realtime/index.ts`, and `apps/server/services/realtime/realtime-topic.service.ts` |
+| `RealtimeJoinAck` | `status` is `ok` or `error`, optional subscription ids and error | Client realtime module and server topic service |
+| `RealtimeTopicEnvelope` | Topic, message type, event, and unknown payload | `packages/client/src/realtime/channel.ts` and `packages/client/src/realtime/index.ts` |
+
+Server-side event consumers include `apps/server/services/realtime/realtime-topic.service.ts`, `apps/server/services/realtime/realtime-presence.service.ts`, `apps/server/services/realtime/realtime-postgres.service.ts`, and `apps/server/services/socket.service.ts`.
+
+`isValidRealtimeTopic(topic)` accepts strings of 1–255 printable ASCII characters and rejects control characters and newlines. `realtimeTopicRoom(topic)` prefixes a validated topic with `rt:` for its Socket.IO room. Both are used by the server topic/socket services; the broadcast controller also validates topics in `apps/server/controllers/realtime-broadcast.controller.ts`.
+
+<Note>
+`RealtimeTopicEnvelope.payload` is deliberately `unknown`. The client narrows it according to `type` before routing it to broadcast, presence, or Postgres-change callbacks.
+</Note>
+
+## Related
+
+- [Realtime](/docs/platform/realtime/) — channels, broadcast and presence built on these contracts.
+- [REST engine](/docs/architecture/rest-engine/) — the server side of the shared route paths.

@@ -1,0 +1,76 @@
+---
+title: "Audit Log"
+description: "What the Console records about operator actions, how entries are sanitized and retained, and where the file lives."
+order: 7
+---
+
+Every mutating Console action, plus every login attempt, is appended to a persistent audit log — deliberately isolated from Better Auth and from project data.
+
+File: `<PROJECTS_DIR>/console-audit.db` (SQLite, WAL, `busy_timeout = 5000`). Source: `apps/server/console/services/audit.service.ts`.
+
+## Entry shape
+
+```ts
+interface AuditEvent {
+  id: string          // uuid
+  at: string          // ISO timestamp
+  actorId: string
+  actorEmail: string
+  actorRole: 'owner'|'admin'|'developer'|'read_only'|'member'|'unknown'
+  ip: string
+  action: string      // e.g. "auth.login"
+  target: string      // e.g. "account:ops@example.com"
+  success: boolean
+  detail: Record<string, string|number|boolean|null|string[]>
+}
+```
+
+Table `audit_event` has an autoincrement `seq`, a unique `id`, and indexes on `at DESC`, `(actorId, seq DESC)` and `(action, seq DESC)`. Schema creation is idempotent, and the `ip` column is added by an in-place `ALTER TABLE` on databases created before it existed.
+
+## What is recorded
+
+- **Logins**, in every outcome: `authenticated`, `invalid_credentials`, `disabled`, `second_factor_required`, `authentication_error`.
+- **Mutations** through the platform, project-hosting (branches, custom hostnames, vanity subdomains), users, orgs
+  and proxy routers.
+
+Action names in use: `auth.login`, `account.password.change`, `platform.settings.update`, `project.create`,
+`project.delete`, `project.runtime.<action>`, `project.branch.*`, `project.domain.*`, `project.vanity.*`,
+`project.admin.<surface>.<method>` (a write through the [project proxy](/docs/console/proxy/)),
+`project.admin.users.impersonate.start` / `.stop`, `user.create`, `user.update`, `user.delete`,
+`user.sessions.revoke`, `organization.create`, `organization.update`, `organization.delete`,
+`organization.member.add`, `organization.member.remove`, `organization.ai.update`, `organization.ai.clear`, and
+`platform.mutation` / `user.mutation` / `organization.mutation` for a write no narrower name covers.
+
+`SAFE_METHODS` — `GET`, `HEAD`, `OPTIONS` — are **not** audited and only need read scope. The log is a record of change, not of browsing.
+
+A failure to write an audit entry never fails the operation it describes; it is reported into the Console log buffer with `source: 'audit'`.
+
+## Sanitization
+
+Two layers, because audit metadata is the classic place credentials leak into permanent storage.
+
+**Field caps** — `actorId` 128 chars, `actorEmail` 254, `action` 128, `target` 256, each falling back to `unknown`. Emails are lowercased and shape-checked before use.
+
+**`sanitizeAuditDetail`** — at most 50 keys, and it drops:
+
+| Rule | Dropped |
+|---|---|
+| Key matches `authorization\|cookie\|password\|secret\|token\|api.?key\|private.?key\|credential\|payload\|body` | The whole entry |
+| A string value that looks like a token (`bearer …`, or dotted base64url segments) | The value |
+| A string starting with `$2` (a bcrypt hash) | The value |
+
+Surviving strings are truncated to 256 characters. Numbers must be finite; booleans and `null` pass; arrays are filtered down to strings.
+
+`normalizeAuditIp` accepts only real IPs, unwraps IPv4-mapped IPv6 (`::ffff:203.0.113.5` → `203.0.113.5`), lowercases the result, and stores `unknown` for anything else — so a forged header cannot inject text into the log.
+
+## Retention
+
+Insert and trim run in one transaction: after each append, everything beyond `maxEntries` (newest first) is deleted. Default **10 000** entries, configurable with `CONSOLE_AUDIT_MAX_ENTRIES`, clamped to `[1, 1 000 000]`.
+
+Reads are capped too: default 100 rows per query, maximum 500 (`parseAuditLimit`).
+
+File permissions are restricted on creation **and re-applied after every append**, so a database recreated by an external process does not stay world-readable.
+
+## Reading it
+
+Exposed through `/api/platform` and gated by the `audit.read` capability — `owner` and `admin` only. See [users and roles](/docs/console/users-and-orgs/).

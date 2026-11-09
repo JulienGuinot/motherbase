@@ -1,0 +1,109 @@
+---
+title: "Git Migrations"
+description: "Connect a GitHub repository to a project so every push applies the new .sql migrations in it."
+order: 10
+---
+
+Connect a repository to a project and every push to the tracked branch applies the new `.sql`
+files in it. The migrations it creates are ordinary migration rows: they show up on
+**Database → Migrations** next to the ones authored in Studio, apply in the same transaction,
+and roll back the same way.
+
+<Note>
+The server takes SQL from a repository and nothing else. It does not clone, build or host
+application code.
+</Note>
+
+## One-time setup
+
+1. On GitHub: **Settings → Developer settings → OAuth Apps → New OAuth App**. Set the
+   *Authorization callback URL* to your Studio's callback page. Studio is served by the
+   Platform Console, so the origin is the Console's; the setup form in Studio prints the exact
+   URL:
+
+   ```text
+   https://console.<your-domain>/studio/git/callback
+   ```
+
+2. In Studio: **Database → Migrations → Set up GitHub**, and paste the client ID, the client
+   secret and that same callback URL. They are stored through the settings service, so the
+   secret is encrypted at rest — which requires `CONFIG_ENCRYPTION_KEY` to be set. Without it,
+   saving is refused with a message that says so.
+
+   The same three values can come from the environment instead:
+
+   ```env
+   GITHUB_OAUTH_CLIENT_ID=...
+   GITHUB_OAUTH_CLIENT_SECRET=...
+   GITHUB_OAUTH_CALLBACK_URL=https://console.<your-domain>/studio/git/callback
+   ```
+
+3. **Connect GitHub**, authorize, then **Choose a repository** and set the branch and the
+   directory holding the migrations.
+
+Connecting installs a push webhook on the repository, pointed at `/api/git/webhook` on the same
+origin as the callback URL. That URL has to be reachable from GitHub: on a machine GitHub
+cannot reach, the connection still works and **Deploy now** still deploys, but pushes will not.
+
+### Endpoints
+
+| Endpoint | What it does |
+|---|---|
+| `GET /api/admin/git/authorize` | The GitHub OAuth URL to start connecting |
+| `POST /api/admin/git/callback` | Finishes the OAuth return (`/studio/git/callback` posts the code here) |
+| `GET /api/admin/git/repos` | The repositories the connected account can link |
+| `POST /api/admin/git/link` / `DELETE /api/admin/git/link` | Link a repository (owner, repo, branch, migrations path) and install its push webhook, or unlink it |
+| `GET /api/admin/git/status` | The link and the last sync's status, message and SHA |
+| `POST /api/admin/git/sync` | Apply the branch's pending migrations now, without waiting for a push |
+| `POST /api/git/webhook` | GitHub's push delivery, verified by HMAC signature |
+
+Through the Console proxy, the whole `/git` surface needs `secrets.manage`: it manages an OAuth token and a webhook
+secret. The same card is shown on Database → Migrations and on Integrations.
+
+## The file convention
+
+- One migration is one `.sql` file directly inside the configured directory.
+- The file name without `.sql` is the migration's name **and its ordering key**. Use the usual
+  timestamp prefix: `20260816120000_add_orders.sql`.
+- Files are applied in plain lexicographic name order.
+- Everything after a `-- @down` line is the rollback SQL:
+
+  ```sql
+  CREATE TABLE orders (id uuid PRIMARY KEY);
+
+  -- @down
+  DROP TABLE orders;
+  ```
+
+  A file without the marker is forward-only. That is a fine choice; it simply cannot be rolled
+  back from the Migrations page.
+- Anything that is not a `.sql` file is ignored, so a `README.md` or a `_partials/` folder
+  alongside the migrations is harmless.
+
+## What a deploy does
+
+A file whose name already exists as a migration is skipped, so a deploy is idempotent: pushing
+twice does not apply anything twice, and re-running one after a failure resumes where it
+stopped.
+
+The run stops at the first file that fails. A later migration nearly always depends on an
+earlier one, so continuing would apply it to a schema that never got the earlier change. The
+Migrations page shows which file stopped the run and why; fix it in the repository and push
+again, or press **Deploy now**.
+
+<Warning>
+Editing a file that has already been applied does nothing. Migrations are matched by name and
+the applied SQL is already recorded on the migration row — write a new file instead.
+</Warning>
+
+## Security
+
+- The OAuth token and the webhook secret are AES-GCM ciphertext in `platform.git_repo_links`,
+  and the table is revoked from `anon`, `authenticated` and `service_role`.
+- Every operator-facing endpoint is `/api/admin/git/*` behind the admin guard, and the Console
+  maps the whole surface to the `secrets.manage` capability.
+- `/api/git/webhook` is the one route without a session, because GitHub has none. It is
+  authenticated by the `X-Hub-Signature-256` HMAC over the raw request body, checked before the
+  payload is parsed.
+- Disconnecting deletes the webhook and the stored token. Migrations already applied stay
+  applied.

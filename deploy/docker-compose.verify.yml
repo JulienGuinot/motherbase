@@ -1,0 +1,44 @@
+# Reuse production service definitions, with only isolated test resources.
+# No host ports, host mounts, external network or production credentials.
+services:
+  db:
+    extends:
+      file: docker-compose.prod.yml
+      service: db
+  minio:
+    extends:
+      file: docker-compose.prod.yml
+      service: minio
+    labels:
+      traefik.enable: 'false'
+  minio-init:
+    extends:
+      file: docker-compose.prod.yml
+      service: minio-init
+  edge-runtime:
+    extends:
+      file: docker-compose.prod.yml
+      service: edge-runtime
+  api:
+    extends:
+      file: docker-compose.prod.yml
+      service: api
+    labels:
+      traefik.enable: 'false'
+    environment:
+      RUNTIME_VERIFY_PROJECT: ${COMPOSE_PROJECT_NAME}
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+
+volumes:
+  db_data:
+  minio_data:
+  api_backups:
+  api_data:
+
+networks:
+  internal:
+  edge:
+  traefik_proxy:
+    internal: true

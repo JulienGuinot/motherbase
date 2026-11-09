@@ -1,0 +1,105 @@
+---
+title: "Platform Console Overview"
+description: "What the Console is, how it boots, how it authenticates operators, and where its state lives."
+order: 1
+---
+
+## Common tasks
+
+| To | Where | Guide |
+|---|---|---|
+| Create, start, stop or update a project | **Projects**, or `motherbase projects` | [Projects](/docs/console/projects/) |
+| Add a teammate and choose their role | **Team** (owner only) | [Users, Roles & Organizations](/docs/console/users-and-orgs/) |
+| Change a project's CPU, memory or disk quota | The project's resource limits | [Resource limits](/docs/console/projects/#resource-limits) |
+| Try a change on a copy of a project | **Branches** | [Preview Projects](/docs/console/preview-projects/) |
+| See who did what | Audit log | [Audit Log](/docs/console/audit-log/) |
+| Get alerted when a project is unhealthy | Monitoring | [Monitoring, Alerts & Diagnostics](/docs/console/monitoring/) |
+
+The rest of this page describes how the Console is built and configured.
+
+## How it is built
+
+The Platform Console is the second entrypoint of `apps/server`. It runs as its own process and container, serves the Studio bundle at `/studio`, and exposes `/api/platform/*` plus an authenticated proxy to every project.
+
+Source: `apps/server/console/**`. Bootstrap: `apps/server/console/server.ts` (`createConsoleApp()`).
+
+## Configuration
+
+`apps/server/console/config.ts` derives everything from the environment. `CONSOLE_MODE` (`dev` | `prod`) drives the defaults:
+
+| Key | Env | Default (dev → prod) |
+|---|---|---|
+| `mode` | `CONSOLE_MODE` | `prod` |
+| `scheme` | — | `http` → `https` |
+| `domainSuffix` | `PLATFORM_DOMAIN_SUFFIX` | `localhost` → *(empty)* |
+| `port` | `CONSOLE_PORT` | `5500` |
+| `jwtSecret` | `CONSOLE_JWT_SECRET` | `dev-console-secret` → **required** |
+| `adminEmail` | `CONSOLE_ADMIN_EMAIL` | `admin@example.com` |
+| `adminPasswordHash` | `CONSOLE_ADMIN_PASSWORD_HASH_B64` / `..._HASH` | — |
+| `adminPasswordTemporary` | `CONSOLE_ADMIN_PASSWORD_TEMPORARY` | `false` |
+| `projectsDir` | `PROJECTS_DIR` | `.dev-projects` → `/srv/projects` |
+| `apiImage` | `API_IMAGE` | `motherbase-api:1.0.0` |
+| `composeFile` | `COMPOSE_FILE` | `deploy/docker-compose.dev-multi.yml` → `deploy/docker-compose.prod.yml` |
+| `traefikNetwork` | `TRAEFIK_NETWORK` | `traefik_proxy` |
+| `certResolver` | `CERT_RESOLVER` | `letsencrypt` |
+| `updateCheckUrl` | `UPDATE_CHECK_URL` | *(empty = update checks off)* |
+| `features.billing` | `CONSOLE_BILLING_ENABLED` | `false` |
+
+Persisted overrides are merged at boot from `<projectsDir>/console-settings.json`, synchronously, so every service is constructed against the final values. Runtime edits go through `console/services/settings.service.ts` and mutate the shared config object live.
+
+<Warning>
+`assertConsoleSecret()` refuses to start in prod mode without a `CONSOLE_JWT_SECRET` of at least 32 characters. It runs at bootstrap rather than import time, so tests and tooling can import the config without serving traffic. The shipped compose files already pass `${CONSOLE_JWT_SECRET:?required}` — this closes the bare `node console/server.js` path.
+</Warning>
+
+### The base64 password hash
+
+A bcrypt hash contains `$`, which Docker Compose mangles through `${}` interpolation in both `--env-file` and `env_file:`. The hash is therefore transported base64-encoded as `CONSOLE_ADMIN_PASSWORD_HASH_B64`; the raw `CONSOLE_ADMIN_PASSWORD_HASH` remains as a fallback for non-Compose setups. A hash whose `$` got doubled by an escaping step is self-healed (`$$` → `$`) rather than failing login.
+
+## Authentication
+
+Console auth is Better Auth over its own SQLite store under `projectsDir` (`console/auth/instance.ts`), independent from any project's auth:
+
+- `migrateConsoleAuth()` ensures the schema exists (idempotent) before serving.
+- `createConsoleAuth()` builds the instance; the dev secret is padded to 32 chars deterministically, a no-op in prod where a real 32+ char secret is already required.
+- Trusted origins: `CONSOLE_BASE_URL`, the conventional `console.<domainSuffix>`, and anything in `CONSOLE_TRUSTED_ORIGINS` (comma-separated). This guards against proxies that rewrite `Host`.
+- The first `owner` is seeded from the env admin (`seedOwnerWithHash`) when the store is empty.
+
+### The login adapter
+
+`POST /api/platform/login` exists so the UI keeps one login endpoint. It pre-checks the account (exists, not `disabled` — a Console-only field Better Auth does not gate on), delegates to `auth.api.signInEmail`, and relays every `Set-Cookie`.
+
+Two-factor handling is deliberate: the bearer plugin's after-hook runs before the twoFactor plugin's, so `set-auth-token` can be present but already invalidated. The adapter trusts the authoritative body flag `twoFactorRedirect`, not the header, and treats a missing token as a second-factor challenge rather than leaking a tokenless success. The UI then posts the TOTP code to `/api/auth/two-factor/verify-totp`.
+
+Every login attempt — success, invalid credentials, disabled account, second-factor pending, or an authentication error — is written to the [audit log](/docs/console/audit-log/).
+
+## Middleware and limits
+
+| Concern | Detail |
+|---|---|
+| `trust proxy` | Opt-in via `TRUST_PROXY`, same reasoning as the project API |
+| Auth rate limit | `CONSOLE_RATE_LIMIT_WINDOW_MIN` (15) × `CONSOLE_RATE_LIMIT_AUTH_MAX` (20), `429` with a JSON body |
+| `requireSession` | Attaches the live identity and the caller's project list |
+| `requireRole(...)` | 401 without a session, 403 for a role mismatch (`console/middlewares.ts`) |
+| `requireProjectCapability` | Per-project capability checks (`console/auth/capabilities.ts`) |
+| `enforcePasswordRotation` | Forces a change when `mustChangePassword` is set |
+
+`SAFE_METHODS` (`GET`, `HEAD`, `OPTIONS`) skip auditing and only need read scope. `MIN_PASSWORD` is 8 anywhere the Console sets or changes a password.
+
+## Mounted surfaces
+
+| Mount | Router |
+|---|---|
+| `/api/auth/*` | Better Auth (before `express.json()`) |
+| `/api/platform/login` | Login adapter |
+| `/api/platform/users` | `routes/users.routes.ts` |
+| `/api/platform/orgs` | `routes/orgs.routes.ts` |
+| `/api/platform` | `routes/platform.routes.ts` — projects, metrics, settings, diagnostics, updates, audit |
+| `/api` | `routes/proxy.routes.ts` — [proxy](/docs/console/proxy/) to project APIs |
+| `/studio` | The Studio bundle, mounted at the Next `basePath`. Every non-API response carries `mb_product=console`, which is how the same build knows it is rendering the Platform Console rather than Project Studio |
+| `*` | Everything else, including the bare `/` and the legacy `/console`, 308-redirects under `/studio` |
+
+## Services constructed at boot
+
+`Registry`, `Orchestrator`, `DiagnosticsService`, `UpdateService`, `MetricsService`, `AlertsService` (started immediately), `OrgStore`, `AuditStore`, `UsersService`, `SettingsService`, `ProjectDefaultsStore`, and an `OrchestrationClient` pointed at `ORCHESTRATION_URL` (default `http://orchestrator:5501`) with `ORCHESTRATION_SECRET`.
+
+On first boot after upgrading a single-tenant install, `orgs.backfill()` moves existing users and projects into a default org so the org switcher always has something to show. If Docker is unavailable the project list comes back empty and assignment happens lazily on the next boot — the Console still starts.

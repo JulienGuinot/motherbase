@@ -1,0 +1,144 @@
+---
+title: "Platform & Project Screens"
+description: "Projects list, create, overview, connect, org settings, team, usage, billing, and the platform-level actions."
+order: 9
+---
+
+These are the screens served at the Console root (`/`) plus the project-level entry points. Source: `apps/studio/src/features/platform` and `features/projects`.
+
+## Platform screens
+
+| Route | Page | Notes |
+|---|---|---|
+| `/` | Projects | Project list for the active org |
+| `/new` | Create project | Organization, name, domains, CORS, image, cert resolver, resource limits, and optionally a Supabase import; provisioning progress is shown step by step |
+| `/team` | Team | Requires the `users.manage` capability (owner) |
+| `/usage` | Usage | CPU and memory of every project (`GET /platform/metrics`, every 5 s) and disk (`GET /platform/disk`: host filesystem and each project's volumes against its disk quota). CPU and memory alert thresholds, 85 % by default, are kept in this browser |
+| `/logs` | Platform logs | The Console's own log buffer merged with every running project's (`/projects/<name>/admin/logs`), fetched per project: a project that does not answer is reported as unreachable while the rest still streams |
+| `/billing` | Billing | Only when `CONSOLE_BILLING_ENABLED=true`. Explains how a self-hosted platform is billed (no metered billing), resource usage, and quotas as the cost lever |
+| `/settings` | Org settings | Tabs: **Organization** (members), **AI assistant** (the org's default key, inherited by projects without their own: `/platform/orgs/:id/ai`), **Server** (Console settings and the update check), **New-project defaults**, **Account** (password, two-factor, your sessions), **System health** (live containers and proxied requests), **Audit log**. Server and defaults need `users.manage`; the audit log needs `audit.read` |
+
+Billing is off by default on purpose: a self-hosted install has no metered vendor billing, so the tab would be a promise the product does not make. Operators reselling projects to clients turn it on.
+
+## Organizations
+
+`features/platform/api` → the Console org API:
+
+```text
+GET    /platform/orgs
+POST   /platform/orgs                      { name }
+PATCH  /platform/orgs/:id                  { name }
+DELETE /platform/orgs/:id
+GET    /platform/orgs/:id/ai               the org's default AI assistant config
+PUT    /platform/orgs/:id/ai               set it (org admin)
+DELETE /platform/orgs/:id/ai               clear it (org admin)
+GET    /platform/orgs/:id/members
+POST   /platform/orgs/:id/members          { userId, role }
+DELETE /platform/orgs/:id/members/:userId
+```
+
+`OrgLayout` provides the switcher; the active org scopes the project list. Model details: [users and organizations](/docs/console/users-and-orgs/).
+
+## Operator sessions
+
+```text
+GET  /auth/list-sessions
+POST /auth/revoke-session          { token }
+POST /auth/revoke-other-sessions
+```
+
+Your own Console sessions, revocable individually or all-but-current.
+
+## Project overview and connect
+
+`features/projects/api`:
+
+| Call | Endpoint |
+|---|---|
+| Connection info | `GET /admin/connect-info` |
+| Database connection | `GET /admin/database/connection` |
+| Storage connection | `GET /admin/storage/connection`: how to reach the project's object storage with a plain S3 client (aws-cli, boto3, rclone), with the S3 root key pair (`S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY`) |
+| API keys | `GET` / `POST /admin/api-keys`, `DELETE /admin/api-keys/:id` |
+| Health | `GET /health-check` |
+| Stats | `GET /admin/stats` |
+| Recent logs | `GET /admin/logs?limit=200` |
+
+**Connect** (`/p/:id/connect`) renders the URLs and keys an app needs — the values
+you pass to `createClient(url, key)` — with per-framework snippets and a
+**Generate types** action.
+
+It also carries a **Database connection** card, for the callers that do not go
+through the SDK: an ORM, a migration tool, psql, a BI client. Three modes (over an
+SSH tunnel, direct, and from another container on the project network), with the
+password masked behind a reveal. See
+[Connecting directly](/docs/platform/database/#connecting-directly).
+
+## Project Settings
+
+`/p/:id/settings` holds what spans the whole project. A setting that belongs to one product is on that product's
+page and only there, so no setting is editable in two places:
+
+| Panel | Holds |
+|---|---|
+| General | Appearance, operator, project identity, and the danger zone |
+| API keys | Publishable and secret project keys, and `api.keys` (enforcement) |
+| JWT keys | The keys access tokens are signed with |
+| Database access | Network restrictions and SSL enforcement |
+| Log drains | External destinations for the log stream |
+| Backend control | Restart and rebuild, the project shell, DNS checks |
+| Backups / restore | `backup.schedule` and restores |
+| Security | `server.cors`, `security.rateLimit`, `security.rateLimitRules` |
+| Data · Retention | `data.retention` |
+| Push notifications | `push.fcm`, `push.apns` and a test push |
+| Custom domains | The API's own hostname |
+
+Elsewhere: auth groups and their delivery transports (`email.*`, `phone.sms`) under Authentication; `database.sqlEditor`
+under Database → Settings; `storage.*` under Storage → Shared settings; `realtime.*` under Realtime; `logs.retention` on
+the Logs page; `api.rest` in the API explorer; `ai.assistant` in the assistant dock; `git.github` in the GitHub card, one component shown on both Migrations and Integrations.
+A panel can be opened directly with its key as the hash, e.g. `/p/:id/settings#security`.
+
+**Project Settings → API keys** manages the publishable and secret keys, and the
+enforcement toggle. A secret key is displayed exactly once, at creation; the panel
+says so and offers a copy button, because it is the only chance. See
+[API Keys](/docs/platform/api-keys/).
+
+**Overview** (`/p/:id/overview`) combines, on one page: status, uptime, compute and memory; the database; advisor
+counts and the last hour's traffic (from `GET /admin/shield?range=1h`); the GitHub repository link (`GET /admin/git/status`);
+the last migration and the last backup; per-source request charts and recent log lines (`GET /admin/stats`,
+`GET /admin/logs`); a copyable API URL; and, on a fresh project, **Import from Supabase**. Each card opens its screen
+(Advisor, Logs, SQL, Tables, Database → Migrations, Database → Backups).
+
+## Integrations
+
+```text
+GET    /admin/integrations
+POST   /admin/integrations/:key/connect   { secrets, installFunctions }
+DELETE /admin/integrations/:key?removeFunctions=<bool>
+```
+
+Connecting stores secrets and optionally installs the integration's prebuilt edge functions; disconnecting can remove them again. Catalogue: [Integrations](/docs/platform/integrations/).
+
+## Platform-level backup actions
+
+`platformApi` also exposes backup operations used outside the database screens:
+
+```text
+GET  /admin/backups
+POST /admin/backups
+POST /admin/backups/export
+POST /admin/backups/restore        { file, confirm: 'RESTORE' }
+POST /admin/backups/clone-staging  { targetDatabaseUrl, confirm: 'CLONE' }
+```
+
+<Warning>
+`clone-staging` copies a project's database into the target `DATABASE_URL` you supply and requires `confirm: 'CLONE'`. Point it at a staging database — it overwrites the destination.
+</Warning>
+
+## Supabase import
+
+`features/projects/supabase-conn.ts` parses a Supabase connection string for the import flow. What the importer moves — public schema, table data, RLS policies, auth users — is covered in [migrate from Supabase](/docs/getting-started/migrate-from-supabase/).
+
+## Related
+
+- [Console API](/docs/console/console-api/) — the endpoints behind these screens.
+- [Contributing · conventions](/docs/contributing/conventions/) — the feature-folder layout these screens follow.

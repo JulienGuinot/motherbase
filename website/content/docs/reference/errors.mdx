@@ -1,0 +1,167 @@
+---
+title: "Errors"
+description: "The response envelopes, the error classes, the default codes, and the SQLSTATE-to-message mapping."
+order: 21
+---
+
+## Success envelope
+
+Non-REST endpoints (auth, storage, admin, edge) wrap their payload (`apps/server/helpers/api-response.helper.ts`):
+
+```json
+{ "status": 1, "message": "OK", "data": { } }
+```
+
+`202` uses the same shape for accepted-but-async work. `status` is `1` on success and `0` on failure.
+
+## Error envelope
+
+Every error — thrown, forwarded, or a route miss — exits through `createApiErrorHandler` (`middlewares/api-error.middleware.ts`):
+
+```json
+{ "status": 0, "code": "NOT_FOUND", "message": "Resource not found", "requestId": "…" }
+```
+
+`status` is literally `0`; the HTTP status is the response's own. `requestId` is
+present whenever the correlation middleware set one, and is echoed to the caller as
+`x-request-id`. Nothing else is added: no cause chain, no schema names. The two exceptions are
+[validation errors](#validation-errors), which carry the failure list in `data`, and
+everything under `/api/auth/*`, which is Better Auth's own handler and answers in its shape
+(`{ "code": "INVALID_EMAIL_OR_PASSWORD", "message": "…" }`).
+
+<Warning>
+That is the **production** shape. When `NODE_ENV` is not `production`, an unrecognised
+error falls back to its internal message, which is `error.stack` — so in development the
+full stack ships to the client in `message`. That is deliberate (it is what makes a local
+failure debuggable from the network tab), and it is why the server binds to `127.0.0.1`
+unless `NODE_ENV=production`: the dev envelope is unreachable from another host by
+construction rather than by convention. Widening it with `BIND_HOST` outside production
+logs a warning saying so.
+</Warning>
+
+## Error classes
+
+`apps/server/exceptions/application-error.ts`:
+
+```ts
+new ApplicationError(statusCode, message, { code?, expose?, cause? })
+```
+
+| Field | Default |
+|---|---|
+| `code` | `HTTP_<status>` |
+| `expose` | `statusCode < 500` — i.e. client errors show their message, server errors do not |
+
+One subclass, in `apps/server/exceptions/http-exception.ts`:
+
+```ts
+new HttpException(message, statusCode, code?, { expose? })
+```
+
+It reorders the arguments so the message reads first, and is what almost every
+throw site uses. There are no per-status subclasses — pass the status:
+`new HttpException('Page not found', 404, 'NOT_FOUND')` is the catch-all 404 in
+`app.ts`.
+
+## How a message is chosen
+
+`normalizeApiError(error, isProduction)`:
+
+1. An `ApplicationError` with `expose: true` → its own `message` and `code`.
+2. A recognised database error → the fixed sentence for its SQLSTATE (below).
+3. Otherwise: the internal message in development, a generic message in production.
+
+Errors are logged when unknown or `>= 500`, with the full stack as the internal message; the log line also lands in the shared buffer with `source: 'http'`.
+
+## Default codes and messages
+
+| Status | Code | Public message |
+|---|---|---|
+| 400 | `BAD_REQUEST` | Bad request |
+| 401 | `UNAUTHORIZED` | Unauthorized |
+| 403 | `FORBIDDEN` | Forbidden |
+| 404 | `NOT_FOUND` | Resource not found |
+| 409 | `CONFLICT` | Conflict |
+| 413 | `PAYLOAD_TOO_LARGE` | Payload too large |
+| 429 | `RATE_LIMITED` | Too many requests |
+| 5xx | `INTERNAL_ERROR` | Internal server error |
+
+The middlewares that refuse a request before it reaches a controller use the same envelope,
+so `error.code` is set on every one of them:
+
+| Refused by | Status | Code |
+|---|---|---|
+| Built-in or custom rate limit | 429 | `RATE_LIMITED` |
+| CAPTCHA, no token sent | 400 | `MISSING_RESPONSE` |
+| CAPTCHA, token rejected | 403 | `VERIFICATION_FAILED` |
+| CAPTCHA, provider unreachable | 503 | `SERVICE_UNAVAILABLE` |
+| Edge invocation without a session, a secret key, the edge token, or a public function | 401 | `UNAUTHORIZED` |
+
+The CAPTCHA codes are Better Auth's, so a client handles a CAPTCHA refused on a table write
+with the same code path as one refused on sign-up.
+
+A 4xx status not in that table falls back to `HTTP_<status>` as the code and `Request failed` as the message; `5xx` falls back to `INTERNAL_ERROR` and `Internal server error`.
+
+An error carrying `name: 'UnauthorizedError'` maps to 401. A numeric `statusCode`/`status` on an unknown error is honoured when it is an integer in `[400, 599]`; anything else becomes 500.
+
+## Database errors
+
+Postgres SQLSTATEs are mapped to a status **and** to a fixed public sentence. The SQLSTATE is read from the driver's `code`, or from `meta.code` on a failed Prisma raw query (`P2010`), which is how the schema editor's DDL reports it. The driver's own message — which contains the SQL, the offending value and the schema object names — never reaches the client, so these responses are safe for anonymous REST callers and identical in development and production.
+
+| SQLSTATE | Status | Message |
+|---|---|---|
+| `22001` | 400 | A value is longer than its column allows. |
+| `22P02` | 400 | A value has the wrong type for the column it was written to. |
+| `23502` | 400 | A required field was missing. |
+| `23503` | 409 | A referenced row does not exist, or is still referenced by other rows. |
+| `23505` | 409 | A record with these values already exists. |
+| `23514` | 400 | A value failed a check constraint on the table. |
+| `23P01` | 409 | This conflicts with an existing row that overlaps it. |
+| `40001` | 409 | The write conflicted with another concurrent write. Retry the request. |
+| `40P01` | 409 | The database detected a deadlock and cancelled this request. Retry it. |
+| `42501` | 403 | Row level security or table privileges blocked this operation. |
+| `42701` | 409 | A column with that name already exists on this table. |
+| `42703` | 400 | A column in the request does not exist on this table. |
+| `42710` | 409 | An object with that name already exists. |
+| `42P01` | 404 | That table or view does not exist. |
+| `42P06` | 409 | A schema with that name already exists. |
+| `42P07` | 409 | A table, view or index with that name already exists. |
+| `42883` | 400 | That database function does not exist, or the argument types do not match. |
+| `53300` | 503 | The database has no free connections. Retry in a moment. |
+| `57014` | 504 | The query ran past the statement timeout and was cancelled. |
+
+<Note>
+`42501` is what an RLS denial looks like from the outside: `403` with "Row level security or table privileges blocked this operation." If you get it unexpectedly, check your policies with the [RLS simulator](/docs/studio/database/).
+</Note>
+
+## SQL editor hints
+
+The SQL editor is a different audience: the caller is an operator, so the raw Postgres
+`ERROR` / `DETAIL` / `HINT` lines and the SQLSTATE are kept. Only Prisma's own wrapper prose
+(`Invalid prisma.$executeRawUnsafe() invocation: Raw query failed. Code: …`) is stripped, because
+it is an implementation detail of this backend.
+
+On top of Postgres's own hint, Motherbase adds one for the mistakes somebody arriving from
+Supabase makes on day one:
+
+| SQLSTATE | When | Hint |
+|---|---|---|
+| `42804`, `42P16` | a `uuid` / `text` mismatch | `auth.users.id` is `text` here (Better Auth issues opaque string ids, not UUIDs) and `auth.uid()` returns `text` to match. Declare owner columns as `user_id text references auth.users(id) on delete cascade` |
+| `22P02` | the value is a user id | `auth.uid()` returns `text`, so a user id is not castable to `uuid` |
+| `42883` | the function is a pgcrypto one | Run `CREATE EXTENSION IF NOT EXISTS pgcrypto;`, or enable it under Database → Extensions |
+| `3F000` | the statement references an `extensions` schema | Supabase installs extensions into `extensions`; Motherbase installs them into `public`. Drop the qualifier |
+| `42P01` | the missing table is `auth.users` | The `auth` schema comes from the platform migrations, so the project database has not been migrated yet |
+
+## Validation errors
+
+`validateRequest` (express-validator) returns the failure list rather than a single message:
+
+```json
+{ "status": 0, "code": "VALIDATION_ERROR", "message": "Validation Errors:\n …", "data": [ /* express-validator errors */ ] }
+```
+
+It is the error envelope plus `data`: the status is `400` and the code `VALIDATION_ERROR`.
+
+## Client-side shape
+
+`@motherbase/client` never throws for expected API errors. Every call resolves to `{ data, error }`, where `error` is `{ message, status?, code? }` — `status` is the HTTP status and `code` the backend code from the envelope above. See the [SDK reference](/docs/reference/sdk/).

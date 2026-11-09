@@ -1,0 +1,100 @@
+---
+title: "Users, Roles & Organizations"
+description: "Console operators, the capability matrix, per-project scoping, and the tenant organization layer above projects."
+order: 5
+---
+
+Two separate concepts live here, and mixing them up is the usual confusion:
+
+| Layer | Store | What it means |
+|---|---|---|
+| **Console users** | Better Auth (SQLite, under `PROJECTS_DIR`) | Operators who log into the Console |
+| **Tenant orgs** | `console-orgs.db` (SQLite) | Organization → projects grouping, Supabase-style |
+| **Project ACL** | Better Auth `organization` model | One org per project; `org.name` holds the project id. Used as the access list, not as a tenant |
+
+`console/services/org-store.ts` says it explicitly: the tenant store is deliberately separate from the Better Auth `organization` model that the Console already uses as the per-project ACL.
+
+## Console users
+
+`console/services/users.service.ts` wraps Better Auth's low-level adapters rather than its HTTP layer — this is a trusted server-side admin service, and going through the adapter avoids needing an admin session to seed the very first owner.
+
+```ts
+interface User {
+  id; email
+  role: 'owner' | 'admin' | 'developer' | 'read_only' | 'member'
+  projects: string[]
+  disabled: boolean
+  mustChangePassword: boolean
+  createdAt: string
+}
+```
+
+Mapping to Better Auth:
+
+| Console field | Better Auth |
+|---|---|
+| `role`, `disabled` | Additional fields on `user` |
+| `projects` | Organization memberships — one org per project, `org.name` = project id |
+| password | A `credential` account holding a bcrypt hash (`console/auth/password.ts`) |
+
+Available operations: `list`, `findByEmail`, `findById`, `create`, `provision`, `update`, `setPassword`, `verifyPassword`, `revokeSessions`, `delete`, `ownerCount`, `projectsOf`, `seedOwner`, `seedOwnerWithHash`.
+
+<Note>
+An unknown or malformed role coerces to `read_only` (`coerceRole`), never to something more privileged. Role and project list are reloaded live from Better Auth on every request — never trusted from the client.
+</Note>
+
+## Capabilities
+
+`console/auth/capabilities.ts` defines nine capabilities and maps roles onto them:
+
+| Capability | owner | admin | developer | member | read_only |
+|---|---|---|---|---|---|
+| `project.read` | yes | yes | yes | yes | yes |
+| `content.write` | yes | yes | yes | yes | — |
+| `project.create` | yes | yes | — | — | — |
+| `settings.write` | yes | yes | — | — | — |
+| `runtime.manage` | yes | yes | — | — | — |
+| `secrets.manage` | yes | yes | — | — | — |
+| `project.delete` | yes | yes | — | — | — |
+| `audit.read` | yes | yes | — | — | — |
+| `users.manage` | yes | — | — | — | — |
+
+Only `owner` can manage users. `developer` and `member` grant exactly the same capabilities
+today; the two names exist for the operator's own bookkeeping, and nothing distinguishes them
+yet. Guards:
+
+```ts
+requireCapability(cap)         // 401 without session, 403 without the capability
+requireProjectCapability(cap)  // same, plus project scope
+hasProjectScope(role, projects, projectId)
+  // owner and admin see every project; everyone else only their assigned list
+```
+
+## Password rotation
+
+`enforcePasswordRotation` blocks a session with `mustChangePassword` from doing anything except changing it. The allowed routes are the password-change endpoint plus session-critical auth routes (`get-session`, `sign-out`, and the three two-factor verify routes). `MIN_PASSWORD` is 8 characters anywhere the Console sets or changes one.
+
+Seeding an operator with `passwordTemporary: true` (or `CONSOLE_ADMIN_PASSWORD_TEMPORARY=1`) puts them in exactly that state on first login.
+
+## Tenant organizations
+
+`OrgStore` is a small SQLite database (`<PROJECTS_DIR>/console-orgs.db`, WAL mode) with three tables:
+
+```sql
+organization (id, name, slug UNIQUE, createdAt)
+org_member   (orgId, userId, role, createdAt)   -- PK (orgId, userId)
+project_org  (project PRIMARY KEY, orgId)
+```
+
+Org roles are `owner`, `admin`, `member`; anything else coerces to `member`. Slugs are lowercased, hyphenated, alnum-only, capped at 48 characters, with uniqueness resolved at create time (`slugify`).
+
+Schema creation is idempotent and runs at every boot. `backfill()` moves an existing single-tenant install into a default org so the org switcher always has one and current logins keep seeing their projects.
+
+## Endpoints
+
+| Mount | Router |
+|---|---|
+| `/api/platform/users` | `console/routes/users.routes.ts` |
+| `/api/platform/orgs` | `console/routes/orgs.routes.ts` |
+
+Mutations are recorded in the [audit log](/docs/console/audit-log/); `GET`, `HEAD` and `OPTIONS` are not.

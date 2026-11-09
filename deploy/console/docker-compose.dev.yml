@@ -1,0 +1,83 @@
+# Local DEV Console: HTTP only, no TLS, no Let's Encrypt.
+# Docker access remains isolated in the internal orchestration daemon.
+
+services:
+  orchestrator:
+    build:
+      context: ../..
+      dockerfile: apps/server/console/Orchestration.Dockerfile
+      args:
+        CONSOLE_IMAGE: ${CONSOLE_IMAGE:-motherbase-console:1.0.0}
+        DOCKER_CLI_IMAGE: ${DOCKER_CLI_IMAGE:-docker:27-cli}
+    image: ${ORCHESTRATION_IMAGE:-motherbase-orchestrator:1.0.0}
+    restart: unless-stopped
+    environment:
+      ORCHESTRATION_PORT: 5501
+      ORCHESTRATION_SECRET: ${ORCHESTRATION_SECRET:?required}
+      PROJECTS_DIR: /srv/projects
+      COMPOSE_FILE: /app/deploy/docker-compose.dev-multi.yml
+      TRAEFIK_NETWORK: traefik_proxy
+      API_IMAGE: ${API_IMAGE:-motherbase-api:1.0.0}
+      POSTGRES_IMAGE: ${POSTGRES_IMAGE:-motherbase-postgres:1.0.0}
+      MINIO_IMAGE: ${MINIO_IMAGE:-alpine/minio:RELEASE.2025-10-15T17-29-55Z}
+      MINIO_MC_IMAGE: ${MINIO_MC_IMAGE:-bitnamilegacy/minio-client:2025.5.21}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - console_projects:/srv/projects:ro
+    networks:
+      - orchestration
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /run
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ['CMD', 'node', '-e', "fetch('http://127.0.0.1:5501/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  console:
+    build:
+      context: ../..
+      dockerfile: apps/server/console/Dockerfile
+    image: ${CONSOLE_IMAGE:-motherbase-console:1.0.0}
+    restart: unless-stopped
+    depends_on:
+      orchestrator:
+        condition: service_healthy
+    environment:
+      CONSOLE_MODE: dev
+      CONSOLE_PORT: 5500
+      CONSOLE_JWT_SECRET: ${CONSOLE_JWT_SECRET:?required}
+      CONSOLE_ADMIN_EMAIL: ${CONSOLE_ADMIN_EMAIL:?required}
+      CONSOLE_ADMIN_PASSWORD_HASH_B64: ${CONSOLE_ADMIN_PASSWORD_HASH_B64:?required}
+      CONSOLE_ADMIN_PASSWORD_TEMPORARY: ${CONSOLE_ADMIN_PASSWORD_TEMPORARY:-false}
+      PROJECTS_DIR: /srv/projects
+      API_IMAGE: ${API_IMAGE:-motherbase-api:1.0.0}
+      PLATFORM_DOMAIN_SUFFIX: localhost
+      COMPOSE_FILE: /app/deploy/docker-compose.dev-multi.yml
+      TRAEFIK_NETWORK: traefik_proxy
+      ORCHESTRATION_URL: http://orchestrator:5501
+      ORCHESTRATION_SECRET: ${ORCHESTRATION_SECRET:?required}
+    ports:
+      - '5500:5500'
+    volumes:
+      - console_projects:/srv/projects
+    networks:
+      - traefik_proxy
+      - orchestration
+
+volumes:
+  console_projects:
+
+networks:
+  orchestration:
+    internal: true
+  traefik_proxy:
+    external: true
+    name: traefik_proxy

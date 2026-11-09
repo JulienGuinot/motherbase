@@ -1,0 +1,97 @@
+---
+title: "Events & Webhooks"
+description: "Row-change events, webhook matching and delivery, the delivery log, and the SSRF-hardened outbound HTTP client."
+order: 22
+---
+
+Any insert, update or delete through the data plane can fan out to HTTP endpoints you register. Matching, delivery and the audit trail live in `apps/server/services/events/event-dispatcher.service.ts`.
+
+## Event names
+
+```text
+<model>.<action>      e.g. todos.created, profiles.updated, orders.deleted
+```
+
+`action` is `created`, `updated` or `deleted`. Model names are lowercased.
+
+## Subscription patterns
+
+A webhook stores an `events[]` array. Each entry is matched against the event:
+
+| Spec | Matches |
+|---|---|
+| `*` | Everything |
+| `todos.created` | Exactly that event |
+| `todos.*` | Every action on `todos` |
+| `*.deleted` | Deletes on any table |
+
+Empty or blank specs never match. Matching is case-insensitive.
+
+### Events that are not row changes
+
+The server also publishes system events, subscribable by the same specs:
+
+| Spec | Fires on |
+|---|---|
+| `auth.sign-in`, `auth.sign-up`, `auth.sign-out` | the matching auth flow |
+| `auth.forget-password`, `auth.reset-password`, `auth.verify-email`, `auth.two-factor` | the matching auth flow |
+| `job_alert.created` | a scheduled job failed repeatedly, stopped running, or a backup fell past its objective |
+
+`GET /api/admin/webhooks/events` serves this list, so the Studio picker reads it from the server
+that emits them rather than keeping its own copy.
+
+## Delivery
+
+For each affected row, one `POST` per matching enabled webhook:
+
+```json
+{
+  "event": "todos.created",
+  "model": "todos",
+  "action": "created",
+  "record": { "id": 1, "title": "…" },
+  "occurredAt": "2025-01-01T00:00:00.000Z"
+}
+```
+
+`Content-Type: application/json`, 8 s timeout (`helpers/webhook-sender.helper.ts`). Deliveries are fired without blocking the mutation, and a dispatcher failure is logged rather than propagated — a broken endpoint cannot fail your write.
+
+## Delivery log
+
+Every attempt writes a `WebhookDelivery` row: `event`, `status`, `ok`, `durationMs`, `test`, `errorMessage`. Because that table is only visible from the webhook detail screen, each attempt **also** writes one line into the shared log stream with `source: 'webhook'`:
+
+```text
+[webhook] todos.created → https://example.com/hook 200 in 84ms
+[webhook] todos.created → https://example.com/hook failed — HTTP 502
+```
+
+So a failing endpoint is readable in **Logs**, right next to whatever triggered it.
+
+## The outbound HTTP client
+
+Every outbound call the project makes on operator-supplied URLs goes through `services/http/outbound-http-client.service.ts`, which is deliberately not `fetch`:
+
+| Control | Default |
+|---|---|
+| Timeout | 5000 ms (webhooks pass 8000) |
+| Max response size | 256 KB |
+| DNS resolution | `helpers/ssrf.helper.ts` — resolves the hostname and rejects private, loopback, link-local, CGNAT, multicast and reserved ranges (IPv4 and IPv6) |
+| Connection | **Pinned to the resolved address**, so a re-resolution between check and connect cannot swap in an internal host |
+
+<Warning>
+This is what stops a webhook URL from being used to reach `169.254.169.254`, `127.0.0.1`, or anything on your internal network. Do not bypass it by calling `fetch` directly from new code that takes a URL from settings or the database.
+</Warning>
+
+Twilio SMS is the deliberate exception (`services/sms.service.ts`): its scheme and hostname are constants and the only interpolated segment is percent-encoded, so it cannot be redirected to an internal host.
+
+## Bucket webhooks
+
+Storage has its own per-bucket hooks (`BucketWebhook`: `url` + `events[]`), configured per bucket rather than globally. See [Storage](/docs/platform/storage/).
+
+## Auth event webhook
+
+Auth emits its own webhook, configured in the `auth.hooks.events` settings group with a signing secret, plus a `auth.hooks.signUp` gate that can refuse a sign-up and a `auth.hooks.send` override for delivery. See [Auth](/docs/platform/auth/) and the [settings reference](/docs/reference/settings/).
+
+## Realtime is a different path
+
+Webhooks are outbound HTTP. Realtime is a WebSocket fan-out with its own transactional outbox (`RealtimeOutbox`) — see [Realtime](/docs/platform/realtime/) and the [data model](/docs/architecture/data-model/).

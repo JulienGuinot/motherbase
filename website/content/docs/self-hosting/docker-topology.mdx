@@ -1,0 +1,125 @@
+---
+title: "Docker Topology"
+description: Map every Motherbase Compose file and Dockerfile to its services, images, storage, networks, ports, and checks.
+order: 3
+---
+
+The normal installer combines one Traefik stack, one Console stack, and one Compose project per Motherbase project. `deploy/README.md` recommends using `./setup.sh` rather than assembling these files manually.
+
+## Compose file selection
+
+| Mode | Proxy | Console | Project |
+|------|-------|---------|---------|
+| Local setup | `deploy/traefik/docker-compose.dev.yml` | `deploy/console/docker-compose.dev.yml` | `deploy/docker-compose.dev-multi.yml` |
+| VPS setup | `deploy/traefik/docker-compose.yml` | `deploy/console/docker-compose.yml` | `deploy/docker-compose.prod.yml` |
+| Root legacy/local stack | none | none | `docker-compose.yml` |
+| Release verification | none | none | `deploy/docker-compose.verify.yml` |
+
+`setup.sh` does not start the root `docker-compose.yml`; its local and VPS startup
+functions use the Console-managed rows above. `deploy/docker-compose.verify.yml` is not an
+installation topology either: every service `extends` the production file and replaces only
+the host ports, host mounts, external network and credentials, so a release can be smoke
+tested against the real service definitions.
+
+## Project stacks
+
+### `deploy/docker-compose.dev-multi.yml`
+
+One local project per Compose project name:
+
+| Service | Image | Storage and networks | Ports and health |
+|---------|-------|----------------------|------------------|
+| `db` | `motherbase-postgres:1.0.0`, buildable with `deploy/postgres.Dockerfile` | `db_data` at `/var/lib/postgresql/data`; private `internal` network | No host port; `pg_isready -U postgres`, 5-second interval, 10 retries |
+| `minio` | `alpine/minio:RELEASE.2025-10-15T17-29-55Z` | `minio_data` at `/data`; `internal` and `traefik_proxy` | Traefik sends storage to `9000` and MinIO UI to `9001`; live check every 5 seconds, 10 retries |
+| `minio-init` | `bitnamilegacy/minio-client:2025.5.21` | `internal` only | One-shot creation of private `S3_BUCKET` and download-enabled `S3_PUBLIC_BUCKET`; no health check |
+| `edge-runtime` | `EDGE_RUNTIME_IMAGE`, default `motherbase-edge-runtime:1.0.0`, buildable with `deploy/edge-runtime.Dockerfile` | the private `edge` network **only**; read-only root with a `/tmp` tmpfs | No host port and no Traefik router; reachable from `api` alone |
+| `api` | `API_IMAGE`, default `motherbase-api:1.0.0`, buildable with the root `Dockerfile` | `internal`, `edge` and `traefik_proxy`; no named API volumes | Traefik sends HTTP and `/ws` to `5001`; no Compose health check |
+
+Routes use the plain `web` entrypoint. A priority-200 router applies an IP allowlist of `127.0.0.1/32` to `/api/admin` and `/console`.
+
+### `deploy/docker-compose.prod.yml`
+
+One production project per `/srv/projects/<name>/.env.prod`:
+
+| Service | Image | Storage and networks | Ports and health |
+|---------|-------|----------------------|------------------|
+| `db` | `POSTGRES_IMAGE`, default `motherbase-postgres:1.0.0` | `db_data`; `internal`; read-only root with writable `/tmp`, `/var/run/postgresql` | No host port; `pg_isready`, 5-second interval, 10 retries, 10-second start period |
+| `minio` | Required digest-pinned `MINIO_IMAGE` | `minio_data`; `internal` and `traefik_proxy`; read-only root | Traefik to `9000` and optional UI `9001`; live check, 5-second interval, 10 retries, 10-second start period |
+| `minio-init` | Required digest-pinned `MINIO_MC_IMAGE` | `internal`; read-only root with `/tmp` and `/root/.mc` tmpfs | One-shot private/public bucket initialization |
+| `edge-runtime` | `EDGE_RUNTIME_IMAGE`, default `motherbase-edge-runtime:1.0.0` | the private `edge` network **only**; read-only root, `/tmp` tmpfs, all capabilities dropped, `no-new-privileges` | No host port and no router; `GET /health` on `9000`, 10-second interval, 5 retries |
+| `api` | `API_IMAGE`, default `motherbase-api:1.0.0` | `api_backups` at `/app/backups`, `api_data` at `/app/data`, `internal`, `edge`, and `traefik_proxy`; read-only root | Traefik to `5001`; `/api/health-check`, 10-second interval, 5 retries, 30-second start period |
+
+The API process runs as the unprivileged `node` account. Its entrypoint (`deploy/api-entrypoint.sh`) starts as root
+only long enough to `chown` the two mounted volumes to `node` — Docker copies the image's ownership onto a named
+volume only on its first mount, so a volume from an older install can still be root-owned — then drops with
+`setpriv`. The service drops every capability and adds back exactly `CHOWN`, `SETUID` and `SETGID` for that step; the
+uid change clears them, so the server itself holds none. A deployment that drops them without adding these back fails
+at boot rather than running the server as root.
+
+The `edge` network is the first of the two barriers that keep operator code away from the
+stack's internals: the sidecar is on it and so is `api`, while `db` and `minio` are not, so a
+function has no route to Postgres or object storage even before its `fetch` guard refuses a
+private address. See [edge runtime](/docs/architecture/edge-runtime/).
+
+Resource defaults are `0.5` CPU and `512M` for `db` and `api`, `0.25` CPU and `256M` for `minio`, and `0.5` CPU and `768M` for `edge-runtime`. All externally routed services expose only container ports through Traefik.
+
+One port is published, by an overlay rather than by this file:
+`deploy/docker-compose.db-port.yml` is merged into every project stack
+unconditionally (`composeContextArgs` in `console/lib/compose.ts`) and maps
+`${DB_BIND:-127.0.0.1}:${DB_PORT:-}:5432`. The Console allocates `DB_PORT` from
+`54320-54419` at project creation and keeps it for the life of the project, so a
+saved connection string survives a recreate; `DB_BIND` defaults to loopback, so
+the database is reachable only over an SSH tunnel. A project created before the
+overlay existed has no `DB_PORT` and Docker picks a free one — deliberately
+harmless; `docker compose -p <project> port db 5432` reveals it.
+
+The production deny router has priority `200` and restricts `/api/admin`, `/console`, and `/admin` to `127.0.0.1/32`. The `/ws` router has priority `150`; the general API router has priority `100`.
+
+### Root `docker-compose.yml`
+
+The root stack contains `db`, `minio`, one-shot `createbuckets`, `edge-runtime`, and `api`. Everything but the sidecar sits on Compose's default network; `edge-runtime` is on a private `edge` network and `api` joins both. Every published port is bound to loopback: Postgres as `127.0.0.1:${POSTGRES_PORT:-55432}:5432`, MinIO as `127.0.0.1:${MINIO_PORT:-59000}:9000`, MinIO Console as `127.0.0.1:${MINIO_CONSOLE_PORT:-59001}:9001`, and the API as `127.0.0.1:5001:5001`. Its named volumes are `db_data` and `minio_data`.
+
+Database and MinIO health checks run every five seconds with ten retries. The API waits for a healthy database and MinIO, successful bucket creation, and a started `edge-runtime`, but has no Compose health check of its own. `EDGE_RUNTIME_TOKEN` defaults to `dev-edge-runtime-token` here — a development convenience the production file deliberately refuses (it fails the stack when the variable is unset).
+
+## Console stacks
+
+### `deploy/console/docker-compose.dev.yml`
+
+| Service | Image | Access | Storage and networks | Health |
+|---------|-------|--------|----------------------|--------|
+| `orchestrator` | `ORCHESTRATION_IMAGE`, default `motherbase-orchestrator:1.0.0` | No host port; internal port `5501` | Read-only Docker socket, read-only `console_projects` at `/srv/projects`, internal `orchestration` network | `GET /health`, 10-second interval, 5 retries |
+| `console` | `CONSOLE_IMAGE`, default `motherbase-console:1.0.0` | Host `5500:5500` | Writable `console_projects`, `traefik_proxy`, and `orchestration` | No Compose health check |
+
+The orchestrator uses `deploy/docker-compose.dev-multi.yml`. It has a read-only root, `/tmp` and `/run` tmpfs mounts, no Linux capabilities, and `no-new-privileges`.
+
+### `deploy/console/docker-compose.yml`
+
+The production file has the same two services. The orchestrator mounts the host Docker socket read-only and `/srv/projects` read-only; the Console mounts `/srv/projects` writable but has neither the socket nor Docker CLI. They communicate on an internal `orchestration` network with `ORCHESTRATION_SECRET`.
+
+Both services have read-only roots, dropped capabilities, and `no-new-privileges`. Orchestrator health checks `5501/health`; Console health checks `5500/`. The Console has no published host port: Traefik routes `CONSOLE_DOMAIN` to container port `5500` over `traefik_proxy`.
+
+## Traefik stacks
+
+`deploy/traefik/docker-compose.dev.yml` runs the same two services as the production stack, with dev-friendly defaults: a `docker-proxy` (`${TRAEFIK_DOCKER_PROXY_IMAGE:-nginx:alpine}`) that holds the Docker socket and rewrites old Docker API versions, and `${TRAEFIK_IMAGE:-traefik:v3.3}`, which publishes `80` and the insecure dashboard on `8080` and joins both `traefik_proxy` and `traefik_internal`. HTTP only: no TLS, no ACME, no volumes and no health check.
+
+The proxy is not cosmetic. Docker 29 dropped API versions below 1.40 while Traefik's embedded client still asks for 1.24; without the rewrite Traefik loads zero routers and every `<name>.localhost` answers 404, which a browser then reports as a CORS failure.
+
+`deploy/traefik/docker-compose.yml` runs two services:
+
+- `docker-proxy` uses the required `TRAEFIK_DOCKER_PROXY_IMAGE`, mounts the Docker socket and `docker-proxy.conf`, and listens only on internal port `2375` over `traefik_internal`.
+- `traefik` uses the required `TRAEFIK_IMAGE`, publishes `80` and `443`, stores ACME state in the bind mount `deploy/traefik/acme:/acme`, and joins both `traefik_proxy` and `traefik_internal`.
+
+Neither service declares a Compose health check. See [Traefik and TLS](/docs/self-hosting/traefik-and-tls) for routers and certificate resolvers.
+
+## Dockerfiles
+
+| File | Purpose |
+|------|---------|
+| `deploy/deps.Dockerfile` | Starts from `node:22-bookworm-slim`, installs OpenSSL plus the Python/C++ native build toolchain, then runs cached `npm ci --legacy-peer-deps` for every workspace. |
+| Root `Dockerfile` | Builds all workspaces from `DEPS_IMAGE`, prunes dev dependencies, then copies apps/packages into `node:22-bookworm-slim`; installs OpenSSL and PostgreSQL client 17; exposes `5001`. |
+| `apps/server/console/Dockerfile` | Builds the server and Studio bundle from `DEPS_IMAGE`; starts `apps/server/dist/console/server.js`. It intentionally contains no Docker CLI. |
+| `apps/server/console/Orchestration.Dockerfile` | Copies the Docker CLI and Compose plugin from `DOCKER_CLI_IMAGE` into `CONSOLE_IMAGE`; starts the orchestration server. |
+| `deploy/postgres.Dockerfile` | Extends `postgres:16.14-bookworm`, installs pg_cron, pgvector, PostGIS, and builds pgmq `v1.12.0`. |
+| `deploy/edge-runtime.Dockerfile` | The Deno sidecar that runs edge functions. See [edge runtime](/docs/architecture/edge-runtime/). |
+
+The API image command waits for its database, runs `apps/server/scripts/run-migrations.js`, then starts `apps/server/dist/app.js`. `.dockerignore` excludes every `node_modules`, `dist`, `.env`, log, upload, `.git`, and `.turbo` path from build context so host artifacts and secrets are not copied into images.

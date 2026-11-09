@@ -1,0 +1,25 @@
+{
+  /* The Console SPA (apps/studio) and the client SDK (packages/*) are separate
+     workspaces with their own tsconfig and build. */
+  "exclude": ["node_modules", "dist", "tests/client-sdk.unit.test.ts", "tests/client-sdk-auth-surfaces.unit.test.ts", "tests/cookie-storage.unit.test.ts", "tests/rls-sql.unit.test.ts", "tests/realtime-channel.unit.test.ts", "tests/sdk-contract.integration.test.ts", "tests/sdk-contract-matrix.ts"],
+  "compilerOptions": {
+    /* Node 22 (the runtime image and `engines`) runs ES2022 natively. */
+    "target": "es2022",
+    /* Keep the pre-ES2022 class-field semantics the decorators and the DI
+       container were written against. */
+    "useDefineForClassFields": false,
+    "experimentalDecorators": true,
+    "emitDecoratorMetadata": true,
+    "module": "commonjs",
+    "resolveJsonModule": true,
+    "outDir": "./dist",
+    /* Pin emit root to apps/server so dist/console/server.js stays top-level
+       (Dockerfile CMD). Without this, a stray cross-package import lifts the
+       inferred rootDir to the repo root and nests output under dist/apps/server/. */
+    "rootDir": "./",
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "strict": true,
+    "skipLibCheck": true
+  }
+}

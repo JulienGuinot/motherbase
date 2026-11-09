@@ -1,0 +1,157 @@
+---
+title: "API Keys"
+description: "Publishable and secret project keys, the service_role Postgres role, and how a request picks the role it runs as."
+order: 2
+---
+
+A project has two kinds of key, and the difference between them is the whole
+security model.
+
+| Key | Prefix | Belongs | Effect |
+|-----|--------|---------|--------|
+| Publishable | `mb_publishable_` | Browser bundles, mobile apps, anywhere public | Identifies the project. Grants nothing on its own: the request still runs as `anon`, or as `authenticated` when a user token rides along, and policies decide every row. |
+| Secret | `mb_secret_` | A server you control | Runs the request as the `service_role` Postgres role, which holds `BYPASSRLS`. |
+
+A publishable key is stored in clear and readable from Studio forever: hiding a
+value you are about to ship in a JavaScript bundle buys nothing and costs you the
+ability to read it back. A secret key is stored as a SHA-256 hash and shown
+exactly once, at creation.
+
+## Managing keys
+
+**Project Studio → Project Settings → API keys**, or the CLI:
+
+```bash
+motherbase keys list
+motherbase keys create "web app" --type publishable
+motherbase keys create "billing worker" --type secret   # printed once
+motherbase keys revoke <id>
+```
+
+Revoking is immediate and takes no policy change. That is the point of having
+keys at all: cutting off one caller used to mean rewriting the rules for
+everybody.
+
+<Warning>
+A secret key bypasses row level security entirely. Keep it on a server, never in
+a browser bundle, never in a repository. The SDK logs a console warning if one is
+passed to `createClient` where `window` exists — treat that warning as a build
+failure. A secret key in a browser bundle is not "a key that leaked", it is the
+whole database published.
+</Warning>
+
+## Presenting a key
+
+The canonical header is `apikey`, which is what `@motherbase/client` sends when
+you pass a key to `createClient`.
+
+```bash
+curl https://demo.example.com/rest/v1/products \
+  -H "apikey: mb_publishable_..."
+```
+
+`Authorization: Bearer` is accepted too, but only for values carrying the `mb_`
+prefix. That header normally holds the end user's access token, and confusing the
+two in either direction would be a privilege bug.
+
+## Enforcement
+
+**Off by default.** A project accepts callers that send no key at all, exactly as
+it did before keys existed, so upgrading never breaks a running app.
+
+Turn on **Require a project API key** (Project Settings → API keys, or the
+`api.keys` settings group) once your clients send one. From then on a request with
+no valid key is a 401 before it reaches a policy.
+
+While enforcement is off, anyone who knows the URL can reach the REST API as
+`anon`. That is not new and it is not necessarily wrong — it is how a public
+read-only table is meant to work — but it should be a decision rather than an
+oversight.
+
+## What `service_role` actually bypasses
+
+`service_role` is a Postgres role created with `BYPASSRLS`. Row level security
+does not apply to it. Three things still do:
+
+- **Grants.** `BYPASSRLS` does not bypass `GRANT`. The role holds the same coarse
+  privileges on `public` that `anon` and `authenticated` hold, and nothing at all
+  on the `auth`, `storage` or `platform` schemas.
+- **The REST block-list.** Control-plane tables are excluded before the role is
+  ever chosen, so they stay unreachable over REST regardless of key.
+- **The `SECURITY DEFINER` allowlist.** An RPC that runs as its owner still has to
+  be named in `api.rest.rpcSecurityDefiner`.
+
+<Note>
+A secret key does **not** open the Studio admin API. That surface runs SQL, DDL,
+backups and settings changes, and stays behind operator authentication with its
+own capability model. This is deliberately narrower than Supabase's
+`service_role`: one credential that both bypasses RLS *and* drops tables is a much
+worse thing to leak.
+</Note>
+
+## Using them
+
+```ts
+// Browser. Publishable key: RLS decides everything.
+export const client = createClient(API_URL, process.env.NEXT_PUBLIC_MOTHERBASE_KEY);
+
+// Server only. Never import this from a client component.
+export const admin = createClient(API_URL, process.env.MOTHERBASE_SECRET_KEY!);
+const { data } = await admin.from('orders').select('*');   // every row, no policy
+```
+
+## User administration
+
+Besides the data plane, a secret key invokes private edge functions (see [Who can call a function](/docs/platform/edge-functions/#who-can-call-a-function)) and opens `/api/auth/admin/*`: creating, editing
+and deleting users, and ending their sessions, without being any user. That is the
+`client.auth.admin` namespace.
+
+```ts
+await admin.auth.admin.listUsers({ page: 1, perPage: 50 });
+await admin.auth.admin.createUser({ email: 'ada@example.com', role: 'USER' });
+await admin.auth.admin.updateUserById(id, { role: 'ADMIN' });
+await admin.auth.admin.signOut(id);          // ends every session they hold
+await admin.auth.admin.deleteUser(id);
+await admin.auth.admin.inviteUserByEmail('grace@example.com');
+```
+
+| SDK | HTTP |
+|---|---|
+| `listUsers({ page, perPage })` / `createUser(...)` | `GET` / `POST /api/auth/admin/users` |
+| `getUserById(id)` / `updateUserById(id, ...)` / `deleteUser(id)` | `GET` / `PATCH` / `DELETE /api/auth/admin/users/:id` |
+| `signOut(id)` | `POST /api/auth/admin/users/:id/sign-out` |
+| `inviteUserByEmail(email)` | `POST /api/auth/admin/invite` |
+| `generateLink({ type, email })` | `POST /api/auth/admin/generate-link` |
+| `mfa.listFactors({ userId })` / `mfa.deleteFactor({ userId, id })` | `GET /api/auth/admin/users/:id/factors`, `DELETE /api/auth/admin/users/:id/factors/:factorId` |
+
+These routes delegate to the same service Project Studio uses, so the two surfaces
+cannot drift on what a user is. `updateUserById` routes password and role changes
+to their own guarded methods rather than merging everything into one write: the
+profile patch deliberately refuses to write `role`, and going around that would
+reopen the escalation path that allowlist exists to close.
+
+`generateLink` is available on `auth.admin.generateLink` with a secret project key, for
+the `signup`, `invite`, `magiclink` and `recovery` types. Recovery is code-based, so it
+returns `email_otp` and a `null` `action_link`; the email-change link types are refused.
+Use `inviteUserByEmail`, or the end-user email OTP flow (`client.auth.emailOtp.*`), when
+those better match the application.
+
+## How a request picks its role
+
+One place decides, and it reads the resolved API key and nothing else. The flag it
+sets travels on the caller object that every data-plane entry point already
+threads down to the RLS context, so it cannot be honoured on one route and dropped
+on another. The caller is built field by field rather than copied wholesale, so a
+column named `serviceRole` appearing on the user row some day cannot hand every
+signed-in user `BYPASSRLS`.
+
+| Presented | Postgres role |
+|-----------|---------------|
+| Nothing, or a publishable key | `anon` |
+| A user access token, with or without a publishable key | `authenticated` |
+| A secret key | `service_role` |
+
+When a secret key and a user token arrive together the role is `service_role`, and
+the claims keep the user's `sub` so a trigger or a `SECURITY INVOKER` view reading
+`auth.uid()` still sees who the call was made on behalf of. It changes no access
+decision.

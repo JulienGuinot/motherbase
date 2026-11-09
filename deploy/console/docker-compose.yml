@@ -1,0 +1,106 @@
+services:
+  orchestrator:
+    build:
+      context: ../..
+      dockerfile: apps/server/console/Orchestration.Dockerfile
+      args:
+        CONSOLE_IMAGE: ${CONSOLE_IMAGE:-motherbase-console:1.0.0}
+        DOCKER_CLI_IMAGE: ${DOCKER_CLI_IMAGE:?production requires an immutable Docker CLI image digest}
+    image: ${ORCHESTRATION_IMAGE:-motherbase-orchestrator:1.0.0}
+    restart: unless-stopped
+    environment:
+      ORCHESTRATION_PORT: 5501
+      ORCHESTRATION_SECRET: ${ORCHESTRATION_SECRET:?required}
+      PROJECTS_DIR: /srv/projects
+      COMPOSE_FILE: /app/deploy/docker-compose.prod.yml
+      TRAEFIK_NETWORK: traefik_proxy
+      API_IMAGE: ${API_IMAGE:-motherbase-api:1.0.0}
+      POSTGRES_IMAGE: ${POSTGRES_IMAGE:-motherbase-postgres:1.0.0}
+      MINIO_IMAGE: ${MINIO_IMAGE:?production requires an immutable image digest}
+      MINIO_MC_IMAGE: ${MINIO_MC_IMAGE:?production requires an immutable image digest}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /srv/projects:/srv/projects:ro
+    networks:
+      - orchestration
+    read_only: true
+    tmpfs:
+      # Ephemeral Docker CLI state used during project builds.
+      - /root/.docker
+      - /tmp
+      - /run
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ['CMD', 'node', '-e', "fetch('http://127.0.0.1:5501/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  console:
+    build:
+      context: ../..
+      dockerfile: apps/server/console/Dockerfile
+    image: ${CONSOLE_IMAGE:-motherbase-console:1.0.0}
+    restart: unless-stopped
+    depends_on:
+      orchestrator:
+        condition: service_healthy
+    # The bcrypt hash contains '$' which Compose interpolation mangles, so it is
+    # transported base64-encoded and decoded by the app at startup.
+    environment:
+      CONSOLE_PORT: 5500
+      # Production uses exactly one trusted Traefik hop.
+      TRUST_PROXY: ${TRUST_PROXY:-1}
+      CONSOLE_JWT_SECRET: ${CONSOLE_JWT_SECRET:?required}
+      CONSOLE_ADMIN_EMAIL: ${CONSOLE_ADMIN_EMAIL:?required}
+      CONSOLE_ADMIN_PASSWORD_HASH_B64: ${CONSOLE_ADMIN_PASSWORD_HASH_B64:?required}
+      CONSOLE_ADMIN_PASSWORD_TEMPORARY: ${CONSOLE_ADMIN_PASSWORD_TEMPORARY:-false}
+      PROJECTS_DIR: /srv/projects
+      API_IMAGE: ${API_IMAGE:-motherbase-api:1.0.0}
+      POSTGRES_IMAGE: ${POSTGRES_IMAGE:-motherbase-postgres:1.0.0}
+      MINIO_IMAGE: ${MINIO_IMAGE:?production requires an immutable image digest}
+      MINIO_MC_IMAGE: ${MINIO_MC_IMAGE:?production requires an immutable image digest}
+      ORCHESTRATION_URL: http://orchestrator:5501
+      ORCHESTRATION_SECRET: ${ORCHESTRATION_SECRET:?required}
+      UPDATE_CHECK_URL: ${UPDATE_CHECK_URL:-}
+      PLATFORM_DOMAIN_SUFFIX: ${PLATFORM_DOMAIN_SUFFIX:-}
+      COMPOSE_FILE: /app/deploy/docker-compose.prod.yml
+      TRAEFIK_NETWORK: traefik_proxy
+      CERT_RESOLVER: ${CERT_RESOLVER:-letsencrypt}
+    volumes:
+      - /srv/projects:/srv/projects
+    networks:
+      - traefik_proxy
+      - orchestration
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ['CMD', 'node', '-e', "fetch('http://127.0.0.1:5500/').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=traefik_proxy
+      - traefik.http.routers.console.rule=Host(`${CONSOLE_DOMAIN:?required}`)
+      - traefik.http.routers.console.entrypoints=websecure
+      - traefik.http.routers.console.tls.certresolver=letsencrypt
+      - traefik.http.routers.console.priority=1000
+      - traefik.http.services.console.loadbalancer.server.port=5500
+
+networks:
+  orchestration:
+    internal: true
+  traefik_proxy:
+    external: true
+    name: traefik_proxy

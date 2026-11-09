@@ -1,0 +1,25 @@
+{
+  "name": "@motherbase/contracts",
+  "version": "1.0.5",
+  "description": "Shared HTTP and realtime contracts for Motherbase clients and servers.",
+  "license": "MIT",
+  "repository": { "type": "git", "url": "git+https://github.com/JulienGuinot/motherbase.git", "directory": "packages/contracts" },
+  "homepage": "https://github.com/JulienGuinot/motherbase#readme",
+  "bugs": { "url": "https://github.com/JulienGuinot/motherbase/issues" },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepack": "npm run build",
+    "lint": "eslint ."
+  },
+  "devDependencies": {
+    "typescript": "^5.4.2"
+  }
+}

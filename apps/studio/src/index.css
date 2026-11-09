@@ -1,0 +1,1080 @@
+@import 'tailwindcss';
+
+/* =========================================================
+   STUDIO: Sober Studio (Notion-inspired) Design System
+   ========================================================= */
+
+:root {
+  /* Canonical: LIGHT (default) */
+  /* Canvas < content < inset controls: keep each role distinct. The whole
+     light ramp is warm (hue ~40deg, low chroma), not the blue-grey it used to
+     be: paper and cream, so the console reads as a document, not a dialog. */
+  --bg: #f0ede4;
+  --surface: #fdfcf8;
+  --surface-2: #f5f2e9;
+  --text: #211f1b;
+  --text-dim: #57524a;
+  --text-mute: #6e6860;
+  --border: #e0dbcd;
+  --border-strong: #c2baa8;
+  --hover: rgba(60, 45, 20, .06);
+  /* Burnt orange, not the SaaS #f97316. Dark enough that white sits on it at
+     4.6:1 and that it still reads as text on paper when nav items go active. */
+  --accent: #c94e0c;
+  --accent-fg: #fff;
+  --accent-soft: rgba(201, 78, 12, .10);
+
+  /* Status (desaturated) */
+  --green: #287c46;
+  --amber: #92600e;
+  --red: #be3e35;
+  --blue: #176bc0;
+  /* Fifth status hue, for classifications that need one beyond ok / warn / err
+     / info (realtime message types). Named `purple` because `--violet` is
+     already taken by a back-compat alias that resolves to blue. */
+  --purple: #7c6bd4;
+
+  /* Backdrop behind a code surface (CodeMirror, response viewers, SQL previews).
+     These panels used to be pinned to a near-black hex, which read as a hole in
+     the page in light mode. */
+  --code-bg: var(--surface-2);
+
+  /* Scales */
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 10px;
+  --control-py: .45rem;
+  --control-px: .8rem;
+  --input-py: .5rem;
+  --input-px: .7rem;
+  --table-py: 11px;
+  --table-px: 14px;
+  --shadow-sm: 0 1px 2px rgba(60, 45, 20, .07);
+  --shadow-md: 0 2px 8px rgba(60, 45, 20, .09);
+  --shadow-pop: 0 8px 28px rgba(45, 35, 15, .16);
+
+  /* Fonts. The --font-geist / --font-jetbrains / --font-gaegu vars come from
+     next/font in app/layout.tsx, so the faces are self-hosted; the tails below
+     are what renders before hydration and in tests, where those vars are unset. */
+  --font-sans: var(--font-geist), -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-mono: var(--font-jetbrains), ui-monospace, 'SF Mono', Menlo, monospace;
+  --font-display: var(--font-gaegu), var(--font-sans);
+  --font-serif: var(--font-sans);
+  /* serif retired */
+
+  /* Back-compat aliases (old inline styles resolve to new palette) */
+  --ink-0: var(--bg);
+  --surface-1: var(--surface);
+  --surface-3: var(--ink-3);
+  --ink-1: var(--surface);
+  --ink-2: var(--surface-2);
+  --ink-3: #eae6db;
+  --ink-4: #ded9cb;
+  --ink-5: #ccc5b4;
+  --paper: var(--text);
+  --paper-dim: var(--text-dim);
+  --paper-mute: var(--text-mute);
+  --hairline: var(--border);
+  --hairline-strong: var(--border-strong);
+  --ember: var(--accent);
+  --ember-glow: #f3813f;
+  --lime: var(--green);
+  --violet: var(--blue);
+  --rose: var(--amber);
+  --danger: var(--red);
+
+  color-scheme: light;
+}
+
+[data-theme='dark'] {
+  /* Deep canvas, restrained panel lift, then controls. Borders define edges
+     without turning large surfaces into light grey blocks. */
+  --bg: #1f1f1f;
+  --surface: #262626;
+  --surface-2: #2d2d2d;
+  --text: #e9e7e3;
+  --text-dim: #b4afa6;
+  /* The warm canvas lifted every background, and #837c72 followed the old one
+     down to 3.3:1 on --surface-2 -- below WCAG AA for the 11px it is used at
+     (the pager counts, table footers, timestamps). Same hue, lifted until the
+     lightest surface clears 4.5:1; it is 4.5, 5.0 and 5.4 on the three. */
+  --text-mute: #9a938a;
+  /* Alpha, not a mid grey. A solid #2b3037 line sat several steps brighter
+     than every surface it framed, so each card read as an outlined box drawn on
+     top of the page rather than as a panel. A translucent hairline keeps the
+     same relative weight over --surface and --surface-2 alike, and the panels
+     go back to separating by value, which is what the palette was built for. */
+  --border: rgba(255, 255, 255, .07);
+  --border-strong: rgba(255, 255, 255, .14);
+  --hover: rgba(255, 255, 255, .06);
+  /* Dark surfaces separate by border and value, never by shadow: a drop shadow
+     on a near-black panel only smears the edge it was meant to define. */
+  --shadow-sm: none;
+  --shadow-md: none;
+  --shadow-pop: 0 16px 48px rgba(0, 0, 0, .55);
+  --accent: #f3813f;
+  --accent-fg: #24150a;
+  --accent-soft: rgba(243, 129, 63, .14);
+  --green: #5fae79;
+  --amber: #e0a64c;
+  --red: #e0695e;
+  --blue: #4a9eff;
+  --purple: #9b8ce8;
+  --code-bg: #0c0e11;
+
+  --ink-3: #22272e;
+  --ink-4: #2d343e;
+  --ink-5: #3b4552;
+  --ember-glow: #ff9b50;
+
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+/* The app shell (`h-dvh overflow-hidden`) is meant to fill exactly one viewport
+   and own all scrolling internally (every route scrolls inside `<main>`, never
+   the document). Without this, whenever the root's `100dvh` computes a hair
+   taller than the real client area — routine in embedded or zoomed browsers —
+   the whole window gains a scrollbar and the fixed shell drifts. Locking the
+   document's overflow enforces the contract the shell already declares. */
+html,
+body,
+#root {
+  height: 100%;
+}
+
+html,
+body {
+  overflow: hidden;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  overscroll-behavior: none;
+  /* viewport-fit=cover (app/layout.tsx) hands the whole screen to the page. The
+     sides are kept clear of a landscape phone's camera cutout, as Safari did
+     before cover. Top and bottom are not: each fixed edge pads its own. */
+  padding-inline: env(safe-area-inset-left) env(safe-area-inset-right);
+}
+
+[data-density='compact'] {
+  --control-py: .3rem;
+  --control-px: .6rem;
+  --input-py: .35rem;
+  --input-px: .55rem;
+  --table-py: 7px;
+  --table-px: 10px;
+}
+
+img,
+svg,
+video,
+canvas {
+  max-width: 100%;
+}
+
+@media (max-width: 639px) {
+  .btn {
+    min-height: 38px;
+  }
+
+  .input {
+    min-height: 40px;
+    font-size: 16px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+  }
+}
+
+[data-animations='off'] *,
+[data-animations='off'] *::before,
+[data-animations='off'] *::after {
+  scroll-behavior: auto !important;
+  animation-duration: .01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: .01ms !important;
+}
+
+/* retired decorative backgrounds: kept as no-ops so markup is safe */
+.bg-dotgrid,
+.bg-noise {
+  background-image: none;
+}
+
+.bg-noise::after {
+  content: none;
+}
+
+.hairline {
+  border-color: var(--border) !important;
+}
+
+.hairline-strong {
+  border-color: var(--border-strong) !important;
+}
+
+.numeral,
+.serif {
+  font-family: var(--font-sans);
+  font-style: normal;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.mono {
+  font-family: var(--font-mono);
+}
+
+/* react-shiki owns token colours; the Studio owns every structural style. */
+.code-highlight,
+.code-highlight pre {
+  margin: 0 !important;
+  padding: 0 !important;
+  background: transparent !important;
+  border-radius: 0 !important;
+  font: inherit !important;
+  line-height: inherit !important;
+}
+
+/* Whitespace is set here, not inherited. `white-space: inherit !important` on
+   the container beat the inline style that was meant to set it, so the
+   container resolved to `normal` and every highlighted snippet rendered as one
+   run-on line with its newlines collapsed into spaces. */
+.code-highlight pre {
+  white-space: pre !important;
+  word-break: normal !important;
+}
+
+.code-highlight.code-wrap,
+.code-highlight.code-wrap pre {
+  white-space: pre-wrap !important;
+  word-break: break-word !important;
+}
+
+/* Brand mark only: the wordmark and the square rail avatar. The display face is
+   the marketing site's voice, not the console's: a handwriting font on every
+   page title is what made a database control plane read as a hobby project. */
+.display-type {
+  font-family: var(--font-display);
+  font-weight: 700 !important;
+  letter-spacing: 0 !important;
+}
+
+/* Page and panel titles. Tight sans, the same face as the rest of the console:
+   a control plane earns its weight from density and alignment, not from a
+   35px heading shouting the name of the page you already navigated to. */
+.display-heading {
+  font-family: var(--font-sans);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.label {
+  font-size: 11px;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--text-mute);
+  font-weight: 500;
+}
+
+.vmark {
+  writing-mode: horizontal-tb;
+  transform: none;
+  font-family: var(--font-sans);
+  font-size: 11px;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--text-mute);
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-mute);
+  background-clip: padding-box;
+  border: 2px solid transparent;
+}
+
+/* accent-soft is a 10% wash: readable as a card tint, invisible as a selection.
+   The selection needs to survive on top of --surface-2 as well as paper. */
+::selection {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  color: var(--text);
+}
+
+*:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* Page entrance. Was 6px over 400ms with a 300ms stagger tail, so every single
+   navigation in the console cost half a second of content sliding into place.
+   The tool felt slower than the network it was waiting on. A tool you use all
+   day should arrive, not animate. */
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(2px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes fade {
+  from {
+    opacity: 0
+  }
+
+  to {
+    opacity: 1
+  }
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: -200% 0
+  }
+
+  100% {
+    background-position: 200% 0
+  }
+}
+
+@keyframes indeterminate {
+  0% {
+    transform: translateX(-100%)
+  }
+
+  100% {
+    transform: translateX(400%)
+  }
+}
+
+@keyframes modalRise {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(.99);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+/* Mascot idle bob. Slow and small on purpose. The illustration is the only
+   thing on these screens that moves, so anything faster reads as a spinner.
+   The reduce-motion block above pins it to a single .01ms pass. */
+@keyframes mascotFloat {
+
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+
+  50% {
+    transform: translateY(-5px);
+  }
+}
+
+.rise {
+  animation: rise .16s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.mascot-float {
+  animation: mascotFloat 5s ease-in-out infinite;
+}
+
+.rise-stagger>* {
+  animation: rise .18s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.rise-stagger>*:nth-child(1) {
+  animation-delay: 0s
+}
+
+.rise-stagger>*:nth-child(2) {
+  animation-delay: .02s
+}
+
+.rise-stagger>*:nth-child(3) {
+  animation-delay: .04s
+}
+
+.rise-stagger>*:nth-child(4) {
+  animation-delay: .06s
+}
+
+.rise-stagger>*:nth-child(5) {
+  animation-delay: .08s
+}
+
+.rise-stagger>*:nth-child(6) {
+  animation-delay: .10s
+}
+
+.rise-stagger>*:nth-child(7) {
+  animation-delay: .12s
+}
+
+.rise-stagger>*:nth-child(8) {
+  animation-delay: .14s
+}
+
+/* One placeholder look for the whole app. This used to be a bare gradient on a
+   transparent background, which read as a floating line rather than as a block
+   of content waiting to arrive; the `Skeleton` component meanwhile pulsed a
+   solid surface. Both now resolve to this: a surface-toned block with a
+   highlight sweeping across it. */
+.shimmer {
+  background-color: var(--surface-2);
+  background-image: linear-gradient(90deg, transparent, var(--hover), transparent);
+  background-size: 200% 100%;
+  border-radius: var(--radius-sm);
+  animation: shimmer 1.4s linear infinite;
+}
+
+/* Travelling sliver used by the topbar fetch indicator: no total is known, so
+   it reports "working", not "n% done". */
+.indeterminate {
+  width: 25%;
+  animation: indeterminate 1.1s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+/* The assistant's "thinking" orb. Warm steps only: a --blue stop averaged to
+   grey at 11-14px, which is the size it is actually used at.
+   The assistant's "thinking" orb. Only AI waits get it: a spinner says "a
+   request is in flight", this says "a model is composing". Two layers over one
+   conic gradient (a spinning blurred halo, a glossy core) so it reads as a
+   sphere rather than as a coloured dot at 12px. The reduce-motion and
+   data-animations='off' blocks above pin both animations to one frame. */
+@keyframes orbSpin {
+  to {
+    transform: rotate(1turn);
+  }
+}
+
+@keyframes orbPulse {
+
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: .82;
+  }
+
+  50% {
+    transform: scale(1.1);
+    opacity: 1;
+  }
+}
+
+.thinking-orb {
+  position: relative;
+  display: inline-block;
+  flex: none;
+  vertical-align: -0.1em;
+  border-radius: 50%;
+  background: conic-gradient(from 0deg, var(--accent), var(--ember-glow), var(--purple), var(--accent));
+  animation: orbPulse 1.6s ease-in-out infinite;
+}
+
+.thinking-orb::before {
+  content: '';
+  position: absolute;
+  inset: -18%;
+  border-radius: inherit;
+  background: inherit;
+  filter: blur(3px);
+  opacity: .6;
+  animation: orbSpin 2.4s linear infinite;
+}
+
+.thinking-orb::after {
+  content: '';
+  position: absolute;
+  inset: 26%;
+  border-radius: inherit;
+  background: radial-gradient(circle at 34% 28%, rgba(255, 255, 255, .72), rgba(255, 255, 255, 0) 66%);
+}
+
+/* Scrim behind a modal. Pinned to near-black it swamped light mode, where the
+   page underneath should still read as paper behind a veil. */
+.modal-scrim {
+  background: rgba(20, 18, 15, .42);
+  backdrop-filter: blur(4px);
+}
+
+[data-theme='dark'] .modal-scrim {
+  background: rgba(4, 5, 7, .72);
+  backdrop-filter: blur(8px);
+}
+
+.modal-fade {
+  animation: fade .16s ease both;
+}
+
+.modal-rise {
+  animation: modalRise .24s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* In @layer components so Tailwind utilities win: unlayered CSS beats layered
+   utilities in v4, so `.btn`'s display silently defeated `md:hidden`. */
+@layer components {
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    gap: .5rem;
+    padding: var(--control-py) var(--control-px);
+    font-size: 13px;
+    font-weight: 500;
+    letter-spacing: 0;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text);
+    transition: background .15s, border-color .15s, box-shadow .15s;
+    cursor: pointer;
+    border-radius: var(--radius-sm);
+  }
+
+  .btn:hover {
+    background: var(--hover);
+    border-color: var(--border-strong);
+  }
+
+  .btn-primary {
+    background: var(--accent);
+    color: var(--accent-fg);
+    border-color: var(--accent);
+    font-weight: 500;
+  }
+
+  .btn-primary:hover {
+    background: color-mix(in srgb, var(--accent) 88%, #000);
+    color: var(--accent-fg);
+    border-color: color-mix(in srgb, var(--accent) 88%, #000);
+  }
+
+  .btn-ghost {
+    border-color: transparent;
+    background: transparent;
+  }
+
+  .btn-ghost:hover {
+    background: var(--hover);
+    border-color: transparent;
+  }
+
+  .btn:disabled {
+    opacity: .45;
+    cursor: not-allowed;
+  }
+}
+
+.input {
+  width: 100%;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: var(--input-py) var(--input-px);
+  font-size: 13px;
+  border-radius: var(--radius-sm);
+  transition: border-color .15s, box-shadow .15s;
+}
+
+.input:focus {
+  border-color: var(--accent);
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.input::placeholder {
+  color: var(--text-mute);
+}
+
+/* ListInput: an .input box holding one chip per entry plus the field that adds
+   them. Its padding plus the field's matches a plain .input, so rows line up. */
+.list-input {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: .3rem;
+  cursor: text;
+  padding: calc(var(--input-py) - .2rem) calc(var(--input-px) - .3rem);
+}
+
+.list-input:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.list-input[aria-disabled="true"] {
+  opacity: .6;
+  cursor: not-allowed;
+}
+
+.list-input-field {
+  flex: 1 0 9rem;
+  min-width: 0;
+  padding: .2rem .3rem;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.list-input-field::placeholder {
+  color: var(--text-mute);
+}
+
+.list-input-item {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: 12px;
+}
+
+.list-input-item[data-invalid] {
+  border-color: var(--red);
+  color: var(--red);
+}
+
+.list-input-item>button {
+  padding: .1rem .15rem .1rem .45rem;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.list-input-item>button+button {
+  display: inline-flex;
+  padding: .2rem .3rem;
+  color: var(--text-mute);
+}
+
+.list-input-item>button+button:hover {
+  color: var(--text);
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: .4rem;
+  padding: .15rem .5rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-sans);
+  font-size: 11px;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--text-dim);
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
+  position: relative;
+}
+
+.dropzone {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: .5rem;
+  padding: 1.75rem 1rem;
+  border: 1px dashed var(--border-strong);
+  background: var(--surface-2);
+  color: var(--text-mute);
+  text-align: center;
+  cursor: pointer;
+  border-radius: var(--radius-md);
+  transition: border-color .15s, background .15s, color .15s;
+  position: relative;
+}
+
+.dropzone:hover,
+.dropzone.is-active {
+  border-color: var(--accent);
+  color: var(--text);
+  background: var(--accent-soft);
+}
+
+.dropzone input[type="file"] {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+table.console {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+table.console thead th {
+  font-family: var(--font-sans);
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--text-mute);
+  text-align: left;
+  padding: var(--table-py) var(--table-px);
+  border-bottom: 1px solid var(--border);
+  ;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+table.console tbody td {
+  padding: var(--table-py) var(--table-px);
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+
+/* Row backgrounds are opaque, not translucent washes. A frozen column inherits
+   its row's background so it tracks hover and selection, and an inherited
+   translucent colour would let the scrolled-under cells show through it. */
+table.console tbody tr {
+  background: var(--surface);
+  transition: background .12s;
+}
+
+table.console tbody tr:hover {
+  background: var(--surface-2);
+}
+
+/* Column frozen against horizontal scroll. `left` is set per cell, since it
+   depends on whether the checkbox gutter is present.
+
+   Every row state paints the frozen cell explicitly. `background: inherit` read
+   tidier but resolves to the *specified* background of the parent row. Which
+   is nothing at all on a header row, and on a body cell loses to the row rule
+   on specificity. Either way the frozen cell stayed transparent and the columns
+   scrolling under it showed straight through. No inheritance here. */
+table.console .sticky-col {
+  position: sticky;
+  z-index: 2;
+  background: var(--surface);
+}
+
+table.console thead .sticky-col {
+  z-index: 3;
+  background: var(--surface-2);
+}
+
+table.console tbody tr:hover .sticky-col {
+  background: var(--surface-2);
+}
+
+table.console tbody tr[data-checked='true'],
+table.console tbody tr[data-checked='true'] .sticky-col,
+table.console tbody tr[data-checked='true']:hover .sticky-col {
+  background: color-mix(in srgb, var(--accent) 10%, var(--surface));
+}
+
+/* The frozen edge needs a seam, otherwise columns slide under it invisibly. */
+table.console .sticky-col-last {
+  box-shadow: inset -1px 0 var(--border);
+}
+
+/* Native column resize: a grab handle with no drag handler behind it. Widths
+   are per-session, which is what a resize during one browsing pass needs. */
+table.console th .resizable {
+  resize: horizontal;
+  overflow: hidden;
+  min-width: 100%;
+}
+
+kbd {
+  font-family: var(--font-sans);
+  font-size: 11px;
+  padding: 2px 6px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+}
+
+/* Row that lights up on hover: nav rail entries, dropdown items, list rows.
+   These used to set `style.background` from onMouseEnter / onMouseLeave, which
+   loses the hover as soon as anything else writes to the same style attribute,
+   and never applies on touch or keyboard focus. */
+.nav-item {
+  transition: background .12s, color .12s;
+}
+
+.nav-item:hover {
+  background: var(--hover);
+}
+
+.nav-item:focus-visible {
+  background: var(--hover);
+}
+
+.nav-item[aria-current='true'],
+.nav-item[data-active='true'] {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.nav-item[data-active='true']:hover {
+  background: var(--accent-soft);
+}
+
+/* Per-row actions that stay out of the way until the row is hovered. Put
+   `.row-host` on the row and `.row-actions` on the action cluster.
+   Unlike a bare `opacity-0 group-hover:opacity-100`, this reveals on keyboard
+   focus too, so the buttons are not invisible while they are focused. */
+.row-host .row-actions {
+  opacity: 0;
+  transition: opacity .12s;
+}
+
+.row-host:hover .row-actions,
+.row-host:focus-within .row-actions,
+.row-actions:focus-within {
+  opacity: 1;
+}
+
+@media (hover: none) {
+  .row-host .row-actions {
+    opacity: 1;
+  }
+}
+
+.dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+}
+
+.dot-live {
+  background: var(--green);
+  color: var(--green);
+}
+
+.dot-warn {
+  background: var(--amber);
+}
+
+.dot-err {
+  background: var(--red);
+}
+
+.dot-info {
+  background: var(--blue);
+}
+
+/* The assistant's rendered markdown (features/assistant/components/Markdown.tsx).
+   The element rules live here rather than in the component because the ones that
+   matter most are structural: a table's last row must lose its rule, a heading
+   that opens an answer must lose its top margin, and neither is expressible as
+   an inline style on a react-markdown component.
+
+   Sized for the dock, which is a ~380px column: 12.5px body, tight vertical
+   rhythm, and every long token allowed to break, because the answers are full of
+   file paths, URLs and column names that would otherwise push the whole panel
+   sideways. */
+.md {
+  color: var(--text-dim);
+  font-size: 12.5px;
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+}
+
+.md>*+* {
+  margin-top: 10px;
+}
+
+.md h1,
+.md h2,
+.md h3,
+.md h4 {
+  color: var(--text);
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.md>h1,
+.md>h2,
+.md>h3,
+.md>h4 {
+  margin-top: 18px;
+}
+
+.md> :first-child {
+  margin-top: 0;
+}
+
+.md h1 {
+  font-size: 13.5px;
+}
+
+.md h2 {
+  font-size: 13px;
+}
+
+.md h3,
+.md h4 {
+  font-size: 12.5px;
+  color: var(--text-dim);
+}
+
+.md strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.md em {
+  font-style: italic;
+}
+
+.md del {
+  color: var(--text-mute);
+  text-decoration: line-through;
+}
+
+.md ul,
+.md ol {
+  padding-left: 18px;
+}
+
+.md ul {
+  list-style: disc;
+}
+
+.md ol {
+  list-style: decimal;
+}
+
+.md li+li {
+  margin-top: 4px;
+}
+
+.md li::marker {
+  color: var(--text-mute);
+}
+
+/* A list item that holds its own paragraphs must not inherit the block gap, or
+   every bullet opens with a blank line. */
+.md li>p {
+  margin: 0;
+}
+
+.md li>ul,
+.md li>ol {
+  margin-top: 4px;
+}
+
+.md :not(pre)>code {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 4px;
+  font-size: 11px;
+  color: var(--text);
+}
+
+.md blockquote {
+  border-left: 2px solid var(--accent);
+  padding-left: 10px;
+  color: var(--text-mute);
+}
+
+.md hr {
+  border: 0;
+  border-top: 1px solid var(--border);
+  margin: 16px 0;
+}
+
+.md a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+/* The table is the format these answers reach for most (schemas, job runs, hit
+   counts) and the one that read worst before. Boxed, with a tinted header, so it
+   reads as a table at a glance in a narrow column. */
+.md .md-table-scroll {
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.md table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11.5px;
+}
+
+.md thead th {
+  background: var(--surface-2);
+  color: var(--text-mute);
+  font-weight: 600;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.md th,
+.md td {
+  padding: 5px 9px;
+  vertical-align: top;
+  border-bottom: 1px solid var(--border);
+}
+
+.md tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.md td code {
+  white-space: nowrap;
+}

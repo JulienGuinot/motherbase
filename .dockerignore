@@ -1,0 +1,28 @@
+# node_modules and build outputs are produced inside the image (deps image +
+# `npm run build`); keep host copies out so they never clobber the image tree.
+**/node_modules
+**/dist
+**/.next
+**/.next-dev
+**/.turbo
+**/*.tsbuildinfo
+.turbo
+.git
+# The documentation site is not part of the product: no image carries it.
+website
+# Never bake secrets into an image (root deploy .env or per-workspace dev .env).
+**/.env*
+**/*.env
+**/*.env.*
+# Per-project credentials and runtime data must not enter COPY . . either.
+.dev-projects
+backups
+data
+apps/server/data
+*.log
+uploads
+apps/server/uploads
+.DS_Store
+npm-debug.log
+yarn-error.log
+

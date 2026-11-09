@@ -1,0 +1,113 @@
+---
+title: "Deploy"
+description: "Production deployment on a VPS with setup.sh, Traefik, and automatic TLS."
+order: 4
+---
+
+Install from the VPS terminal with one command. It starts `setup.sh`, which installs the Platform Console and routing layer; projects are created afterwards from the Console.
+
+## Prerequisites
+
+- A Linux VPS with ports 80 and 443 open. See [sizing](/docs/self-hosting/overview/#host-requirements)
+- A domain, with one wildcard DNS record for project subdomains (below)
+- Docker and Docker Compose. On Linux, `setup.sh` installs Docker from get.docker.com when it is missing
+
+## DNS
+
+For `example.com`, create:
+
+```dns
+Type: A
+Name: *
+Value: <VPS_IP>
+```
+
+This covers:
+
+```text
+console.example.com
+todo.example.com
+todo-storage.example.com
+client-a.example.com
+```
+
+`*.example.com` does not cover `example.com` itself. External customer domains still need their own DNS records.
+
+## Install
+
+```bash
+curl -fsSL https://www.motherbase.site/install.sh | bash
+```
+
+The installer downloads the deploy bundle of the latest release to `~/motherbase`, checks its SHA-256, then asks for the domain, Let's Encrypt email and Console administrator. Setup starts Traefik and the Platform Console, pulls prebuilt images, generates secrets and prints Console credentials. Run it from an interactive terminal.
+
+For an unattended install, export `DOMAIN` and `ACME_EMAIL` first, then pass `--yes` to the bootstrap script:
+
+```bash
+export DOMAIN=example.com ACME_EMAIL=you@example.com
+curl -fsSL https://www.motherbase.site/install.sh | bash -s -- --yes
+```
+
+`./deploy/update.sh` later fetches the bundle of whatever release is then the latest. Every bundle also carries a
+signed build provenance attestation, so you can check it was built by this repository's release workflow:
+
+```bash
+gh attestation verify motherbase-deploy.tar.gz --repo JulienGuinot/motherbase
+```
+
+<Note>
+No default project stack is created. Open the Platform Console, then create projects with **New project**.
+</Note>
+
+## Create a project
+
+From the Platform Console, create a project with:
+
+| Field | Example |
+|-------|---------|
+| Name | `todo` |
+| Domain | `todo.example.com` |
+| Storage domain | `todo-storage.example.com` |
+| CORS origins | `https://app.example.com` |
+
+Then open the project Studio to configure auth providers, SMTP, storage, RLS policies, SQL, and SDK connection values.
+
+## Services
+
+| Surface | URL |
+|---------|-----|
+| Platform Console | `https://console.example.com` |
+| Project API | `https://<project>.example.com` |
+| Project Studio | Open from the Platform Console |
+| OpenAPI docs | `https://<project>.example.com/api/docs` |
+
+A project's own host does not serve its admin surface to the internet: Traefik restricts `/api/admin`, `/console` and `/admin` on every project host to `127.0.0.1`. Operators reach a project through the Platform Console, which proxies to it. See [Traefik and TLS](/docs/self-hosting/traefik-and-tls/).
+
+## Health check
+
+```bash
+curl https://todo.example.com/api/health-check
+# {"message":"Server is running!","status":200,"db":"connected"}
+```
+
+A `503` with `"db":"disconnected"` means the API is up but cannot reach its Postgres.
+
+## Updates
+
+For normal platform updates from a one-line installation:
+
+```bash
+cd ~/motherbase && ./deploy/update.sh
+```
+
+This pulls the new bundle and recreates Traefik plus the Platform Console without deleting project volumes. See [Updates](/docs/getting-started/updates) for project updates, release-channel checks, migrations, and rollback.
+
+## Advanced maintenance
+
+Files under `deploy/` are internal helpers used by `setup.sh`; the host needs no Node.js for any
+of them. For day-to-day operations (status, logs, restarts, resets) and incident work, see
+[Operations](/docs/self-hosting/operations/) and [Troubleshooting](/docs/self-hosting/troubleshooting/).
+
+```bash
+docker compose -f deploy/docker-compose.prod.yml ps
+```

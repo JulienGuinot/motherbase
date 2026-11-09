@@ -1,0 +1,39 @@
+.facts {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: 0 0 32px;
+  border-top: 1px solid var(--border);
+}
+
+.fact {
+  padding: 16px 16px 0 0;
+}
+
+.fact + .fact {
+  padding-left: 16px;
+  border-left: 1px solid var(--border);
+}
+
+.factValue {
+  color: var(--text);
+  font-size: 26px;
+  line-height: 1;
+}
+
+.factLabel {
+  margin: 8px 0 0;
+  color: var(--text-mute);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+@media (max-width: 420px) {
+  .facts {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .fact + .fact {
+    padding-left: 0;
+    border-left: 0;
+  }
+}

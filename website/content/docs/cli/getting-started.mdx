@@ -1,0 +1,212 @@
+---
+title: "CLI Getting Started"
+description: "Install the Motherbase CLI, log in to the Platform Console, link a project, and run the first admin commands."
+order: 2
+---
+
+## Install
+
+```bash
+npm install -g @motherbase/cli
+motherbase --version
+motherbase --help
+```
+
+During backend development, run the local binary from the backend repo:
+
+```bash
+cd motherbase
+npm run cli -- --help
+```
+
+## Log in to the Console
+
+Use the Platform Console URL printed by `./setup.sh`.
+
+```bash
+motherbase login --url http://localhost:5500
+```
+
+For a VPS install:
+
+```bash
+motherbase login --url https://console.example.com
+```
+
+The command prompts for Console email and password, posts them to
+`/api/auth/sign-in/email`, then stores the returned token under
+`~/.motherbase/config.json`. Pass `--email`/`--password` to skip the prompts, or
+`--token <t>` to store a token without making a request.
+
+Check the active account:
+
+```bash
+motherbase whoami
+```
+
+## Link a project
+
+List projects from the Console:
+
+```bash
+motherbase projects list
+```
+
+Link the current app directory to one project:
+
+```bash
+motherbase link todo
+motherbase status
+```
+
+The link writes `.motherbase/config.json` in the current directory. From that point, resource commands route through:
+
+```text
+<consoleUrl>/api/projects/<projectId>/admin/*
+```
+
+## First project commands
+
+```bash
+motherbase db tables
+motherbase users list
+motherbase storage buckets list
+motherbase functions list
+```
+
+Run SQL when the project allows the SQL editor/admin SQL endpoint:
+
+```bash
+motherbase db sql -e "select now()"
+```
+
+<Warning>
+`db sql`, `db restore`, destructive deletes, and imports are admin operations. The CLI requires confirmation flags or prompts for destructive paths.
+</Warning>
+
+## Deploy an edge function
+
+```bash
+motherbase functions new hello        # scaffolds functions/hello/index.ts
+motherbase functions deploy hello     # or `deploy` with no name for all of them
+motherbase functions invoke hello --body '{"name":"Ada"}'
+motherbase functions list             # ids, for `functions logs <id>`
+```
+
+Edge secrets are managed separately:
+
+```bash
+motherbase secrets set STRIPE_SECRET sk_test_...
+motherbase secrets list
+```
+
+## Import from Supabase
+
+Run a dry-run preview first:
+
+```bash
+motherbase import --from-supabase "$SUPABASE_DB_URL" --preview --json
+```
+
+Then run it:
+
+```bash
+motherbase import --from-supabase "$SUPABASE_DB_URL" \
+  --service-role-key "$SUPABASE_SERVICE_ROLE_KEY" \
+  --management-token "$SUPABASE_ACCESS_TOKEN" --yes
+```
+
+The connection string alone brings the schema, data, RLS policies, email/password users and
+empty buckets. `--service-role-key` adds the storage objects, `--management-token` the edge
+functions and secrets. See [Migrate from Supabase](/docs/getting-started/migrate-from-supabase/).
+
+## Database migrations
+
+The CLI runs the Supabase CLI's local-files workflow against the linked project. The files live in a `motherbase/`
+directory laid out like `supabase/`:
+
+```text
+motherbase/
+  migrations/<version>_<name>.sql   one migration per file, applied in version order
+  seed.sql                          data for `db reset` and `db push --include-seed`
+  tests/*.sql                       pgTAP tests for `motherbase test db`
+  config.json                       optional: { "db": { "seed": { "sql_paths": [...] } } }
+```
+
+A file holds its up SQL, then optionally a `-- @down` line and the SQL that undoes it — the same convention the
+[Git sync](/docs/platform/git-migrations/) reads. A file that does not match `<version>_<name>.sql` is reported and
+skipped, as Supabase does.
+
+```bash
+motherbase migration new create_todo   # scaffold motherbase/migrations/<version>_create_todo.sql
+motherbase db push                     # apply pending local migrations (--dry-run, --include-seed, --include-all)
+motherbase migration list              # local and remote versions side by side
+motherbase db diff -f add_index        # what the remote schema has that local migrations do not build
+motherbase db pull                     # turn that difference into a new migration, recorded as applied
+motherbase db reset --confirm          # empty the app schemas, replay local migrations and seeds
+motherbase db dump -f schema.sql       # pg_dump of the app schemas
+motherbase migration repair <version> --status applied   # rewrite the history only, running no SQL
+```
+
+The server side is `/api/admin/db/*` (`apps/server/services/admin/db-workflow.service.ts`):
+
+| CLI | Endpoint |
+|---|---|
+| `migration list` / `db push` | `GET` / `POST /api/admin/db/migrations` |
+| `migration repair` | `POST /api/admin/db/migrations/:version/repair` `{ status: 'applied' \| 'reverted' }` |
+| `db diff`, `db pull` | `POST /api/admin/db/diff` |
+| `db dump` | `POST /api/admin/db/dump` |
+| `db reset` | `POST /api/admin/db/reset` |
+| `db seed` | `POST /api/admin/db/seed` |
+| `test db` | `POST /api/admin/db/test` |
+
+These bodies carry a whole local migrations directory, so `/api/admin/db` accepts JSON up to 25 MB. `db diff` replays the
+local migrations into a throwaway shadow database (with the live database's extensions and the platform schemas, no
+data) and diffs its snapshot against the live one; with no local migration, the answer is the remote schema dumped
+verbatim. The history has the shape of Supabase's `supabase_migrations.schema_migrations` (version, name,
+statements) plus where each migration came from and whether it is applied. Schemas Motherbase owns (`auth`,
+`storage`, `platform`, `realtime`, `vault`, `pgmq_public`, extension schemas) are never dumped or reset. Each migration
+runs one statement at a time in its own transaction.
+
+`motherbase migrations` (alias of `migration`) also drives the Studio-authored migrations of Database → Migrations
+(`create`, `apply`, `rollback`, `get`). The full list is in the [command reference](/docs/cli/commands/).
+
+## CI example
+
+For a linked project through the Console:
+
+```bash
+MOTHERBASE_CONSOLE_URL=https://console.example.com \
+MOTHERBASE_TOKEN=$MOTHERBASE_TOKEN \
+MOTHERBASE_PROJECT=todo \
+motherbase db tables --json
+```
+
+For a single project API, with no Console in the picture:
+
+```bash
+MOTHERBASE_URL=https://todo.example.com \
+MOTHERBASE_ADMIN_TOKEN=$MOTHERBASE_ADMIN_TOKEN \
+motherbase users list --json
+```
+
+Direct mode is a fallback: it wins only when the context has no Console token *and*
+no linked project. In a directory that is linked and logged in, `MOTHERBASE_URL` is
+ignored.
+
+## Local stack commands
+
+These commands do not need Console login:
+
+```bash
+motherbase init my-project
+motherbase start
+motherbase logs
+motherbase stop
+motherbase deploy
+```
+
+They are thin wrappers around Docker Compose and are meant for local self-host development.
+Set `CORS_ORIGINS` in the generated `.env` before the first `start`; the
+[Quickstart](/docs/getting-started/quickstart/#without-the-console-an-api-only-stack) walks
+through it.

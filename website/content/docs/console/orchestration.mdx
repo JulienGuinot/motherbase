@@ -1,0 +1,75 @@
+---
+title: "Orchestration Daemon"
+description: "The separate process that holds the Docker socket, its HTTP contract, and why the Console never touches Docker directly."
+order: 4
+---
+
+The Console does not run `docker` itself. It talks HTTP to a small daemon that does — `apps/server/console/orchestration/**`. That split exists so the Console container never needs the Docker socket: a compromise of the web-facing process does not hand over the host.
+
+```text
+Console  ──HTTP + bearer──▶  orchestration daemon  ──docker CLI──▶  project stacks
+```
+
+## Wiring
+
+| Piece | File | Role |
+|---|---|---|
+| Client | `orchestration/client.ts` | What the Console calls (`OrchestrationClient`) |
+| HTTP app | `orchestration/app.ts` | The daemon's routes and auth |
+| Runtime | `orchestration/runtime.ts` | `DockerOrchestrationRuntime`, the only place `docker` is executed |
+| Entrypoint | `orchestration/server.ts` | Boots the daemon |
+| Contracts | `orchestration/contracts.ts` | Shared types, slug and action validation |
+
+Environment: `ORCHESTRATION_URL` (default `http://orchestrator:5501`), `ORCHESTRATION_SECRET`, `ORCHESTRATION_PORT`, `COMPOSE_FILE`, `PROJECTS_DIR`, `TRAEFIK_NETWORK`, `API_IMAGE`.
+
+## Authentication
+
+A single shared bearer secret, compared with `timingSafeEqual`. Both ends refuse to start when it is shorter than 32 characters — the client in its constructor, the daemon in `createOrchestrationApp`. `/health` is the only unauthenticated route.
+
+The daemon also sets `express.json({ limit: '1kb' })`, disables `x-powered-by`, and returns `404 {"error":"Not found"}` for anything unrouted.
+
+## API
+
+| Method | Path | Returns |
+|---|---|---|
+| `GET` | `/health` | `{ ok: true }` or `503` |
+| `GET` | `/v1/projects/running` | Container names of owned, running projects |
+| `GET` | `/v1/metrics/containers` | Raw `docker stats` lines |
+| `GET` | `/v1/projects/:project/container` | `{ name, networks }` from `docker inspect` |
+| `GET` | `/v1/projects/:project/logs` | `{ stdout, stderr }` |
+| `POST` | `/v1/projects/:project/actions/:action` | `{ stdout, stderr }` |
+
+Allowed actions: `up`, `stop`, `restart`, `down`, `pull`, `rebuild`.
+
+Responses are enveloped as `{ data }` or `{ error }`. Client timeouts: 30 s by default, **15 minutes** for an action (a `pull` + `up` on a slow link is legitimately long).
+
+## Input validation
+
+Two checks, applied on every route that names a project:
+
+```ts
+PROJECT_SLUG_RE = /^[a-z0-9][a-z0-9-]{0,62}$/
+isOrchestrationAction(value)   // membership in the fixed action list
+```
+
+Failing either returns `400` with the specific message. Every other failure returns `500` with the generic `Orchestration operation failed` — the underlying error goes to the audit log, not to the caller.
+
+## Ownership
+
+`assertProjectOwned(slug)` runs before every Docker operation: the slug must correspond to a real project directory under `PROJECTS_DIR`. `runningNames()` filters `docker ps` down to containers whose name starts with an owned project's prefix. The daemon therefore cannot be steered into operating on unrelated containers on the same host.
+
+The Traefik network name is validated once at construction against `^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`.
+
+## Serialization and network setup
+
+Actions are serialized per project inside the daemon, the same guarantee the Console's `Orchestrator` provides on its side. For the actions that start a stack (`up`, `restart`, `rebuild`) the runtime ensures the Traefik network exists **before** the action and the project network after it.
+
+`pull` passes `pullApi` only when `API_IMAGE` is digest-pinned (`@sha256:`), so a locally built `motherbase-api:<version>` tag is never pulled from a registry that does not have it.
+
+## Process isolation
+
+`orchestration/server.ts` resolves the Docker binary explicitly (`/usr/local/bin/docker`, then `/usr/bin/docker`) and refuses to start if neither exists. Child processes are spawned with `extendEnv: false` and an allowlisted environment — `PATH`, `HOME`, `API_IMAGE`, `POSTGRES_IMAGE`, `MINIO_IMAGE`, `MINIO_MC_IMAGE` — so nothing else in the daemon's environment leaks into a compose invocation.
+
+## Audit
+
+Every request is logged as one JSON line: `{ component: 'orchestration-daemon', at, event, project, action, ok, durationMs, error? }`. Failed authentication is logged too, as `event: 'auth'` with `ok: false`.

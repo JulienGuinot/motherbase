@@ -1,0 +1,73 @@
+---
+title: "Monitoring, Alerts & Diagnostics"
+description: "Per-project resource usage from docker stats, threshold alerts to a webhook, and DNS/TCP diagnostics for domains."
+order: 6
+---
+
+## Resource metrics
+
+`console/services/metrics.service.ts` reads `docker stats` through the [orchestration daemon](/docs/console/orchestration/) and aggregates it per project:
+
+```ts
+interface ProjectUsage {
+  project: string
+  containers: number
+  cpuPercent: number      // raw, across the project's containers
+  memUsed: number
+  memPercent: number
+  // present only when the project's configured limits are injected
+  cpuLimit?: number       // total allotted cores
+  memLimitBytes?: number  // total allotted memory
+  cpuPct?: number         // usage as % of the CPU quota
+  memPct?: number         // usage as % of the memory quota
+}
+```
+
+Docker's human-readable sizes are parsed with a unit table that covers **both** spellings, because `docker stats` uses binary units (MiB/GiB) for memory and decimal (MB/GB) for network and block IO.
+
+The quota-relative figures (`cpuPct`, `memPct`) appear only when the project's `.env.prod` limits were injected — see [resource limits](/docs/console/projects/).
+
+## Alerts
+
+`console/services/alerts.service.ts` starts with the Console and periodically compares each project's usage against thresholds:
+
+| Setting | Default |
+|---|---|
+| CPU threshold | 85 % |
+| Memory threshold | 85 % |
+| Cooldown per project | 15 minutes |
+
+When a project's usage is over its threshold, one webhook is posted. The percentage used is the **quota-relative** one when a limit is configured, and the raw one otherwise.
+
+The payload adapts to the destination:
+
+| Destination | Body |
+|---|---|
+| `discord.com/api/webhooks` | `{ "content": "…" }` |
+| `hooks.slack.com` | `{ "text": "…" }` |
+| Anything else | Plain JSON |
+
+Delivery goes through the same SSRF-hardened `OutboundHttpClient` used for project webhooks — see [Events & Webhooks](/docs/platform/events-and-webhooks/).
+
+## Diagnostics
+
+`console/services/diagnostics.service.ts` answers the question "why is this domain not working" before you go reading Traefik logs.
+
+`consoleDns(host)` checks:
+
+1. The console host itself resolves.
+2. In prod, that **wildcard project DNS** works, by resolving `motherbase-check.<domainSuffix>` — a name that only answers if your wildcard record is real.
+
+`projectDns(project)` checks:
+
+1. `domain` resolves.
+2. `storageDomain` resolves, when set.
+3. A TCP connect to port 443 (prod) or 80 (dev), with a 2.5 s timeout.
+
+Each check returns `{ name, target, ok, message }`, where `message` is the resolved addresses, `reachable`, `timeout`, or the underlying error code. `localhost` and `*.localhost` short-circuit to OK — they resolve locally by definition and dev routing does not go through DNS.
+
+## Update checks
+
+`console/services/update.service.ts` polls `UPDATE_CHECK_URL` for the newest published version. It accepts three response shapes: a manifest `{ version }`, `{ tags: [...] }`, or a Docker Hub tags response. An empty `UPDATE_CHECK_URL` disables update checking entirely.
+
+The stack it updates is `CONSOLE_STACK_COMPOSE` (default `deploy/console/docker-compose.yml`) with services `CONSOLE_STACK_SERVICES` (default `console orchestrator`).

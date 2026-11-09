@@ -1,0 +1,69 @@
+---
+title: "Table Editor"
+description: "Browsing and editing rows, and the DDL operations the structure panel performs."
+order: 2
+---
+
+Route: `/p/:id/tables` and `/p/:id/tables/:model`. Source: `apps/studio/src/features/tables`.
+
+## Layout
+
+| Component | What it does |
+|---|---|
+| `TableSidebar` | Schema/table picker |
+| `TableDataPanel` | Paged rows, sorting, inline edit |
+| `TableStructurePanel` | Columns, types, defaults, nullability, indexes, and the relationship graph |
+| `FilterBar` | Column filters, serialized into the rows query |
+| `NewTableModal` / `NewTableButton` | Create a table, in the selected schema, from generated SQL plus an RLS policy preset. The same button is on Database → Tables and the Schema Visualizer |
+| `AddColumnForm`, `ColumnEditModal`, `CreateIndexForm` | DDL forms |
+| `ColumnTypeSelect` | Column type picker, with **New enumerated type** in its footer: creates the enum in this schema and selects it |
+| `TableContextMenus` | Per-table and per-column actions |
+| `CellValue` | Type-aware rendering of a cell |
+
+## Reads
+
+| Call | Endpoint |
+|---|---|
+| Table list | `GET /admin/tables` |
+| Rows | `GET /admin/tables/:model/rows?…` → `{ rows, total, page, pageSize }` |
+| Schema tables | `GET /admin/schema/tables?schema=…` |
+| Indexes | `GET /admin/schema/tables/:name/indexes?schema=…` |
+| Relationship graph | `GET /admin/schema/graph?schema=…` |
+
+The rows query carries `page`, `pageSize`, `sort`, `order` and `filters`; filters are parsed server-side by `apps/server/services/admin/row-filters.ts`.
+
+## Row edits
+
+| Action | Endpoint |
+|---|---|
+| Create | `POST /admin/tables/:model/rows` |
+| Update | `PATCH /admin/tables/:model/rows/:id` |
+| Delete | `DELETE /admin/tables/:model/rows/:id` |
+
+<Note>
+Sensitive columns never reach the browser. `apps/server/constants/admin.constants.ts` strips `password`, `passwordHash`, `accessToken`, `refreshToken`, `idToken`, `tokenHash`, `secretCode` and `secretCodeExpiryDate` from every admin row payload, recursively through nested relations (`maskRow`). Prisma internals and Postgres catalog tables (`_prisma_*`, `pg_*`) are excluded from the table list.
+</Note>
+
+## Structure edits (DDL)
+
+| Action | Endpoint |
+|---|---|
+| Create table | `POST /admin/schema/tables` with `{ sql, policyPreset }` |
+| Drop table | `DELETE /admin/schema/tables/:name?schema=` |
+| Add column | `POST /admin/schema/tables/:name/columns?schema=` |
+| Rename column | `PATCH /admin/schema/tables/:name/columns/:col/rename` |
+| Set nullable | `PATCH /admin/schema/tables/:name/columns/:col/nullable` |
+| Set default | `PATCH /admin/schema/tables/:name/columns/:col/default` |
+| Drop column | `DELETE /admin/schema/tables/:name/columns/:col?schema=` |
+| Create index | `POST /admin/schema/tables/:name/indexes?schema=` with `{ columns, unique, method }` |
+| Drop index | `DELETE /admin/schema/indexes/:name?schema=` |
+
+Creating a table sends the generated `CREATE TABLE`, qualified with the selected schema, **plus** a `policyPreset`, so a new table can come out of the modal with RLS already configured rather than fully open. See [Row Level Security](/docs/platform/rls/).
+
+A DDL conflict (a column, table, index or type that already exists) is a `409` with a plain sentence rather than a `500`; see [Database errors](/docs/reference/errors/#database-errors).
+
+Everything above is a real Postgres DDL statement executed by `apps/server/services/admin/schema.service.ts` — there is no shadow metadata layer. Anything you can do here you can also do in the [SQL editor](/docs/studio/sql/), and the result is identical.
+
+## Users are elsewhere
+
+`/p/:id/tables/users` redirects to the auth users screen: managing accounts goes through the auth API rather than raw row edits. See [Authentication screens](/docs/studio/auth/).

@@ -1,0 +1,222 @@
+---
+title: "Database"
+description: "Create tables, protect rows with RLS, and query them with the SDK or REST API."
+order: 3
+---
+
+Motherbase uses PostgreSQL 16 and exposes project tables through an auto-generated REST API. The normal workflow is SQL-first:
+
+1. Open the project from the **Platform Console**.
+2. Go to **Project Studio → SQL Editor** or use the Table editor.
+3. Create a table.
+4. Review the generated `/rest/v1/:model` routes.
+5. Add PostgreSQL RLS policies.
+6. Connect from your app with the SDK.
+
+<Note>
+**Platform Console** is the multi-project control plane. **Project Studio** is the admin UI for one project, served by the Console under `/studio`, with tables, SQL, auth, policies, logs, storage, realtime, edge functions, triggers, cron jobs, and settings.
+</Note>
+
+## Create a table with SQL
+
+Run SQL from **Project Studio → SQL Editor**:
+
+```sql
+CREATE TABLE todo (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  title text NOT NULL,
+  done boolean NOT NULL DEFAULT false,
+  user_id text DEFAULT auth.uid(),
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+```
+
+When `CREATE TABLE` succeeds, Motherbase discovers the table, enables RLS for it, and exposes REST routes automatically:
+
+```http
+GET    /rest/v1/todo
+POST   /rest/v1/todo
+PATCH  /rest/v1/todo?id=eq.<id>
+DELETE /rest/v1/todo?id=eq.<id>
+```
+
+The SQL editor shows results, errors, destructive-query warnings, and generated route information. It is on for every project the Console creates; on a stack you run yourself it is gated by:
+
+```env
+CONSOLE_SQL_ENABLED=true   # default false outside Console-created projects
+```
+
+It may write by default. To restrict it to reads, turn off **Allow writes from the SQL editor** under
+**Database → Settings → SQL editor**: statements then run in a PostgreSQL read-only transaction.
+
+## Table editor
+
+You can also create tables from the Project Studio Table editor. The modal shows a SQL preview and sends standard SQL to the backend, so tables created there behave the same as tables created in the SQL editor.
+
+## Database automation
+
+Project Studio also exposes database-side automation:
+
+- **SQL Functions** inspect, create, replace, and drop functions in the `public` schema.
+- **Extensions** enable or disable PostgreSQL extensions such as `pg_cron`.
+- **Postgres Triggers** create real `CREATE TRIGGER ... EXECUTE FUNCTION ...` definitions.
+- **Cron Jobs** schedule recurring SQL commands through `pg_cron`.
+
+See [Postgres Triggers](/docs/platform/triggers) and [Cron Jobs](/docs/platform/cron-jobs) for the dedicated workflows.
+
+## Row Level Security
+
+Motherbase uses native PostgreSQL RLS, not an application-level policy DSL. Policies are real `CREATE POLICY` rules stored in `pg_policies`.
+
+```sql
+CREATE POLICY "todo owner read"
+ON todo
+FOR SELECT
+TO authenticated
+USING (auth.uid() IS NOT NULL AND auth.uid() = user_id);
+
+CREATE POLICY "todo owner insert"
+ON todo
+FOR INSERT
+TO authenticated
+WITH CHECK (auth.uid() IS NOT NULL AND auth.uid() = user_id);
+
+CREATE POLICY "todo owner update"
+ON todo
+FOR UPDATE
+TO authenticated
+USING (auth.uid() = user_id)
+WITH CHECK (auth.uid() = user_id);
+
+CREATE POLICY "todo owner delete"
+ON todo
+FOR DELETE
+TO authenticated
+USING (auth.uid() = user_id);
+```
+
+Open **Project Studio → Authentication → Policies** for the visual editor, or run raw SQL from **Project Studio → SQL Editor**.
+
+<Note>
+With RLS enabled and no policy, `anon` and `authenticated` callers see no rows. With RLS disabled, `/rest/v1` refuses the table outright (`403`, "not exposed because row-level security is not enabled"). That gate covers the table routes only: a function called through `rpc()` that reads the table is decided by the table grants alone, which are broad, so turning RLS off still exposes every row to such a function.
+</Note>
+
+See the [RLS guide](/docs/platform/rls) for full policy examples and SQL Editor workflow.
+
+## Query your data
+
+The SDK offers two ways to query the same tables. Use `client.from('todo')` for a Supabase-style query builder, or `client.db.todo` for Prisma-style methods. Both use the REST API and the caller's PostgreSQL RLS policies; `client.db` does not open a direct database connection or require Prisma.
+
+With `from()`, check `{ data, error }`. Writes return `data: null` unless you add `.select()`:
+
+```ts
+import { createClient } from '@motherbase/client'
+
+const client = createClient('https://your-project.example.com', 'mb_publishable_...')
+
+// The policies above require a signed-in user.
+const { error: signInError } = await client.auth.signIn.email({
+  email: 'user@example.com',
+  password: 'your-password',
+})
+if (signInError) throw signInError
+
+const { data: todos, error } = await client
+  .from('todo')
+  .select('*')
+  .eq('done', false)
+  .order('created_at', { ascending: false })
+  .limit(20)
+
+if (error) throw error
+
+const { data: created, error: createError } = await client
+  .from('todo')
+  .insert({ title: 'Hello', done: false })
+  .select()
+  .single()
+
+if (!created) throw createError ?? new Error('Todo not created')
+console.log(created.id)
+```
+
+The equivalent Prisma-style methods return rows directly and throw on failure:
+
+```ts
+const todos = await client.db.todo.findMany({
+  where: { done: false },
+  orderBy: { created_at: 'desc' },
+  take: 20,
+})
+
+const todo = await client.db.todo.create({ data: { title: 'Hello', done: false } })
+await client.db.todo.update({ where: { id: todo.id }, data: { done: true } })
+await client.db.todo.delete({ where: { id: todo.id } })
+```
+
+Use [generated database types](/docs/reference/sdk/#typed-clients) for table and column autocomplete in both styles. `client.db` covers common reads and writes; use `from()` for advanced filters and embedded relations. The [SDK reference](/docs/reference/sdk/#prisma-style-queries) lists its methods.
+
+Every exposed table is also available directly at `/rest/v1/:model`:
+
+```http
+GET /rest/v1/todo?done=eq.false&order=created_at.desc&limit=20
+```
+
+## Connecting directly
+
+Not everything reaches a project through the REST API. An ORM, a migration tool,
+psql, a BI client or a dashboard wants the database itself.
+
+Every project publishes its PostgreSQL port on the host, and **on the loopback
+interface only**, so it is not an internet service. Reach it over an SSH tunnel:
+
+```bash
+ssh -N -L 5432:localhost:<DB_PORT> user@your-vps
+```
+
+Then connect to `localhost:5432` as if the database were local:
+
+```text
+postgresql://postgres:<password>@localhost:5432/app
+```
+
+**Project Studio → Connect → Database connection** shows the port, the password
+and a ready-to-paste URI, in three modes: over a tunnel, direct, and from another
+container on the project network.
+
+Each project gets a stable port allocated from a contiguous range (54320-54419)
+at creation, so a saved connection string keeps working across a recreate, and an
+operator can firewall the whole block in one rule.
+
+<Warning>
+Setting `DB_BIND=0.0.0.0` in the project's `.env.prod` publishes the database on
+the public internet. PostgreSQL authentication is then the only thing between the
+world and every row in the project. Restrict the port to known addresses at the
+firewall before you do it.
+
+The credentials shown on the Connect page are the owner role. It is not subject to
+row level security, so treat that URI exactly like a secret API key: server side
+only.
+</Warning>
+
+### Network restrictions and SSL enforcement
+
+**Project Settings → Database access** decides who may open a Postgres connection from outside the stack, as
+Supabase's Network Restrictions and SSL Enforcement do. Both are rendered into the database's `pg_hba.conf`
+(`services/admin/database-access.ts`) and Postgres is asked to reload:
+
+```text
+GET/PUT /api/admin/network-restrictions   { IPv4 CIDRs, IPv6 CIDRs }  empty = no restriction
+GET/PUT /api/admin/ssl-enforcement        { enforced }
+```
+
+CIDRs are stored in canonical form (the network address, not a host inside it), because Postgres refuses
+`10.0.0.5/8` and one rejected line would stop the whole file loading. The local socket, loopback and the stack's own
+bridge network (`samenet` — the API, `pg_cron` and an SSH tunnel through the host all arrive that way) are always
+allowed and never need TLS, so a restriction can never lock the project out of its own database. The default is
+Supabase's: no restriction, TLS optional. The CLI equivalents are `motherbase network-restrictions` and
+`motherbase ssl-enforcement`.
+
+## Prisma for backend maintenance
+
+Prisma is internal to the backend: it owns the `auth`, `storage` and `platform` schemas and their migrations, and you never need it to build on a project. Your own tables are plain SQL, written in Project Studio while you explore and kept as SQL migrations once they matter: see [Git Migrations](/docs/platform/git-migrations/) and [`motherbase migrations`](/docs/cli/commands/#migrations).

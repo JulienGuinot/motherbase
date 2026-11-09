@@ -1,0 +1,321 @@
+---
+title: "Storage"
+description: "Object storage with local or S3-compatible backends, admin buckets, CORS, access tokens, and webhooks."
+order: 5
+---
+
+Motherbase Storage provides file upload, download, and management over local filesystem storage or S3-compatible storage such as MinIO, AWS S3, and Cloudflare R2.
+
+Storage has two layers:
+
+- **Project files** exposed to client apps through `/api/files/*` and the SDK.
+- **Admin buckets** managed from Project Studio and the CLI through `/api/admin/storage/*`.
+
+## Backends
+
+| Backend | Use case |
+|---------|----------|
+| Local filesystem | Development, single-server VPS |
+| MinIO | Self-hosted S3, included in Docker Compose |
+| AWS S3 | Production object storage |
+| Cloudflare R2 | S3-compatible storage with low egress cost |
+
+Choose the backend under **Storage → Shared settings → Storage provider** (`storage.provider`), seeded from `STORAGE_DRIVER` until it is first saved. A change applies to new uploads; existing objects stay where they were written. Logical buckets keep the same API shape across backends.
+
+## Buckets
+
+Buckets are first-class admin resources. A bucket has a slug, display name, visibility, optional quota, optional CORS config, access tokens, and webhooks.
+
+| Field | Description |
+|-------|-------------|
+| `slug` | Stable lowercase identifier, unique per project |
+| `visibility` | `public` or `private`; decides the physical public/private S3 bucket |
+| `quotaBytes` | Optional max bytes stored in this logical bucket |
+| `cors` | Allowed origins, methods, headers, and max age |
+| `tokens` | Bucket-scoped tokens with `read`, `write`, and/or `delete` permissions |
+| `webhooks` | Fire-and-forget callbacks for `file.uploaded` and `file.deleted` |
+
+S3 keys are prefixed with the bucket slug:
+
+```text
+<bucket-slug>/<uuid>.<ext>
+```
+
+## Project Studio workflow
+
+Open **Project Studio → Storage**.
+
+You can:
+
+- create, edit, and delete buckets
+- filter the file browser by bucket
+- set bucket visibility and quota
+- configure bucket CORS
+- create scoped bucket tokens
+- add upload/delete webhooks
+- force-delete a non-empty bucket when needed
+
+<Warning>
+Bucket tokens reveal the raw token only once, when created. Store it immediately if an external service needs it.
+</Warning>
+
+## SDK usage
+
+The SDK uses a Supabase-compatible `storage.from(bucket)` surface. Objects are addressed by their `path` in the bucket, as in supabase-js; pass the `path` returned by `upload` to every later call. A file id is accepted wherever a path is.
+
+```ts
+const bucket = client.storage.from('avatars')
+
+const { data: uploaded, error } = await bucket.upload('me.png', file, {
+  visibility: 'public',
+})
+
+if (!error && uploaded) {
+  const { data: blob } = await bucket.download(uploaded.path)
+  const { data: signed } = await bucket.createSignedUrl(uploaded.path, 3600)
+  const { data: pub } = bucket.getPublicUrl(uploaded.path)
+
+  await bucket.remove([uploaded.path])
+}
+```
+
+The rest of the surface is `update`, `copy`, `move`, `info`, `exists`,
+`createSignedUrls` (batch), and `createSignedUploadUrl` / `uploadToSignedUrl` for
+direct-to-storage uploads on the S3 driver. Signatures and behaviour:
+[SDK reference](/docs/reference/sdk/#storage). Image transforms are supported through
+`download`, `getPublicUrl`, and `createSignedUrl`.
+
+Signed URLs are signed for the host clients reach storage at (`S3_PRESIGN_ENDPOINT`, the
+project's storage domain on a Console project), so they work from a browser as they are.
+
+Transform options are `width` and/or `height` (maximum 2500 pixels), `resize`
+(`cover`, `contain`, or `fill`), `quality` (20–100), and `format` (`origin`, `webp`, or
+`avif`). The render endpoint is `/storage/v1/render/image`; SVG files are not transformed.
+Without an explicit format, the server may negotiate WebP from the request's `Accept`
+header. A transformed signed URL is always time-limited, including for a public object.
+
+List objects in a bucket:
+
+```ts
+const { data: objects } = await bucket.list('avatars/', {
+  limit: 50,
+  offset: 0,
+  search: 'me',
+  sortBy: { column: 'created_at', order: 'desc' },
+})
+```
+
+`limit` defaults to `100` and is clamped to `[1, 1000]`. `sortBy.column` accepts
+`created_at`, `updated_at`, or anything else — which sorts by object key.
+
+<Note>
+Listing a **public** bucket returns every ready object in it. Listing a **private** bucket
+returns only the caller's own objects, so listing can never become a way to enumerate other
+people's files. For the operator view across every owner, use Project Studio,
+`GET /api/admin/storage/buckets/:slug/files`, or `motherbase storage ls`.
+</Note>
+
+## Authorization
+
+By default, storage authorization is a rule in the server: an object is readable
+if it is public or if you own it, and writable only by its owner. That is safe and
+needs no configuration, but it is not expressible — you cannot say "members of
+this organization", or "anyone, but only under their own user id folder".
+
+Turn on **Storage → Shared settings → Use RLS policies for storage** and PostgreSQL
+decides instead, from policies you write.
+
+| | Off (default) | On |
+|---|---|---|
+| Who decides | The built-in rule in the server | PostgreSQL policies on `storage.files` |
+| Expressible rules | public, or owner | anything you can write as SQL |
+| Bucket tokens | honoured | honoured, checked first |
+| Secret API key | full access | full access (`service_role` holds `BYPASSRLS`) |
+
+Switching over is not a cliff. The migration installs three policies reproducing
+the built-in behaviour exactly, so flipping the toggle without writing anything
+keeps what you had. Drop them once your own cover the same ground:
+
+```sql
+DROP POLICY "public objects are readable" ON storage.files;
+DROP POLICY "owners read their objects"   ON storage.files;
+DROP POLICY "owners write their objects"  ON storage.files;
+```
+
+### Writing policies
+
+Policies go on **`storage.files`**, which is this project's objects table.
+`storage.objects` is a `security_invoker` view over it carrying the Supabase
+column names, for querying and for porting expressions:
+
+| `storage.objects` | `storage.files` |
+|---|---|
+| `bucket_id` | `"bucketId"` |
+| `name` (key relative to the bucket) | `key` (bucket-prefixed) |
+| `owner` | `"ownerId"` |
+| `mimetype` | `mime` |
+
+The path helpers Supabase policies are written with all exist:
+`storage.foldername(name)`, `storage.filename(name)`, `storage.extension(name)`.
+
+Each user under their own folder, the most common rule there is:
+
+```sql
+CREATE POLICY "users manage their own folder"
+ON storage.files
+FOR ALL
+TO authenticated
+USING ((storage.foldername(key))[2] = auth.uid())
+WITH CHECK ((storage.foldername(key))[2] = auth.uid());
+```
+
+`[2]` rather than `[1]` because keys are stored bucket-prefixed:
+`avatars/<uid>/me.png` splits to `{avatars, <uid>, me.png}`.
+
+Read-only for everyone, writes for the owner:
+
+```sql
+CREATE POLICY "avatars are public to read"
+ON storage.files FOR SELECT TO anon, authenticated
+USING ("bucketId" = (SELECT id FROM storage.buckets WHERE slug = 'avatars'));
+
+CREATE POLICY "avatars are written by their owner"
+ON storage.files FOR INSERT TO authenticated
+WITH CHECK (
+  "bucketId" = (SELECT id FROM storage.buckets WHERE slug = 'avatars')
+  AND "ownerId" = auth.uid()
+);
+```
+
+These are the same policies a Supabase project already has, which is the point of
+the `storage.objects` view and the path helpers above.
+
+### How a check runs
+
+Every check runs the real statement inside the RLS pool, under the caller's role
+with their claims in `request.jwt.claims`. Reads ask whether the row is visible.
+Writes are answered by attempting the write and rolling back, because `WITH CHECK`
+cannot be evaluated otherwise without reimplementing the expression — and a second
+policy engine is exactly the thing that ends up disagreeing with the first one on
+the row that matters. Nothing commits: the check decides, the storage service
+performs.
+
+Two behaviours worth knowing:
+
+- **Bucket tokens are checked before policies.** A bucket token is a
+  pre-authorized grant an operator issued for one bucket; the authorization
+  already happened, at issue time, exactly as it did for a signed URL.
+- **A real error is never a denial.** A policy violation is Postgres `42501` and
+  becomes a 403. Anything else is re-thrown, so a broken migration surfaces as a
+  500 instead of sending you to read policies that were fine.
+
+<Note>
+Public and private objects still live in two different physical buckets, and that
+does not change with this setting. It is defence in depth, not the authorization
+model: a policy that accidentally exposes a private object still cannot make it
+anonymously downloadable from object storage.
+</Note>
+
+### Testing a policy
+
+The RLS simulator works here too. It runs any SELECT as a caller you name and
+reports the rows plus which policies decided.
+
+```bash
+motherbase rls simulate --sql "select key from storage.files" --as anon
+motherbase rls simulate --sql "select key from storage.files" --as usr_0193abc
+```
+
+## HTTP endpoints
+
+File endpoints for a signed-in user (what the SDK calls):
+
+```http
+POST   /api/files/              # upload file, multipart/form-data field "file"
+POST   /api/files/presign       # get a presigned PUT URL, S3 driver only
+POST   /api/files/:id/finalize  # confirm a presigned upload landed
+GET    /api/files/:id/url       # get a download URL, ?expiresIn=<seconds>
+GET    /api/files/:id/raw       # stream a file
+DELETE /api/files/:id           # delete a file
+```
+
+The same objects are addressable by bucket and key, which is what the SDK uses:
+
+```http
+GET    /api/files/list/:bucket          # list objects
+GET    /api/files/object/:bucket/*      # stream by key
+GET    /api/files/object-url/:bucket/*  # download URL by key
+GET    /api/files/object-info/:bucket/* # metadata, no body
+DELETE /api/files/object/:bucket/*      # delete by key
+POST   /api/files/copy                  # { bucket, from, to, upsert? }
+POST   /api/files/move                  # { bucket, from, to, upsert? }
+```
+
+Bucket public/token endpoints:
+
+```http
+POST   /api/storage/:slug/upload     # bucket-token upload, requires write token
+GET    /api/storage/:slug/files/:id  # public bucket read, or read token for private buckets
+DELETE /api/storage/:slug/files/:id  # requires delete token
+```
+
+Client uploads may pass:
+
+| Field | Description |
+|-------|-------------|
+| `file` | Multipart file payload |
+| `visibility` | `public` or `private` |
+| `bucket` | Optional logical bucket slug; the SDK sends this from `storage.from(bucket)` |
+
+## Admin bucket endpoints
+
+```http
+GET    /api/admin/storage/buckets
+POST   /api/admin/storage/buckets
+GET    /api/admin/storage/buckets/:slug
+PATCH  /api/admin/storage/buckets/:slug
+DELETE /api/admin/storage/buckets/:slug?force=true
+
+GET    /api/admin/storage/buckets/:slug/files
+GET    /api/admin/storage/buckets/:slug/cors
+PUT    /api/admin/storage/buckets/:slug/cors
+DELETE /api/admin/storage/buckets/:slug/cors
+
+GET    /api/admin/storage/buckets/:slug/tokens
+POST   /api/admin/storage/buckets/:slug/tokens
+DELETE /api/admin/storage/buckets/:slug/tokens/:id
+
+GET    /api/admin/storage/buckets/:slug/webhooks
+POST   /api/admin/storage/buckets/:slug/webhooks
+DELETE /api/admin/storage/buckets/:slug/webhooks/:id
+```
+
+These routes are for Project Studio, the Platform Console proxy, and operator tooling. Do not call them from browser code with admin credentials.
+
+## CLI examples
+
+```bash
+motherbase storage buckets list
+motherbase storage buckets create avatars --visibility public
+motherbase storage ls avatars
+motherbase storage cp ./me.png avatars:
+motherbase storage rm <file-id>
+```
+
+## Upload size
+
+Every upload path (multipart, presigned, resumable and the S3 protocol) is capped by the
+server's `MAX_UPLOAD_MB`, 25 MB by default; `storage.limits` and a bucket's own limit can only
+narrow it. To raise it, set `MAX_UPLOAD_MB` in the project's `.env.prod` (on a Console
+project) and update the project so the API is recreated.
+
+## Common errors
+
+| Condition | Status | Meaning |
+|-----------|--------|---------|
+| Invalid slug | `400` | Slug must be lowercase alphanumeric and hyphens, 3-63 chars |
+| Bucket not found | `404` | No bucket exists for the slug |
+| Quota exceeded | `413` | Upload would exceed bucket quota |
+| Delete non-empty bucket | `409` | Pass `force=true` or empty the bucket first |
+| Token expired | `401` | Bucket token is no longer valid |
+| Token lacks permission | `403` | Token does not include the required permission |

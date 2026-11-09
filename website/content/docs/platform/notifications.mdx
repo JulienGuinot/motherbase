@@ -1,0 +1,91 @@
+---
+title: "Notifications"
+description: "Transactional email over SMTP, SMS over Twilio, and push to iOS/Android/Web — all configured per project from Studio."
+order: 21
+---
+
+Three delivery channels, all driven by settings groups rather than environment variables, so changing one takes effect on the next send.
+
+| Channel | Service | Settings group |
+|---|---|---|
+| Email | `services/transporter.service.ts` (nodemailer) | `email.smtp`, `email.templates` |
+| SMS | `services/sms.service.ts` (Twilio) | `phone.sms` |
+| Push | `services/notification/notification.service.ts` | `push.fcm`, `push.apns` |
+
+## Email
+
+`TransporterService` builds a nodemailer transport from the `email.smtp` group and caches it against a **fingerprint** — a hash of the resolved config. Change SMTP settings in Studio and the next `sendMail` rebuilds the transport automatically; nothing restarts.
+
+```ts
+await transporterService.sendMail({ to, subject, html })
+await transporterService.sendTestEmail(to)   // returns { ok: true, ms }
+```
+
+The `from` address falls back to the SMTP username when `from` is empty.
+
+The same transport backs `sendMail()` inside [edge functions](/docs/platform/edge-functions/#sending-email): configure SMTP once and function code inherits it.
+
+### Templates
+
+Auth emails are templated and editable in the `email.templates` group (`apps/server/auth/email-templates.ts`):
+
+| Kind | Templates |
+|---|---|
+| OTP | verification subject/body, recovery subject/body |
+| Links | magic-link subject/body, verify-link subject/body |
+
+Emails are branded with `APP_NAME` (default `Motherbase`), which is also the fallback TOTP issuer when `auth.twoFactor.issuer` is empty. Set it per project so a client never receives mail under someone else's name.
+
+Each has a frozen default (`DEFAULT_AUTH_EMAIL_TEMPLATES`, `DEFAULT_AUTH_LINK_TEMPLATES`) used whenever your override is absent. Templates are interpolated with a fixed variable set and validated by `isSafeAuthEmailSubjectTemplate` / `isSafeAuthEmailBodyTemplate` (and the link equivalents) before use — a rejected template falls back to the default rather than sending something malformed.
+
+<Note>
+Passwordless sign-in (magic link, email OTP, password reset) requires working SMTP. Configure it before enabling those methods in **Authentication**.
+</Note>
+
+## SMS
+
+`SmsService` is provider-agnostic behind an internal `SmsProvider` interface, with Twilio implemented today. Credentials come from `phone.sms` and are shared by phone OTP sign-in, MFA second factor, and notifications.
+
+Required config: `accountSid`, `authToken`, and **either** `from` or `messagingServiceSid`. Missing any of those raises:
+
+```text
+Twilio SMS is not fully configured (accountSid, authToken and from/messagingServiceSid required).
+```
+
+The call is a plain `POST` to `https://api.twilio.com/2010-04-01/Accounts/<sid>/Messages.json` with basic auth.
+
+## Push
+
+`NotificationService` is a device registry plus a fan-out that routes by platform:
+
+| Platform | Provider |
+|---|---|
+| `ios` | APNs (`services/notification/apns.provider.ts`) |
+| `android`, `web` | FCM (`services/notification/fcm.provider.ts`) |
+
+```ts
+registerDevice(userId, token, platform)   // upsert on token
+unregisterDevice(token, userId)
+sendToUser(userId, { title, body, data })
+```
+
+Results come back as `{ token, success, error?, invalid? }`. Tokens the provider reports as **permanently invalid** are deleted from the `devices` table on the spot, so the registry self-cleans. A disabled provider does not throw — every token gets `success: false, error: 'Push provider not configured'`.
+
+Provider credentials come from `push.fcm` / `push.apns`; the env variables `FIREBASE_*` and `APNS_*` seed them (see [environment](/docs/reference/environment/)).
+
+## Endpoints
+
+| Method | Path | Guard | Purpose |
+|---|---|---|---|
+| `POST` | `/api/devices/` | session + validator | Register a push token |
+| `DELETE` | `/api/devices/` | session + validator | Unregister a token |
+| `POST` | `/api/notifications/send` | session with role `ADMIN` | Send to a user |
+| `POST` | `/api/notifications/test` | session + validator | Test delivery |
+| `POST` | `/api/admin/settings/push/test` | admin | `{ token, platform: ios \| android \| web }`: sends one test notification to that device with the saved `push.fcm` / `push.apns` (Project Settings → Push notifications) |
+
+Full route table: [Admin & HTTP API reference](/docs/reference/admin-api/).
+
+## Related
+
+- [Auth](/docs/platform/auth/) — the flows that send these emails and SMS codes.
+- [Settings reference](/docs/reference/settings/) — every field of `email.smtp`, `email.templates`, `phone.sms`, `push.fcm` and `push.apns`.

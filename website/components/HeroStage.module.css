@@ -1,0 +1,237 @@
+/* The octopus in the middle, a plate per service around it, and a tentacle
+   from the octopus to each plate. Tentacles are measured in JS, so the grid
+   below is free to change per breakpoint. */
+.stage {
+  /* sized by the screen: as wide as 12vw allows, as tall as the space left
+     under the title (three rows) allows */
+  --plate: clamp(88px, min(12vw, (100vh - 610px) / 2.4), 260px);
+  --scatter: 1;
+  position: relative;
+  display: grid;
+  gap: 40px 14px;
+  align-items: center;
+  justify-items: center;
+  width: 100%;
+  max-width: 2200px;
+  margin: 0 auto;
+}
+
+/* Wide: twelve, three rows of four around the octopus. */
+@media (min-width: 1200px) {
+  .stage {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) minmax(240px, 1.25fr) repeat(2, minmax(0, 1fr));
+    grid-template-areas:
+      's8  s0 core s1 s9'
+      's6  s2 core s3 s7'
+      's10 s4 core s5 s11';
+  }
+  /* outer columns reach for the screen edges */
+  .plate:is([data-i='6'], [data-i='8'], [data-i='10']) { justify-self: start; }
+  .plate:is([data-i='7'], [data-i='9'], [data-i='11']) { justify-self: end; }
+}
+
+/* Tablet and small desktop: eight, two rows of four. */
+@media (min-width: 760px) and (max-width: 1199px) {
+  .stage {
+    --plate: clamp(112px, min(15vw, (100vh - 470px) / 1.6), 230px);
+    grid-template-columns: repeat(2, minmax(0, 1fr)) minmax(180px, 1.1fr) repeat(2, minmax(0, 1fr));
+    grid-template-areas:
+      's6 s0 core s1 s7'
+      's2 s4 core s5 s3';
+  }
+  .stage { --scatter: 0.6; }
+  .plate[data-tier='3'] { display: none; }
+  .plate:is([data-i='6'], [data-i='2']) { justify-self: start; }
+  .plate:is([data-i='7'], [data-i='3']) { justify-self: end; }
+}
+
+/* Phone: the octopus on top, six plates hanging under it. */
+@media (max-width: 759px) {
+  .stage {
+    --plate: 100%;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-areas:
+      'core core'
+      's0 s1'
+      's2 s3'
+      's4 s5';
+    gap: 34px 12px;
+    --scatter: 0.3;
+  }
+  .plate[data-tier='2'],
+  .plate[data-tier='3'] { display: none; }
+}
+
+/* ---- Tentacles ------------------------------------------------------- */
+.tentacles {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.arm,
+.pulse {
+  fill: none;
+  stroke-linecap: round;
+  vector-effect: non-scaling-stroke;
+}
+
+.arm {
+  stroke: color-mix(in oklch, var(--text) 22%, var(--bg));
+  stroke-width: 1;
+  transition: stroke 0.26s var(--ease-out);
+}
+
+/* A bead of light runs down each arm: the mothership feeding a service. */
+.pulse {
+  stroke: var(--accent);
+  stroke-width: 1.6;
+  stroke-dasharray: 3 97;
+  stroke-dashoffset: 3;
+  opacity: 0;
+}
+
+.tentacles g[data-active] .arm {
+  stroke: var(--accent);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .pulse {
+    animation: feed 3.6s cubic-bezier(0.32, 0.72, 0, 1) infinite;
+    animation-delay: calc(var(--i) * -0.83s);
+  }
+  .tentacles g[data-active] .pulse {
+    animation-duration: 1.1s;
+  }
+}
+
+@keyframes feed {
+  0% { stroke-dashoffset: 3; opacity: 0; }
+  12% { opacity: 0.9; }
+  85% { opacity: 0.9; }
+  100% { stroke-dashoffset: -97; opacity: 0; }
+}
+
+/* ---- Core (octopus) -------------------------------------------------- */
+.core {
+  grid-area: core;
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+
+.mascot {
+  position: relative;
+  width: 150px;
+  height: 150px;
+}
+
+.pose {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  transform: scale(0.92);
+  transition: opacity 0.22s ease, transform 0.35s var(--ease-out);
+}
+
+.poseOn {
+  opacity: 1;
+  transform: scale(1);
+}
+
+.coreLabel {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 11px;
+  color: var(--text-dim);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--green);
+}
+
+/* ---- Plates ---------------------------------------------------------- */
+.plate {
+  position: relative;
+  z-index: 1;
+  width: var(--plate);
+  padding: 3px 3px 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
+  /* scattered, not gridded (never tilted): separate from transform, which the entrance animates */
+  translate: calc(var(--dx, 0px) * var(--scatter)) calc(var(--dy, 0px) * var(--scatter));
+  scale: calc(1 + (var(--s, 1) - 1) * var(--scatter));
+  transition: border-color 0.2s ease, box-shadow 0.25s var(--ease-out), transform 0.25s var(--ease-out);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .plate {
+    animation: rise 0.62s var(--ease-out) both;
+    animation-delay: calc(320ms + var(--i) * 45ms);
+  }
+}
+
+@keyframes rise {
+  from { opacity: 0; transform: translateY(10px); }
+}
+
+.plate[data-active] {
+  border-color: color-mix(in oklch, var(--accent) 45%, var(--border));
+  box-shadow: var(--shadow-glow);
+  transform: translateY(-2px);
+  z-index: 2;
+}
+
+.readout {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 4px 7px;
+  font-size: 11px;
+}
+
+.name {
+  color: var(--text);
+  font-weight: 600;
+}
+
+
+
+.caption {
+  overflow: hidden;
+  color: var(--text-mute);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 759px) {
+  .mascot { zoom: 0.83; }
+}
+
+@media (min-width: 1700px) and (min-height: 1000px) {
+  .mascot { zoom: 1.25; }
+}
+
+@media (min-width: 2200px) and (min-height: 1300px) {
+  .mascot { zoom: 1.6; }
+}

@@ -1,0 +1,200 @@
+---
+title: "Studio Overview"
+description: "The admin app: how it is served, the full route map, the app shell, guards, and mock mode."
+order: 1
+---
+
+## Common tasks
+
+| To | Go to | Guide |
+|---|---|---|
+| Create a table and its policies | **SQL Editor**, or **Table Editor** | [Database](/docs/platform/database/), [RLS](/docs/platform/rls/) |
+| See what `anon` and signed-in users can do | **Authentication → Role Access** | [RLS → Who can do what](/docs/platform/rls/#who-can-do-what) |
+| Turn on a sign-in method or SMTP | **Authentication → Sign In / Providers**, **Authentication → Settings** | [Auth](/docs/platform/auth/) |
+| Create a bucket | **Storage** | [Storage](/docs/platform/storage/) |
+| Write or open up an edge function | **Edge Functions** | [Edge Functions](/docs/platform/edge-functions/) |
+| Copy the URL and keys for an app | **Connect**, **Project Settings → API keys** | [API Keys](/docs/platform/api-keys/) |
+| Find out why a request failed | **Logs**, **Advisors** | [Logs & observability](/docs/studio/logs/) |
+
+The rest of this section documents how Studio is built, for contributors and for operators
+who need to know which API a screen calls.
+
+## How it is built
+
+Studio is a Next.js 15 App Router app on React 19 (`apps/studio`). One build serves two
+products:
+
+| Product | Served by | You get |
+|---|---|---|
+| Platform Console | `apps/server/console/server.ts`, at `/studio` | Org, projects, team, usage, billing, platform settings |
+| Project Studio | The same server, at `/studio/p/:id/*` | The project surfaces — tables, SQL, auth, storage, logs… |
+
+In production the Console is the only server that mounts Studio (`mountStudio` in
+`apps/server/lib/studio-next.ts`); a project's API serves no UI. Both products share the
+fixed `basePath: '/studio'` from `next.config.mjs` (Next has no runtime basePath). The one
+other way to run it is `npm run studio:dev` against a single project API on `localhost:5001`,
+with no Console. To tell the two situations apart, the Console stamps an
+`mb_product=console` cookie on every non-API response, and `src/shared/lib/project.ts` reads
+it. No cookie means standalone Project Studio, which is the safer default: the shell then
+skips the platform-only calls a project API cannot answer.
+
+<Note>
+`next.config.mjs` is deliberately `.mjs`, not `.ts`. The API server loads it at runtime
+through `nextApp.prepare()`, and the production image runs `npm prune --omit=dev`, so
+TypeScript is gone by then — Next reacted by shelling out to install it inside the
+container on every boot. A `.mjs` config needs no compiler at runtime.
+</Note>
+
+## App shell
+
+Route files live in `apps/studio/app/`; the shell components they compose live in
+`apps/studio/src/shell/`.
+
+| File | Role |
+|---|---|
+| `app/layout.tsx` | Root document, fonts, theme |
+| `app/providers.tsx` | React Query and app-level context |
+| `app/client-gate.tsx` | Defers client-only work until after hydration |
+| `src/shell/Layout.tsx` | Chrome for platform-level screens |
+| `src/shell/OrgLayout.tsx` | Org-scoped shell (org switcher) — `app/(org)/` |
+| `src/shell/ProductLayout.tsx` | Two-tier product panels (`database`, `auth`, `observability`) |
+| `src/shell/RequireAuth.tsx` | `RequireAuth`, `RequirePasswordChange`, `RequirePlatformCapability`, `RequirePlatformFeature` |
+| `src/shell/ProjectGate.tsx` | Resolves `/p/:id` and blocks the project shell until the project is known |
+| `app/not-found.tsx` / `src/shell/NotFound.tsx` | 404 |
+
+Guards map onto the Console's model: `RequirePlatformCapability capability="users.manage"` gates **Team**, `RequirePlatformFeature feature="billing"` gates **Billing** (off unless `CONSOLE_BILLING_ENABLED=true`). See [capabilities](/docs/console/users-and-orgs/).
+
+## Platform routes
+
+| Path | Page |
+|---|---|
+| `/login` | Sign in |
+| `/password-change-required` | Forced rotation |
+| `/` | Projects |
+| `/new` | Create project |
+| `/team` | Team (needs `users.manage`) |
+| `/usage` | Usage |
+| `/logs` | Platform logs |
+| `/billing` | Billing (feature-gated) |
+| `/settings` | Org settings |
+| `/git/callback` | GitHub OAuth return page |
+| `/system` | → `/settings` |
+
+## Project routes (`/p/:id/*`)
+
+| Path | Page | Docs |
+|---|---|---|
+| `overview` | Project overview | [Platform screens](/docs/studio/platform/#project-overview-and-connect) |
+| `connect` | Connection strings and keys | [Platform screens](/docs/studio/platform/#project-overview-and-connect) |
+| `branches` | Preview branches: create, merge, rebase, reset, pause, delete | [Branches](/docs/console/preview-projects/#branches) |
+| `tables`, `tables/:model` | Table editor | [Table editor](/docs/studio/tables/) |
+| `sql` | SQL editor | [SQL editor](/docs/studio/sql/) |
+| `storage` | Buckets and objects | [Storage](/docs/studio/storage/) |
+| `logs` | Log stream | [Logs & observability](/docs/studio/logs/) |
+| `advisor` | Advisor findings | [Logs & observability](/docs/studio/logs/#advisor) |
+| `realtime` | Realtime inspector | [Database screens](/docs/studio/database/#realtime) |
+| `api` | API explorer | [API tools](/docs/studio/api-tools/) |
+| `edge-functions` | Edge functions | [API tools](/docs/studio/api-tools/#edge-functions) |
+| `integrations` | Integrations, Vault and Wrappers | [Integrations](/docs/platform/integrations/) |
+| `settings` | Project settings | [Platform screens](/docs/studio/platform/#project-settings) |
+
+A catch-all `[...unknown]` under `/p/:id/` renders the 404 inside the project shell rather than dropping the reader out of it.
+
+### `database/*`
+
+The database product includes `schemas`, `tables`, `functions`, `triggers`, `types`,
+`extensions`, `indexes`, `publications`, `roles`, `column-privileges`, `settings`,
+`migrations`, `backups`, `webhooks`, `cron`, and `queues`. The index redirects to
+`database/functions`. See [Database screens](/docs/studio/database/).
+
+### `auth/*`
+
+Index is **Users**; then `policies`, `access`, `providers`, `sessions`, `mfa`, `rate-limits`,
+`url-configuration`, `protection`, `third-party`, `hooks`, `audit`, `passkeys`,
+`organizations`, and `settings`. The `access` page is the Role Access matrix; the query
+simulator is available through the CLI/MCP, not as a Studio route. See
+[Authentication screens](/docs/studio/auth/).
+
+### `observability/*`
+
+Index overview, plus `api`, `database`, and `reports`. See [Logs & observability](/docs/studio/logs/).
+
+### Integrations
+
+The integrations product contains the catalogue at `integrations`, plus `vault` and
+`wrappers` ([Vault](/docs/platform/integrations/#vault), [Wrappers](/docs/platform/integrations/#wrappers)).
+Database queues are under `database/queues` ([Queues](/docs/studio/database/#queues)).
+
+### Products
+
+The product switcher exposes `overview`, `tables`, `sql`, `database`, `auth`, `storage`,
+`realtime`, `edge-functions`, `integrations`, `branches`, `advisor`, `observability`,
+`logs`, `api`, `connect`, and `settings`. Some entries are cross-links into the project
+routes above rather than additional route families.
+
+### Moved routes
+
+Paths that moved are declared once in the `MOVED` map in `next.config.mjs` and served as
+permanent (308) redirects, so they cost nothing at runtime:
+
+| From | To |
+|---|---|
+| `/p/:id` | `/p/:id/overview` |
+| `/p/:id/database` | `/p/:id/database/functions` |
+| `/p/:id/functions`, `triggers`, `extensions`, `migrations`, `backups`, `webhooks`, `cron` | the matching `/p/:id/database/*` |
+| `/p/:id/policies` | `/p/:id/auth/policies` |
+| `/p/:id/auth/users` | `/p/:id/auth` |
+| `/p/:id/reports` | `/p/:id/observability` |
+| `/system` | `/settings` |
+
+## Lists and dialogs
+
+Settings that are lists on the wire (CORS origins, SMS test numbers, RPC allowlists, MIME types) are edited with
+`ListInput` (`src/shared/ui/ListInput.tsx`): one chip per value, still saved comma-separated. A list whose values cannot
+be removed (an enum's values) hides the remove button. Dialogs stack: `Escape` closes only the top one.
+
+## Feature layout
+
+Every feature folder follows the same shape:
+
+```text
+features/<name>/
+  api/        typed calls to the admin API
+  components/ presentational pieces
+  hooks/      data loading and state
+  lib/        pure helpers
+  pages/      route entries
+  types.ts
+```
+
+Features: `api-tools`, `assistant`, `auth`, `database`, `integrations`, `logs`, `platform`, `projects`, `sql`, `storage`, `tables`. Shared building blocks live in `src/shared`.
+
+## Mock mode
+
+```bash
+npm run studio:dev      # next dev on :5173, proxying /api to localhost:5001
+npm run studio:mock     # the same, with NEXT_PUBLIC_MOCK=1
+npm run studio:build    # next build
+```
+
+Mock mode sets `NEXT_PUBLIC_MOCK=1` and installs an MSW service worker that answers from
+`src/mocks/handlers.ts`, so you can work on screens with no backend and no database. It is
+set by a small `apps/studio/scripts/dev-mock.mjs` wrapper rather than an inline `VAR=value` prefix,
+which would not work on Windows.
+
+Dev and production write to **different** build directories — `.next-dev` and `.next`.
+Sharing one would let `npm run build` at the repo root overwrite the dev manifests under a
+running dev server, and every page would then 500 with "Could not find the module … in the
+React Client Manifest".
+
+In development Next also rewrites `/api/:path*` to `http://localhost:5001` with
+`basePath: false`, so the axios base URL of `/api` reaches the API server rather than
+`/studio/api`. In production Express owns `/api` and never forwards it to Next.
+
+## How it talks to the backend
+
+Every project screen calls `/api/admin/*`. Under the Console, those calls go to `/api/projects/:id/admin/*` and are proxied with the project's platform token — see [Project proxy](/docs/console/proxy/). In standalone development (`studio:dev`) they hit the project's admin API on `localhost:5001` directly, with the operator's session.
+
+## Platform screens
+
+The org, projects, team, usage and billing screens served at the Console root are documented in [Platform & project screens](/docs/studio/platform/).

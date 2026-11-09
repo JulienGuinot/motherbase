@@ -1,0 +1,138 @@
+---
+title: "Cron Jobs"
+description: "Schedule recurring SQL jobs with pg_cron and monitor application cron jobs in Project Studio."
+order: 9
+---
+
+Motherbase has a **Cron Jobs** page in Project Studio for two kinds of recurring work:
+
+- **pg_cron jobs** - PostgreSQL-native jobs stored in the database and executed by the `pg_cron` extension
+- **App Jobs** - code-defined `node-cron` jobs registered by the backend process and exposed as read-only status
+
+## pg_cron jobs
+
+Open **Project Studio → Database → Cron Jobs → pg_cron**.
+
+The tab lists jobs from `cron.job` with their name, schedule, SQL command, active state, database, and username. You can create, enable, disable, edit, and delete jobs from the UI.
+
+Create a job with a standard five-field cron schedule:
+
+```sql
+SELECT cron.schedule(
+  'nightly-cleanup',
+  '0 3 * * *',
+  'SELECT cleanup_expired_sessions();'
+);
+```
+
+The Studio form stores the same values through the admin API:
+
+```json
+{
+  "name": "nightly-cleanup",
+  "schedule": "0 3 * * *",
+  "command": "SELECT cleanup_expired_sessions();"
+}
+```
+
+## Enable pg_cron
+
+Every project's Postgres image ships `pg_cron` and starts with it in
+`shared_preload_libraries` (`cron.database_name=app`), so the only step is creating the
+extension once, from **Database → Extensions** or the SQL editor:
+
+```sql
+CREATE EXTENSION IF NOT EXISTS pg_cron;
+```
+
+Until then the API answers `extensionMissing: true` and Studio shows an install banner. On a
+Postgres you run yourself, `pg_cron` must also be in `shared_preload_libraries`, which takes a
+server restart.
+
+## App jobs
+
+Open **Project Studio → Database → Cron Jobs → App Jobs**.
+
+Three kinds of job share the list: jobs registered in backend code with `helpers/cron.helper.ts`,
+scheduled edge functions, and the platform's own schedulers (backups, retention, storage cleanup,
+realtime outbox, bucket deletion).
+
+```ts
+export const initCron = (_opts: IContextContainer) => () => {
+  register('cleanup-expired-tokens', '0 3 * * *', async () => {
+    // run backend maintenance work
+  })
+}
+```
+
+Every scheduler **declares itself** — what it does in one sentence, the file that owns it, and
+the console route that owns its configuration — next to the code that owns the behaviour. So a
+job that is configured but has never fired still appears, and a scheduled edge function appears
+once rather than twice.
+
+Each row carries a state, chosen so that "we do not know" never renders as "fine":
+
+| State | Meaning |
+|---|---|
+| `disabled` | Configured off, no timer armed |
+| `scheduled` | Armed, no run on record yet |
+| `running` | A run is in flight |
+| `ok` / `failed` | Outcome of the newest finished run |
+| `unknown` | Armed, but its history could not be read |
+
+Clicking a row opens the job: what it does, its source file, its cadence, a link to the settings
+that own it, and its recorded runs.
+
+### Run now
+
+A job that declares itself runnable has a **Run now** button. It calls the same `runOnce()` the
+timer calls, so a test run cannot drift from what production does. The run is recorded with
+`trigger: 'manual'` and labelled as such in the history — a forced run must never be read as
+evidence that the schedule is alive.
+
+### Changing a cadence
+
+A job whose schedule is **data** can be re-scheduled or disarmed from the drawer. A job whose
+schedule is a constant in code cannot: the drawer shows the cadence read-only and links to the
+settings page that owns it, instead of offering an input whose Save could only answer 400.
+
+### Run history
+
+Runs are persisted in `platform.job_runs`, with the run's `output` and its `trigger`. For a
+scheduled edge function the ledger also keeps `stdout` and the returned value, including for a
+failed run, which is the most useful thing there is about a failure.
+
+<Note>
+The in-memory part is only the timer itself. Whether a job is armed right now resets when the
+project container restarts; the run history does not.
+</Note>
+
+## Admin endpoints
+
+Project Studio uses admin-only endpoints:
+
+```http
+GET    /api/admin/cron/pg/jobs
+POST   /api/admin/cron/pg/jobs
+PATCH  /api/admin/cron/pg/jobs/:id
+DELETE /api/admin/cron/pg/jobs/:id
+
+GET    /api/admin/cron/app/jobs
+GET    /api/admin/jobs/runs
+GET    /api/admin/jobs/alerts
+PATCH  /api/admin/jobs/:id
+POST   /api/admin/jobs/:id/run
+```
+
+`PATCH /api/admin/jobs/:id` accepts `schedule` (a cron string, or `null` to clear it), `enabled`,
+or both. A job whose cadence lives in code answers 400. Sending neither field also answers 400.
+
+`PATCH /api/admin/cron/pg/jobs/:id` accepts:
+
+```json
+{
+  "active": false
+}
+```
+
+These routes are for Studio and platform administration. Client applications should not call them from browser code.

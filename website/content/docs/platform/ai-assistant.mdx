@@ -1,0 +1,126 @@
+---
+title: "AI Assistant"
+description: "The built-in database assistant: bring your own provider key, read-only tools by default, write proposals you approve."
+order: 20
+---
+
+Studio ships an AI assistant that can inspect your project — schemas, tables, indexes, RLS status, logs, metrics — and answer questions about it. It is **bring-your-own-key**: no traffic leaves your server until you configure a provider.
+
+## Providers
+
+Configured in the `ai.assistant` settings group, edited from the assistant dock's settings. `POST /api/admin/ai/models` lists the models a provider offers for the key typed into that form (a `POST`, so an unsaved key never travels in a query string). `GET /api/admin/ai/providers` returns the catalogue, defined in `packages/ai/src/providers/index.ts`:
+
+| Id | Label | Default model | Base URL |
+|---|---|---|---|
+| `anthropic` | Anthropic (Claude) | `claude-opus-5` | — |
+| `openai` | OpenAI | `gpt-5` | — |
+| `gemini` | Google Gemini | `gemini-2.5-pro` | — |
+| `deepseek` | DeepSeek | `deepseek-chat` | prefilled: `https://api.deepseek.com` |
+| `qwen` | Qwen (Alibaba Cloud) | `qwen-plus` | prefilled: `https://dashscope-intl.aliyuncs.com/compatible-mode/v1` |
+| `glm` | GLM (Z.ai) | `glm-4.6` | prefilled: `https://api.z.ai/api/paas/v4` |
+| `moonshot` | Kimi (Moonshot AI) | `kimi-k2-0905-preview` | prefilled: `https://api.moonshot.ai/v1` |
+| `mistral` | Mistral AI | `mistral-large-latest` | prefilled: `https://api.mistral.ai/v1` |
+| `xai` | xAI (Grok) | `grok-4` | prefilled: `https://api.x.ai/v1` |
+| `groq` | Groq | `openai/gpt-oss-120b` | prefilled: `https://api.groq.com/openai/v1` |
+| `openrouter` | OpenRouter | `openrouter/auto` | prefilled: `https://openrouter.ai/api/v1` |
+| `compatible` | OpenAI-compatible (custom base URL) | — | **required** |
+
+A prefilled base URL applies when the field is left blank, so picking a named provider and pasting its key is enough. Fill the field to override it, for example with a mainland-China endpoint (`https://dashscope.aliyuncs.com/compatible-mode/v1` for Qwen, `https://open.bigmodel.cn/api/paas/v4` for GLM) or a proxy. Use `compatible` for anything else that speaks the OpenAI API: Ollama, vLLM, LiteLLM.
+
+Resolution order (`services/admin/ai-config.service.ts`):
+
+1. The project's own `ai.assistant` values, if `enabled`, `provider` and `apiKey` are all set.
+2. Otherwise the console-global config.
+3. Otherwise "not configured" — the assistant reports it and does nothing.
+
+Setting `enabled: false` at project level with an API key present is an explicit **opt-out**: it does not fall through to the console default.
+
+`POST /api/admin/ai/test` validates the resolved configuration.
+
+## What it can do
+
+The tool registry (`packages/ai/src/tools/registry.ts`) has `READ_TOOLS`, which run as soon as the model calls them:
+
+| Tool | Reads |
+|---|---|
+| `list_schemas` | The schemas, platform ones included |
+| `list_tables` | The tables of a schema, each with its full column list (there is no separate describe call) |
+| `list_indexes`, `list_schema_indexes` | The indexes of one table, or of a whole schema with method, key columns, uniqueness and size |
+| `list_enum_types` | Enumerated types with their values and the columns using them |
+| `list_roles`, `list_column_privileges` | Postgres roles and their attributes; per-column privileges of one table |
+| `list_publications` | Logical-replication publications (Realtime does not use them) |
+| `get_postgres_config` | Managed Postgres settings with their values and overrides |
+| `list_functions`, `list_triggers`, `list_extensions` | Database objects |
+| `run_select` | A single read-only query |
+| `rls_status` | Which tables have RLS on, and all their policies |
+| `security_advisor` | Advisor findings |
+| `read_logs`, `read_metrics`, `read_performance` | Observability data |
+| `advise_indexes` | Suggested indexes and the estimated cost drop for one statement, planned over hypothetical indexes |
+| `list_queues` | Message queues (pgmq) with their depth and type |
+
+and `WRITE_TOOLS`, which are **proposed** to you, never run on the model's say-so (see [the run loop](#the-run-loop)):
+
+| Tool | Proposes | Endpoint |
+|---|---|---|
+| `create_table` | One `CREATE TABLE`, optionally with an RLS preset (`owner`, `public-read`, `admin-only`) in the same transaction | `POST /api/admin/schema/tables` |
+| `create_index` | An index on one or more columns, with a method | `POST /api/admin/schema/tables/:table/indexes` |
+| `create_policy` | One RLS policy on an existing table | `POST /api/admin/rls/policies` |
+
+Each write tool maps to one narrow admin endpoint that validates its own input; there is no free-form write SQL.
+
+Every tool call is an HTTP call to **this server's own `/api/admin/*` endpoints**, carrying the signed-in user's bearer token. Three consequences:
+
+- The assistant can do exactly what you can do, and nothing more.
+- Tool activity goes through the same guards and audit trail as your own clicks.
+- If the token is missing, tool calls simply fail with 401 — there is no service-token fallback.
+
+<Warning>
+`run_select` is defended in depth: statement-shape checks reject anything that is not a read, a function-call blocklist rejects `pg_read_file`, `pg_sleep`, `dblink`, `lo_import`, `pg_terminate_backend` and friends, and the query still runs through the `/api/admin/sql/readonly` endpoint inside a Postgres `READ ONLY` transaction.
+</Warning>
+
+Results are capped before being fed back to the model, so a single `list_tables` on a large database cannot flood the context window.
+
+## The run loop
+
+`runAgent` in `packages/ai/src/agent.ts` is a bounded loop (`maxSteps`, default 12 from `ai.assistant`):
+
+1. Stream a provider turn; emit `text_delta`, `tool_call`, `usage`.
+2. On a provider `error`, the run ends immediately — no message is persisted and no `end_turn` is reported.
+3. No tool calls → `done: end_turn`.
+4. Read tools execute right away and the loop continues.
+5. **Write tools are proposed, not executed.** Every write in the turn is emitted as `tool_proposal` and the run ends, so you approve before anything mutates. `autoApproveWrites` in `ai.assistant` disables that gate.
+6. Hitting `maxSteps` emits `truncated`.
+
+## Transport
+
+`POST /api/admin/ai/chat` is Server-Sent Events (`text/event-stream`, `X-Accel-Buffering: no`). Studio reads it with `fetch` + a stream reader because the browser cannot POST through `EventSource`. Closing the request aborts the run via `AbortController`.
+
+Each frame is one JSON `AgentEvent`:
+
+```text
+data: {"type":"thread","threadId":"…"}
+data: {"type":"text_delta","text":"Your "}
+data: {"type":"tool_call","call":{"id":"…","name":"list_tables","input":{}}}
+data: {"type":"tool_result","callId":"…","name":"list_tables","result":[…]}
+data: {"type":"done","stopReason":"end_turn"}
+```
+
+Errors are emitted as `{"type":"error","message":…}` followed by `done`. Only the caught error message is ever written to the stream — the resolved config (which carries your decrypted API key) is never yielded or thrown.
+
+## Conversations
+
+Threads are stored in SQLite under `AI_DATA_DIR` (`assistant.db`), separate from `BACKUP_DIR` so restoring a database backup never touches conversations. Opening the store is deliberately non-fatal: on a read-only or unmounted volume you lose history, not your project API.
+
+| Route | Action |
+|---|---|
+| `GET /api/admin/ai/threads` | List threads in scope |
+| `GET /api/admin/ai/threads/:id` | Read one |
+| `PATCH /api/admin/ai/threads/:id` | Rename |
+| `DELETE /api/admin/ai/threads/:id` | Delete |
+| `POST /api/admin/ai/threads/:id/resolve` | Approve or reject the proposed writes: `{ decisions: { [callId]: boolean } }`. Answers in the same SSE shape as `/chat`, since it resumes the same loop |
+
+Scope is `(project, userId)`. Every route that takes a thread id resolves ownership first and returns `404 Conversation not found` otherwise — the store itself does no ownership check, so guessing an id gets you nothing.
+
+## Settings
+
+See the `ai.assistant` group in the [settings reference](/docs/reference/settings/) for the full field list, and [`@motherbase/ai`](/docs/packages/ai/) for the package API.

@@ -1,0 +1,346 @@
+---
+title: "Client SDK Internals"
+description: "Complete source-grounded reference for @motherbase/client, including auth, typed queries, storage, realtime, functions, and errors."
+order: 2
+---
+
+`@motherbase/client` exposes a Supabase-shaped client over Motherbase HTTP and Socket.IO endpoints, with Supabase-style `client.from()` and Prisma-style `client.db` queries over the same REST API, and Better Auth's own client as `client.auth`. Its public barrel is `packages/client/src/index.ts`; the package manifest also exposes two subpaths, `@motherbase/client/query` (`src/database/query.ts`) and `@motherbase/client/testing` (`src/utils/testing.ts`), documented in the [SDK reference](/docs/reference/sdk/#subpath-exports).
+
+Its runtime dependencies are `better-auth` and the Better Auth plugin clients (`@better-auth/passkey`, `@better-auth/sso`, `@better-auth/api-key`), `@better-fetch/fetch` and `@motherbase/contracts`; `socket.io-client` is an optional peer, loaded only for realtime.
+
+## Create a client
+
+```ts
+import { createClient, localStorageStorage } from '@motherbase/client'
+
+const client = createClient(
+  'https://api.example.com',
+  'publishable-key',
+  {
+    storage: localStorageStorage(),
+    autoRefresh: true,
+    headers: { 'x-client-name': 'web' },
+  },
+)
+```
+
+The stored session is loaded before the first request and the first channel subscribe, so there is nothing to await at startup. `await client.hydrate()` returns it if you want it yourself, with no network call.
+
+`createClient<Database, SchemaName, Schema>(url, key?, options?)` returns a `MotherbaseClient`. The class constructor has the same arguments. The optional `key` is sent as the `apikey` header. Source: `packages/client/src/index.ts`.
+
+| `ClientOptions` field | Behavior |
+|-----------------------|----------|
+| `storage` | `SessionStorageAdapter`; defaults to `memoryStorage()` |
+| `autoRefresh` | Revalidate once after an authenticated `401`; defaults to `true` |
+| `fetch` | Fetch override; otherwise uses a bound `globalThis.fetch` |
+| `headers` | Extra headers merged into every request, auth calls included |
+| `compat` | `'supabase'` aligns behaviours that share a supabase-js spelling but differ: an `update()` / `delete()` matching nothing resolves an empty array instead of a `404` |
+| `realtimeIoFactory` | Custom `IoFactory` for tests or alternate Socket.IO transports |
+| `auth`, `global`, `db`, `realtime` | The supabase-js option shape (`SupabaseStyleOptions`): `auth.persistSession`, `auth.storage` (either adapter shape), `auth.storageKey`, `auth.autoRefreshToken`, `auth.detectSessionInUrl`, `auth.flowType` (`'implicit'` or `'pkce'`), `global.headers`, `global.fetch`, `db.schema` (`'public'` only, anything else throws). The flat fields win where they collide |
+
+Construction throws when neither an override nor `globalThis.fetch` exists. A secret key (`mb_secret_…`) in a context where `window` exists logs a warning, and so does a browser client created without a storage adapter (once, outside production). In a browser, construction also finishes an OAuth return: a `#access_token=` fragment is read by `auth.getSessionFromUrl()`, and with `flowType: 'pkce'` a `?code=` is stripped and exchanged, unless `auth.detectSessionInUrl` is `false`. `hydrate()` loads persisted auth state once, is idempotent, and makes no network call. Source: `packages/client/src/index.ts` and `packages/client/src/auth/session.ts`.
+
+## Runtime exports
+
+| Export | Purpose |
+|--------|---------|
+| `createClient` | Factory for `MotherbaseClient` |
+| `MotherbaseClient` | Owns `auth`, `storage`, `functions`, `realtime`, `db`, query builders, RPC calls, and channels |
+| `BackendError` | Internal HTTP failure class also exposed for diagnostics |
+| `memoryStorage` | Process-local session adapter |
+| `localStorageStorage` | Browser localStorage adapter with an in-memory fallback |
+| `cookieStorage` | Browser cookie adapter with an in-memory fallback |
+| `serverCookieStorage` | Cookie adapter over batch `getAll`/`setAll` methods |
+| `PostgrestQueryBuilder` | Chainable and awaitable REST query implementation |
+| `AuthClient` (type) | Better Auth's client typed with the mounted plugins plus Motherbase's, under `client.auth` |
+| `StorageClient` / `StorageBucket` | Storage namespace and bucket handle |
+| `FunctionsClient` | Edge-function invoker under `client.functions` |
+| `RealtimeChannel` | Broadcast, presence, and Postgres-change channel |
+| `AuthAdminClient` | Class behind `client.auth.admin` (its `mfa` member is `client.auth.admin.mfa`) |
+| `FunctionsError`, `FunctionsHttpError`, `FunctionsRelayError`, `FunctionsFetchError` | supabase-js error classes; `invoke` returns an instance in `error` rather than throwing |
+| `keyValueStorage` | Wraps a supabase-js key/value store as a `SessionStorageAdapter` |
+| `normalizeSession` / `normalizeUser` | Coerce a foreign session/user payload into this SDK's shape |
+| `SESSION_COOKIE_KEY` | Default cookie/storage key, `motherbase.session` |
+
+`MotherbaseClient` also has `transaction(build)`, `schema(name)`, `getChannels()`, `hydrate()` and `on('request', listener)`, which reports every HTTP round trip (method, path, status, duration, `x-request-id`) and returns its unsubscribe function.
+
+All are re-exported by `packages/client/src/index.ts`.
+
+## Session storage
+
+`memoryStorage()` retains one `Session | null` in memory. `localStorageStorage(key = 'motherbase.session')` JSON-serializes the session, ignores malformed stored JSON, and falls back to memory when localStorage is absent. Source: `packages/client/src/auth/session.ts`.
+
+`cookieStorage(options?)` uses `document.cookie`. Its options are `key`, `path`, `secure`, and `sameSite`; defaults are `motherbase.session`, `/`, `true`, and `lax`. `serverCookieStorage(cookies, key?, { secure? }?)` serializes through:
+
+```ts
+interface CookieMethods {
+  getAll(): { name: string; value: string }[]
+  setAll(cookies: CookieToSet[]): void
+}
+```
+
+The server cookie defaults to `path: '/'`, `sameSite: 'lax'`, and `secure: true`. Clearing it writes `maxAge: 0`. Source: `packages/client/src/cookies/server-cookie-storage.ts`.
+
+A custom adapter implements:
+
+```ts
+interface SessionStorageAdapter {
+  get(): Session | null | Promise<Session | null>
+  set(session: Session | null): void | Promise<void>
+}
+```
+
+## Auth API
+
+`client.auth` is built in `packages/client/src/auth/` with Better Auth's
+`createAuthClient`, pointed at `<url>/api/auth` and typed with the client plugins matching
+what `apps/server/auth/instance.ts` can mount: `anonymous`, `emailOTP`, `magicLink`,
+`phoneNumber`, `twoFactor`, `organization` (teams on), `genericOAuth`, `jwt`, `passkey`,
+`sso` and `apiKey`. Method names, parameters and the `{ data, error }` results are
+Better Auth's, so its documentation applies as written. A plugin the project has turned
+off keeps its methods, typed, and the server answers them with a `404`. The calls are
+documented with examples in the [SDK reference](/docs/reference/sdk/#auth).
+
+Motherbase's additions ride on one Better Auth client plugin (`motherbase`), so they are
+typed and dispatched like Better Auth's own actions:
+
+| Method | Behavior |
+|--------|----------|
+| `onAuthStateChange(callback)` | Returns `{ data: { subscription } }`. Fires `INITIAL_SESSION` once after the stored session is read, then `SIGNED_IN`, `USER_UPDATED`, `MFA_CHALLENGE_VERIFIED` and `SIGNED_OUT` |
+| `getSessionFromUrl(href?)` | Reads the `#access_token=` an OAuth, SSO or magic-link redirect carries, strips it from the address bar before the network call, checks it with `get-session` and stores it. `{ data: null, error: null }` when there is no token |
+| `exchangeCodeForSession(code)` | PKCE: posts `/exchange-code` with the verifier this browser stored when the sign-in started |
+| `reauthenticate()` | `POST /reauthenticate`: emails the signed-in user a one-time nonce |
+| `updateUserCredentials({ email?, password?, nonce? })` | `POST /update-user-credentials`: an anonymous user's first email, a first password, or a password replaced with the nonce |
+| `admin` | `AuthAdminClient`: `listUsers`, `getUserById`, `createUser`, `updateUserById`, `deleteUser`, `signOut`, `inviteUserByEmail`, `generateLink`, `mfa.listFactors`, `mfa.deleteFactor`. Secret key only |
+
+The same plugin carries a better-fetch plugin that keeps Better Auth and the SDK's
+`SessionStore` in step:
+
+- Every auth call sends the stored bearer, so `from()`, storage, functions, realtime and
+  `client.auth` share one session.
+- A response carrying `{ token, user }` or `{ session: { token }, user }` is stored, firing
+  `SIGNED_IN` (`MFA_CHALLENGE_VERIFIED` after a `/two-factor/*` verification), or
+  `USER_UPDATED` when only the user changed. The bearer the server issues is the signed
+  cookie value `<token>.<signature>` while bodies carry the bare `<token>`; both spellings
+  count as the same session.
+- `/sign-out`, `/revoke-sessions`, revoking the current session, a successful
+  `/delete-user`, and a `get-session` answering `null` for the stored token clear it
+  (`SIGNED_OUT`).
+- `/update-user`, `/change-email`, `/update-user-credentials` and `/two-factor/disable`
+  answer without the user, so the session is read back after them.
+- Sign-in, two-factor, social, SSO, OAuth2, link and passkey calls are sent with
+  `credentials: 'include'`, because their next step needs a cookie the response sets;
+  every other call is `same-origin`.
+- Outside a browser, a mutation without an `Origin` header gets the project URL's origin,
+  so Better Auth's CSRF check passes without being disabled.
+- In a browser, `signIn.social` navigates to the server's GET start route
+  (`/api/auth/sign-in/social/<provider>`) instead of fetching, which keeps the OAuth state
+  cookie first-party; it is answered locally with `{ url, redirect: false }`.
+  `disableRedirect: true` skips the navigation. With `flowType: 'pkce'`, social, SSO and
+  OAuth2 sign-ins get an S256 challenge appended to their `callbackURL`.
+
+Better Auth supplies one session token. `Tokens.refreshToken` exists only for source
+compatibility and is always `null`.
+
+## HTTP and error handling
+
+`HttpClient` in `packages/client/src/http/index.ts` hydrates storage before every request, merges client/request headers, attaches `Authorization: Bearer <accessToken>` unless a request is anonymous, and handles JSON, multipart, raw JSON, or raw `Response` bodies.
+
+On an authenticated `401`, concurrent calls share one refresh promise. A successful revalidation retries the original request once; a failed revalidation clears auth state. The public modules catch `BackendError` and convert it with `toError`:
+
+```ts
+interface MotherbaseResponse<T> {
+  data: T | null
+  error: MotherbaseError | null
+}
+
+interface MotherbaseError {
+  message: string
+  status?: number
+  code?: string
+}
+```
+
+`BackendError` exposes `httpStatus`, optional API `apiStatus`, and optional backend `code`. Programmer misuse can still throw, including a missing fetch implementation, an invalid `is()` value, an unsupported channel event type, or missing realtime transport.
+
+## Typed database client
+
+Pass generated database types to the factory. Both `from()` and `db` use the types in `packages/client/src/database/types.ts`.
+
+```ts
+import { createClient } from '@motherbase/client'
+import type { Database } from './database.types'
+
+const client = createClient<Database>('https://api.example.com', 'publishable-key')
+
+const { data, error, count } = await client
+  .from('products')
+  .select('id,name,price', { count: 'exact' })
+  .eq('active', true)
+  .lt('price', 50)
+  .order('name')
+  .range(0, 9)
+```
+
+For a Prisma-style result, call the same table through `client.db`:
+
+```ts
+const products = await client.db.products.findMany({
+  where: { active: true, price: { lt: 50 } },
+  orderBy: { name: 'asc' },
+  take: 10,
+})
+```
+
+`db` translates to the same query builder and RLS-protected REST route. Its methods return rows directly and throw on error; see [Prisma-style queries](/docs/reference/sdk/#prisma-style-queries). Source: `packages/client/src/database/facade.ts`.
+
+With a generated `Database`, relation names, selected columns, row shapes, inserts, updates, filter columns, and RPCs are checked. Views are selectable but their write types resolve to `never`. A select containing relational embedding syntax falls through the `EmbeddedSelectSeam` because the server does not implement typed relation resolution. Without a database generic, `GenericDatabase` accepts arbitrary relations and record-shaped rows.
+
+### Query verbs
+
+| Method | Behavior |
+|--------|----------|
+| `select(columns = '*', options?)` | GET/HEAD selection; `count` is `exact`, `planned`, or `estimated` and `head` requests count only |
+| `insert(values, options?)` | POST one row or an array; `defaultToNull: false` sends `missing=default` |
+| `upsert(values, options?)` | POST with merge/ignore duplicate resolution; supports `onConflict` |
+| `update(values, options?)` | PATCH filtered rows |
+| `delete(options?)` | DELETE filtered rows |
+| `rpc(fn, args?, options?)` | POST by default; `get` or `head` moves arguments to query parameters. `count` sends `Prefer: count=…` and the total comes back from `Content-Range` for a set-returning function; a scalar function resolves `count: null` |
+
+Calling `select()` after a mutation requests `return=representation`. Bulk inserts collect the union of object keys into a `columns` query parameter. `RpcOptions` is `{ head?: boolean; get?: boolean; count?: PostgrestCount }`. Source: `packages/client/src/index.ts` and `packages/client/src/postgrest/`.
+
+### Filters and modifiers
+
+| Family | Methods |
+|--------|---------|
+| Comparison | `eq`, `neq`, `gt`, `gte`, `lt`, `lte` |
+| Pattern | `like`, `ilike`, `likeAllOf`, `likeAnyOf`, `ilikeAllOf`, `ilikeAnyOf` |
+| Set/null | `in`, `is`, `match` |
+| Escape hatches | `not`, `filter`, `or` |
+| Full-text | `textSearch` with `plain`, `phrase`, or `websearch` |
+| Array/range/JSON | `contains`, `containedBy`, `overlaps` |
+| Range position | `rangeGt`, `rangeGte`, `rangeLt`, `rangeLte`, `rangeAdjacent` |
+| Result modifiers | `order`, `limit`, `range`, `abortSignal`, `returns` / `overrideTypes`, `csv`, `geojson`, `explain`, `single`, `maybeSingle` |
+| Write guards | `throwOnError` (reject instead of resolving), `maxAffected(n)` (`Prefer: handling=strict, max-affected=n`), `rollback` (`Prefer: tx=rollback`) |
+| Inspection | `toPath`, `toHeaders` |
+
+Repeated filters are appended, so two filters on one column are ANDed instead of overwriting each other. `range(from, to)` is inclusive. `order`, `limit`, and `range` accept `referencedTable` or the legacy `foreignTable` name.
+
+`single()` returns error code `PGRST116` unless exactly one row is present. `maybeSingle()` returns the first row or `null`. `csv()` resolves to text; `explain()` requests a text plan or parses JSON when `format: 'json'`. Count comes from `Content-Range` and is otherwise `null`.
+
+## Storage
+
+`client.storage.from(bucket)` returns a `StorageBucket` from `packages/client/src/storage/bucket.ts`.
+
+```ts
+const avatars = client.storage.from('avatars')
+
+const { data: uploaded, error } = await avatars.upload('users/u1.png', file, {
+  visibility: 'public',
+  upsert: true,
+})
+
+if (uploaded) {
+  const download = await avatars.download(uploaded.path)
+  const signed = await avatars.createSignedUrl(uploaded.path, 3600)
+  const publicUrl = avatars.getPublicUrl(uploaded.path)
+  const objects = await avatars.list('users/', { limit: 20 })
+  await avatars.remove([uploaded.path])
+}
+```
+
+| Method | Actual behavior |
+|--------|-----------------|
+| `upload(path, file, options?)` | Multipart upload with `bucket`, `path`, optional `visibility` and `upsert`; returns `{ path, id, fullPath }` |
+| `download(pathOrId)` | Returns a `Blob` |
+| `remove(paths)` | Deletes all paths concurrently and returns one `StorageRemoveResponse` per path |
+| `list(prefix?, options?)` | Lists objects with limit, offset, search, and sort query parameters |
+| `getPublicUrl(path)` | Synchronous `{ data: { publicUrl } }` for the public bucket route |
+| `createSignedUrl(path, expiresIn?)` | `GET object-url?expiresIn=…`; returns `{ signedUrl, expiresAt }`, where `expiresAt` is `null` when nothing actually expires |
+| `createSignedUrls(paths, expiresIn?)` | One `createSignedUrl` per path, reported per entry; no batch endpoint behind it |
+| `update(path, file, options?)` | `upload` with `upsert` forced on |
+| `copy(from, to, { upsert? })` / `move(from, to, { upsert? })` | `POST /api/files/copy` and `/api/files/move` within this bucket |
+| `info(path)` | Object metadata without downloading it |
+| `exists(path)` | `true`, or `false` on a `404`. Any other failure is an error, not "no" |
+| `createSignedUploadUrl(path, { size, contentType?, visibility? })` | Reserves the upload against the bucket quota and returns `{ signedUrl, token, path }`. S3 driver only; `size` is required because the signature is bound to that exact length |
+| `uploadToSignedUrl(path, token, file, { contentType? })` | PUTs the bytes, then finalises server-side. The object is only readable after the finalise |
+
+A bare UUID is treated as the legacy server file id; other values are treated as a key within the selected bucket. `UploadOptions.contentType` overrides the type the file itself declares.
+
+`uploadMany(files, { concurrency, onProgress })` uploads several objects and reports `{ path, data, error }` per file without rejecting. `download`, `getPublicUrl` and `createSignedUrl` accept `{ transform }` (`width`, `height`, `resize`, `quality`, `format`), served by the image render endpoint. `client.storage` itself has `listBuckets`, `getBucket`, `createBucket`, `updateBucket`, `emptyBucket` and `deleteBucket({ force })`, all secret key only.
+
+## Realtime channels
+
+`socket.io-client` is an optional peer imported only by `connect()` in `packages/client/src/realtime/index.ts`.
+
+```ts
+const channel = client
+  .channel('room:products', {
+    config: {
+      broadcast: { self: true, ack: true },
+      presence: { key: 'user-1' },
+    },
+  })
+  .on('postgres_changes', { event: '*', schema: 'public', table: 'products' }, payload => {
+    console.log(payload.eventType, payload.new, payload.old)
+  })
+  .on('broadcast', { event: 'cursor' }, message => {
+    console.log(message.payload)
+  })
+  .on('presence', { event: 'sync' }, () => {
+    console.log(channel.presenceState())
+  })
+  .subscribe(status => console.log(status))
+```
+
+`channel(name, options?)` reuses the existing channel with the same name. `removeChannel(channel)` and `removeAllChannels()` unsubscribe and return `'ok'`.
+
+`RealtimeChannel` supports:
+
+- `on('postgres_changes', filter, callback)` for `INSERT`, `UPDATE`, `DELETE`, or `*`; schema defaults to `public`.
+- `on('broadcast', { event }, callback)`, with `*` matching all broadcast events.
+- `on('presence', { event: 'sync' | 'join' | 'leave' }, callback)`.
+- `subscribe(callback?, timeoutMs?)`, returning the channel immediately; the `ChannelStatus` type is `SUBSCRIBED`, `TIMED_OUT`, `CLOSED`, or `CHANNEL_ERROR`.
+- `send({ type: 'broadcast', event, payload? })`, `track(state)`, `untrack()`, `presenceState()`, and `unsubscribe()`.
+
+Broadcast acknowledgements and self-delivery are selected in `RealtimeChannelOptions.config`. Presence state is replaced from the server's full state and diffed locally into join/leave events. Postgres payloads contain `schema`, `table`, `eventType`, `new`, `old`, and `commit_timestamp`. Source: `packages/client/src/realtime/channel.ts`.
+
+The low-level `client.realtime` exposes `connected`, `getStatus()`, `onStatusChange()`, `connect()`, `disconnect()`, `on()`, `off()`, `emit()`, and deprecated `watchTable()`. `watchTable()` can poll REST when disconnected; channel subscriptions call `connect({ fallbackPolling: false })` and therefore require Socket.IO. Realtime statuses are `idle`, `connecting`, `connected`, `reconnecting`, `polling`, `disconnected`, and `error`.
+
+## Edge functions
+
+`FunctionsClient.invoke<Result, Body>(name, options?)` is implemented in `packages/client/src/functions/index.ts`.
+
+```ts
+const { data, error } = await client.functions.invoke<{ greeting: string }>(
+  'hello',
+  { body: { name: 'Ada' } },
+)
+```
+
+By default it uses the current session bearer. `FunctionInvokeAuth` can explicitly select `{ type: 'public' }` or `{ type: 'edge-token', token }`; both suppress the session bearer, and the latter sends `x-motherbase-edge-token`.
+
+## Complete type export index
+
+The following types are re-exported by `packages/client/src/index.ts`:
+
+| Area | Types |
+|------|-------|
+| Core | `ApiEnvelope`, `User`, `UserIdentity`, `UserMetadata`, `BetterAuthUserFields`, `MotherbaseUserFields`, `SupabaseUserAliases`, `Timestamp`, `Tokens`, `Session`, `FileObject`, `StoredFile`, `FileStatus`, `FileVisibility`, `StorageUploadResponse`, `StorageRemoveResponse`, `UploadInput`, `SessionStorageAdapter`, `KeyValueStorageAdapter`, `ClientOptions`, `SupabaseStyleOptions`, `MotherbaseResponse`, `MotherbaseError`, `AuthChangeEvent`, `AuthChangeListener`, `RequestEvent`, `RequestObserver` |
+| Auth | `AuthClient`, `AuthClientOptions`, `AuthAdminActions`, `MotherbaseAuthActions`, `SessionResult`, `Subscription`, `Passkey` (re-exported from `@better-auth/passkey`) |
+| Cookies | `CookieMethods`, `CookieToSet`, `CookieOptions` |
+| REST | `RpcOptions`, `TransactionContext`, `SchemaClient`, `PostgrestSingleBuilder`, `PostgrestTextBuilder`, `PostgrestExplainBuilder`, `PostgrestResponse`, `PostgrestPrimitive`, `PostgrestArrayOperand`, `PostgrestFilterOperator`, `PostgrestIsValue`, `PostgrestCount`, `TextSearchType`, `ReferencedTableOption`, `OrderOptions`, `SelectOptions`, `InsertOptions`, `UpsertOptions`, `MutateOptions`, `ExplainOptions` |
+| Database typing | `GenericDatabase`, `GenericSchema`, `GenericTable`, `GenericView`, `GenericFunction`, `DefaultSchemaName`, `SchemaOf`, `Relations`, `RelationName`, `RowOf`, `InsertOf`, `UpdateOf`, `FunctionName`, `FunctionArgs`, `FunctionReturns`, `TypedQuery`, `TypedSingleQuery`, `SelectResult`, `ValidateSelect`, `UnknownSelectColumns`, `EmbeddedSelectSeam`, `ColumnName`, `FilterValue` |
+| Prisma-style queries | `DatabaseFacade`, `TableFacade`, `Where`, `FindManyArgs` (for `client.db`) |
+| Storage/functions | `UploadOptions`, `UploadResult`, `ObjectInfo`, `ListOptions`, `BucketInfo`, `BucketOptions`, `TransformOptions`, `FunctionInvokeAuth`, `FunctionInvokeOptions` |
+| User administration | `AdminListUsersParams`, `AdminUserList`, `AdminCreateUserParams`, `AdminCreatedUser`, `AdminUpdateUserParams`, `AdminGenerateLinkParams`, `AdminGeneratedLink`, `AdminMfaFactor` |
+| Channels | `PostgresChangeEvent`, `PostgresChangeFilter`, `PostgresChangePayload`, `ChannelStatus`, `BroadcastFilter`, `PresenceFilter`, `BroadcastMessage`, `BroadcastReceived`, `RealtimeChannelOptions`, `PresenceEntry`, `PresenceState`, `PresenceJoinPayload`, `PresenceLeavePayload` |
+| Low-level realtime | `RealtimeConnectOptions`, `RealtimeStatus`, `RealtimeStatusListener`, `RealtimeWatchEvent`, `RealtimeWatchOptions`, `IoFactory`, `SocketLike` |
+
+A few source files export implementation symbols the root barrel does not re-export: `SessionStore` (`auth/session.ts`), `AuthEvent` and `AuthListener` (`auth/types.ts`), `HttpClient` / `RequestOptions` / `toError` (`http/`), `encodeLiteral` (`postgrest/utils.ts`), and `RealtimeModule` (`realtime/index.ts`). They are not reachable through any of the package's three entry points (`.`, `./query`, `./testing`): treat them as internals.
+
+## Related
+
+- [SDK reference](/docs/reference/sdk/) — usage-oriented documentation.
+- [REST API](/docs/reference/rest-api/) and [REST engine](/docs/architecture/rest-engine/) — what the query builder compiles to.
+- [`@motherbase/ssr`](/docs/packages/ssr/) — cookie-based sessions for server rendering.

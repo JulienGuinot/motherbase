@@ -1,0 +1,44 @@
+# Local DEV Traefik: HTTP only on :80, no TLS, no ACME. Dashboard on :8080.
+# Project stacks join the external `traefik_proxy` network and are routed by
+# Host(`<name>.localhost`). Never expose this to the internet.
+
+services:
+  # Rewrites old Docker API versions (e.g. /v1.24/) to /v1.45/ before forwarding
+  # to the Unix socket: same reason as the prod stack: Docker 29+ dropped API
+  # < 1.40 while Traefik's embedded client asks for 1.24. Without this the docker
+  # provider fails ("Failed to retrieve information of the docker client and
+  # server host"), Traefik loads zero routers, and every <name>.localhost host
+  # answers 404, which a browser then reports as a CORS failure.
+  docker-proxy:
+    image: ${TRAEFIK_DOCKER_PROXY_IMAGE:-nginx:alpine}
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./docker-proxy.conf:/etc/nginx/nginx.conf:ro
+    networks:
+      - traefik_internal
+
+  traefik:
+    image: ${TRAEFIK_IMAGE:-traefik:v3.3}
+    restart: unless-stopped
+    depends_on:
+      - docker-proxy
+    command:
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --providers.docker.endpoint=http://docker-proxy:2375
+      - --entrypoints.web.address=:80
+      - --api.insecure=true
+    ports:
+      - '80:80'
+      - '8080:8080'
+    networks:
+      - traefik_proxy
+      - traefik_internal
+
+networks:
+  traefik_proxy:
+    external: true
+    name: traefik_proxy
+  traefik_internal:
+    driver: bridge

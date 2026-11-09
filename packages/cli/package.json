@@ -1,0 +1,35 @@
+{
+  "name": "@motherbase/cli",
+  "version": "0.2.9",
+  "description": "Motherbase operator CLI: drives the Platform Console and linked projects.",
+  "type": "commonjs",
+  "bin": {
+    "motherbase": "./bin/motherbase.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test",
+    "docs:cli": "node scripts/generate-cli-docs.js",
+    "lint": "eslint ."
+  },
+  "files": [
+    "bin",
+    "src",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/JulienGuinot/motherbase.git",
+    "directory": "packages/cli"
+  },
+  "homepage": "https://github.com/JulienGuinot/motherbase#readme",
+  "bugs": {
+    "url": "https://github.com/JulienGuinot/motherbase/issues"
+  }
+}

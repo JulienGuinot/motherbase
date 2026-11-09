@@ -1,0 +1,54 @@
+{
+  "name": "motherbase-web",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "postbuild": "next-sitemap",
+    "docs:sync": "node scripts/sync-backend-docs.mjs",
+    "docs:routes": "npm run docs:sync",
+    "start": "next start",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@lucasmarkes/hairline": "^0.3.0",
+    "@motherbase/client": "^2.2.4",
+    "@motherbase/ssr": "^0.2.0",
+    "@motherbase/ui": "^0.2.0",
+    "geist": "^1.7.2",
+    "github-slugger": "2.0.0",
+    "gray-matter": "^4.0.3",
+    "next": "15.5.28",
+    "next-mdx-remote": "^6.0.0",
+    "next-sitemap": "^4.2.3",
+    "react": "^19",
+    "react-dom": "^19",
+    "rehype-pretty-code": "^0.14.0",
+    "rehype-slug": "^6.0.0",
+    "remark-gfm": "^4.0.1",
+    "shiki": "4.4.2",
+    "socket.io-client": "^4.8.3"
+  },
+  "devDependencies": {
+    "@eslint/eslintrc": "^3.3.6",
+    "@tailwindcss/postcss": "^4",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "@vitejs/plugin-react": "^6.0.2",
+    "eslint": "^9.39.5",
+    "eslint-config-next": "^15.5.28",
+    "tailwindcss": "^4",
+    "typescript": "^5",
+    "vite-tsconfig-paths": "^6.1.1",
+    "vitest": "^4.1.8"
+  },
+  "overrides": {
+    "next": {
+      "postcss": "^8.5.32"
+    }
+  }
+}

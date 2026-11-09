@@ -1,0 +1,81 @@
+{
+  "name": "motherbase",
+  "version": "1.0.0",
+  "private": true,
+  "packageManager": "npm@11.0.0",
+  "description": "Open source self-hosted backend platform for running many projects from one VPS and one domain.",
+  "author": "fle-biha",
+  "license": "MIT",
+  "keywords": [
+    "motherbase",
+    "backend",
+    "self-hosted",
+    "postgres",
+    "supabase-alternative",
+    "multi-project"
+  ],
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "preinstall": "node ./scripts/check-node-version.cjs",
+    "install:all": "npm ci --legacy-peer-deps",
+    "setup": "bash ./setup.sh",
+    "build": "turbo run build",
+    "verify": "npm run lint && npm run build && npm test",
+    "test": "turbo run test",
+    "lint": "turbo run lint",
+    "dev": "npm run dev -w @motherbase/server",
+    "console:dev": "npm run console:dev -w @motherbase/server",
+    "console:start": "npm run console:start -w @motherbase/server",
+    "start": "npm run start -w @motherbase/server",
+    "studio:dev": "npm run dev -w studio",
+    "studio:mock": "npm run dev:mock -w studio",
+    "studio:build": "npm run build -w studio",
+    "ui:preview": "npm run playground -w @motherbase/ui",
+    "sdk:build": "npm run build -w @motherbase/client",
+    "cli": "node packages/cli/bin/motherbase.js",
+    "swagger": "npm run swagger -w @motherbase/server",
+    "docs:routes": "npm run docs:routes -w @motherbase/server",
+    "docs:cli": "npm run docs:cli -w @motherbase/cli",
+    "docs:settings": "npm run docs:settings -w @motherbase/server",
+    "prisma:generate": "npm run prisma:generate -w @motherbase/server",
+    "prisma:migrate": "npm run prisma:migrate -w @motherbase/server",
+    "prisma:deploy": "npm run prisma:deploy -w @motherbase/server",
+    "prisma:studio": "npm run prisma:studio -w @motherbase/server",
+    "db:seed": "npm run db:seed -w @motherbase/server",
+    "infra": "docker compose up db minio -d",
+    "infra:down": "docker compose stop db minio",
+    "edge-runtime": "cd deploy/edge-runtime && deno run --env-file=../../apps/server/.env --allow-all --no-prompt main.ts",
+    "docker:up": "docker compose up",
+    "docker:build": "docker compose up --build"
+  },
+  "overrides": {
+    "qs": "^6.17.1",
+    "uuid": "^11.1.1",
+    "postcss": "^8.5.32",
+    "express": {
+      "qs": "^6.17.1"
+    },
+    "next": {
+      "postcss": "^8.5.32"
+    },
+    "gaxios": {
+      "uuid": "^11.1.1"
+    }
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.0",
+    "eslint": "^9.39.0",
+    "globals": "^15.15.0",
+    "turbo": "^2.5.0",
+    "typescript-eslint": "^8.64.0"
+  },
+  "dependencies": {
+    "@motherbase/cli": "^0.2.4"
+  }
+}

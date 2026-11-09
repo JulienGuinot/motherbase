@@ -1,0 +1,73 @@
+name: Bug report
+description: Something behaves differently than documented.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Security vulnerabilities do not belong here: report them through a
+        [security advisory](https://github.com/JulienGuinot/motherbase/security/advisories/new).
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you expected, and what you got instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. …
+        2. …
+        3. …
+    validations:
+      required: true
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - API server
+        - Platform Console
+        - Project Studio
+        - REST engine / RLS
+        - Storage
+        - Realtime
+        - Edge functions
+        - Auth
+        - CLI
+        - Client SDK
+        - Deployment (setup.sh, Docker, Traefik)
+        - Not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: How is it deployed
+      options:
+        - setup.sh on a VPS
+        - Docker Compose, by hand
+        - Development checkout
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Server log lines around the failure. Redact secrets.
+      render: text

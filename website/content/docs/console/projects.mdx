@@ -1,0 +1,135 @@
+---
+title: "Projects"
+description: "The project lifecycle: what create writes to disk, which secrets are generated, how status is derived, and what every action does."
+order: 2
+---
+
+A project is a directory under `PROJECTS_DIR` (`/srv/projects` in prod) plus a Docker Compose stack. Everything the Console does to a project is a compose action against that directory.
+
+```text
+/srv/projects/<name>/
+  .env.prod       generated, mode 0600 — secrets live here
+  manifest.json   the same values with every secret stripped
+```
+
+## Naming
+
+Project names must match `SLUG_RE` — `^[a-z0-9][a-z0-9-]*$` (`apps/server/constants/regex.constants.ts`). The name becomes the directory, the compose project name, the container prefix and the hostname label, so it is validated on **every** operation, not just create.
+
+## Create
+
+`Orchestrator.create()` (`console/services/orchestrator.service.ts`):
+
+1. `buildManifest()` validates the name, resolves the config, and generates secrets.
+2. Write `.env.prod` with mode `0600`, then `chmod` it again.
+3. Write `manifest.json` with `jwtSecret`, `postgresPassword`, `configEncryptionKey`, `platformServiceToken` and `minioRootPassword` set to `undefined` — the manifest is the readable copy, `.env.prod` is the secret one.
+4. `compose up`.
+
+### Generated secrets
+
+| Secret | Size | Purpose |
+|---|---|---|
+| `jwtSecret` | 32 bytes hex | Project JWT signing |
+| `postgresPassword` | 24 bytes hex | Project database |
+| `configEncryptionKey` | 32 bytes, base64 | Encrypts secret settings |
+| `platformServiceToken` | 32 bytes hex | The Console proxy's `X-Platform-Token` |
+| `minioRootPassword` | 24 bytes hex | Object storage root (`minioRootUser` is `admin`) |
+
+### Derived hostnames
+
+Given `name` and either an explicit `domain` or the platform `domainSuffix`:
+
+| Config | Default |
+|---|---|
+| `domain` | `<name>.<domainSuffix>` |
+| `storageDomain` | `<name>-storage.<base suffix>` |
+| `minioConsoleDomain` | `<name>-minio.<base suffix>` |
+| `corsOrigins` | `<scheme>://<domain>` (plus anything you pass) |
+| `apiImage` | `motherbase-api:1.0.0` unless overridden |
+| `certResolver` | `letsencrypt` unless overridden |
+
+Hostnames are validated per label (`^(?!-)[a-z0-9-]{1,63}(?<!-)$`, max 253 chars, no line breaks) and lowercased. `corsOrigins` rejects line breaks too — both values are written into an env file, and a newline there would inject an unrelated variable.
+
+### Resource limits
+
+`DEFAULT_LIMITS` is the "Small" tier every project inherits:
+
+| Field | Env var | Default |
+|---|---|---|
+| `apiCpus` | `API_CPUS` | 0.5 |
+| `apiMemMb` | `API_MEM` | 512M |
+| `dbCpus` | `DB_CPUS` | 0.5 |
+| `dbMemMb` | `DB_MEM` | 512M |
+| `minioCpus` | `MINIO_CPUS` | 0.25 |
+| `minioMemMb` | `MINIO_MEM` | 256M |
+| `edgeCpus` | `EDGE_RUNTIME_CPUS` | 0.5 |
+| `edgeMemMb` | `EDGE_RUNTIME_MEM` | 768M |
+| `diskGb` | `DISK_GB` | 10 |
+
+The CPU and memory values are enforced by compose `deploy.resources.limits`, the edge runtime
+sidecar included: it is its own container but counts against the project's quota. `diskGb` is
+not enforced by Docker; it is the quota the Console's disk-usage card measures the project's
+volumes against, between 1 GB and the host's disk size. All of them are read back for
+usage-versus-quota metering. Projects created before these vars existed parse back to the defaults instead of failing.
+
+Note that generated projects get `CONSOLE_SQL_ENABLED=true`: the SQL editor is on, and may write, out of the box. Restrict it to reads per project under **Database → Settings → SQL editor**.
+
+## Actions
+
+| Action | Compose | Notes |
+|---|---|---|
+| `start` | `start` | |
+| `stop` | `stop` | |
+| `restart` | `restart` | |
+| `update` | `pull` then `up` | Per project — you choose when each one moves |
+| `rebuild` | `rebuild` | |
+| `destroy` | `down`, then `rm -rf` the project directory | **Removes the project's data** |
+| `logsFor` | `logs` | Not audited as a mutation |
+| `shell` | `exec <service> sh` | Only `api`, `db`, `minio`, `minio-init` |
+
+<Warning>
+`destroy` runs `compose down` and then deletes the whole project directory, including `.env.prod` and its secrets. There is no undo — take a backup first (see [backups](/docs/self-hosting/backups-and-restore/)).
+</Warning>
+
+Every action for a given project is **serialized through a per-project queue** (`Orchestrator.serialize`). Two overlapping `update` clicks cannot interleave compose invocations on the same stack; a failed operation does not block the next one.
+
+## Config and limits edits
+
+`readConfig` / `writeConfig` and `readLimits` / `writeLimits` edit `.env.prod` in place: the file is parsed, only the known keys are rewritten (missing keys are appended), and everything else is preserved byte for byte. Patches are validated with `projectConfigPatchSchema` before anything is written.
+
+`PROJECT_CONFIG_ENV` is the single mapping used by render, parse and rewrite:
+
+```ts
+domain            → PROJECT_DOMAIN
+storageDomain     → STORAGE_DOMAIN
+minioConsoleDomain→ MINIO_CONSOLE_DOMAIN
+corsOrigins       → CORS_ORIGINS
+apiImage          → API_IMAGE
+certResolver      → CERT_RESOLVER
+```
+
+## The registry
+
+`console/services/registry.service.ts` derives the project list from the filesystem plus Docker, not from a database:
+
+```ts
+interface ProjectSummary {
+  name; domain; storageDomain; createdAt
+  status: 'running' | 'stopped'
+  apiUrl?; storageUrl?
+  branch?          // preview branches only
+}
+```
+
+- Directories under `PROJECTS_DIR` containing a readable `manifest.json` are projects; anything else is skipped silently.
+- `status` is `running` when `docker ps` shows a container named `<name>-api…`.
+- `branch` is the manifest's branch record, present on [preview branches](/docs/console/preview-projects/#branches) only.
+- `docker ps` is sampled for at most 2 s, which collapses the burst of requests one page load makes.
+- `platformToken(name)` reads `PLATFORM_SERVICE_TOKEN` straight out of `.env.prod` — this is what the [proxy](/docs/console/proxy/) presents to the project API.
+- `apiTarget(name)` / `apiTargets(name)` resolve the container's address on the Traefik network via `docker inspect`.
+
+If Docker is unavailable the list comes back empty rather than throwing, which is why the Console still boots on a host without a running daemon.
+
+## Project defaults
+
+`console/services/project-defaults.service.ts` stores the values pre-filled for the next project you create, persisted alongside the Console settings under `PROJECTS_DIR`.

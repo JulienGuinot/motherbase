@@ -1,0 +1,147 @@
+---
+title: "SSR Helpers"
+description: "Cookie-backed browser, server, and middleware clients for using @motherbase/client with Next.js."
+order: 3
+---
+
+`@motherbase/ssr` wraps `@motherbase/client` with the cookie plumbing needed by Next.js. Its root barrel, `packages/ssr/src/index.ts`, exports `createBrowserClient`, `createServerClient`, and `updateSession`, plus selected client types.
+
+## Exported API
+
+| Export | Signature | Intended runtime |
+|--------|-----------|------------------|
+| `createBrowserClient` | `(url, key?, options?) => MotherbaseClient` | Client Components and browser modules |
+| `createServerClient` | `(url, key, { cookies, ...clientOptions }) => MotherbaseClient` | Server Components, Route Handlers, and Server Actions |
+| `updateSession` | `(request, url, key?, { fetch? }?) => Promise<NextResponse>` | Next.js middleware |
+
+The barrel also re-exports the `MotherbaseClient`, `Session`, `User`, `ClientOptions`, `CookieMethods`, `CookieToSet`, and `CookieOptions` types from `@motherbase/client`.
+
+## Browser client
+
+`createBrowserClient` calls the base `createClient` and defaults `storage` to `cookieStorage()`. Passing a custom `ClientOptions.storage` overrides that default. Source: `packages/ssr/src/browser.ts`.
+
+```tsx
+'use client'
+
+import { createBrowserClient } from '@motherbase/ssr'
+
+export const motherbase = createBrowserClient(
+  process.env.NEXT_PUBLIC_MOTHERBASE_URL!,
+  process.env.NEXT_PUBLIC_MOTHERBASE_KEY,
+)
+```
+
+The default browser cookie is readable by JavaScript so the server can receive the serialized session on the next request. Its client defaults come from `packages/client/src/cookies/cookie-storage.ts`: name `motherbase.session`, path `/`, `SameSite=lax`, and `Secure` enabled.
+
+<Warning>
+The default cookie is not `HttpOnly` because browser auth code must update it. Treat the serialized bearer session as sensitive and keep the application protected against script injection.
+</Warning>
+
+## Server client
+
+`createServerClient` removes `storage` from the accepted options and always installs `serverCookieStorage(cookies)`. All other `ClientOptions`, including `fetch`, `headers`, `autoRefresh`, and `realtimeIoFactory`, are forwarded. Source: `packages/ssr/src/server.ts`.
+
+A reusable Next.js helper:
+
+```ts
+import { cookies } from 'next/headers'
+import { createServerClient } from '@motherbase/ssr'
+import type { CookieToSet } from '@motherbase/ssr'
+
+export async function createMotherbaseServerClient() {
+  const cookieStore = await cookies()
+
+  return createServerClient(
+    process.env.NEXT_PUBLIC_MOTHERBASE_URL!,
+    process.env.NEXT_PUBLIC_MOTHERBASE_KEY,
+    {
+      cookies: {
+        getAll: () => cookieStore.getAll(),
+        setAll: (cookiesToSet: CookieToSet[]) => {
+          try {
+            for (const { name, value, options } of cookiesToSet) {
+              cookieStore.set(name, value, options)
+            }
+          } catch {
+            // Server Components cannot write cookies.
+            // Middleware refreshes the session cookie instead.
+          }
+        },
+      },
+    },
+  )
+}
+```
+
+Use it in a Server Component:
+
+```tsx
+import { createMotherbaseServerClient } from '@/lib/motherbase/server'
+
+export default async function ProductsPage() {
+  const client = await createMotherbaseServerClient()
+  const { data: products, error } = await client
+    .from<{ id: string; name: string }>('products')
+    .select('id,name')
+
+  if (error) return <p>{error.message}</p>
+
+  return <pre>{JSON.stringify(products, null, 2)}</pre>
+}
+```
+
+`serverCookieStorage` reads all cookies, selects `motherbase.session`, decodes its JSON, and returns `null` for missing or malformed data. Writes are batched through `setAll`; signing out writes an empty cookie with `maxAge: 0`. Source: `packages/client/src/cookies/server-cookie-storage.ts`.
+
+<Note>
+A Server Component can read cookies but cannot persist a refreshed or cleared session. The wrapper deliberately allows `setAll` to be guarded with `try/catch`; `updateSession` owns the response-cookie write during navigation.
+</Note>
+
+## Middleware refresh
+
+`updateSession` in `packages/ssr/src/middleware.ts` creates a server client from `NextRequest.cookies`, calls `client.auth.getSession()`, and returns a `NextResponse`.
+
+```ts
+import type { NextRequest } from 'next/server'
+import { updateSession } from '@motherbase/ssr'
+
+export function middleware(request: NextRequest) {
+  return updateSession(
+    request,
+    process.env.NEXT_PUBLIC_MOTHERBASE_URL!,
+    process.env.NEXT_PUBLIC_MOTHERBASE_KEY,
+  )
+}
+```
+
+On Next.js 16, where `middleware.ts` is deprecated, call it from `proxy.ts` instead (`export async function proxy(request)`); the helper is the same. Its fourth argument takes `{ fetch?, cookieKey?, httpOnly? }`.
+
+When the client writes cookies, the helper:
+
+1. updates `request.cookies`;
+2. recreates `NextResponse.next({ request })` so downstream code sees the new request cookie;
+3. writes the same cookies and their options onto the response.
+
+`auth.getSession()` asks the backend about the existing Better Auth bearer session. A valid session that comes back with a changed user is written back to the cookie. A session the server no longer knows is cleared, which removes the cookie on the response. A network failure is caught and navigation continues with the existing session.
+
+<Warning>
+Return the `NextResponse` produced by `updateSession`. Replacing it with a new response drops the refreshed or cleared `Set-Cookie` values.
+</Warning>
+
+## Framework adapter contract
+
+The package has no hard dependency on `next/headers`. Framework integration is expressed through `CookieMethods`:
+
+```ts
+interface CookieMethods {
+  getAll(): { name: string; value: string }[]
+  setAll(cookies: CookieToSet[]): void
+}
+```
+
+That makes `createServerClient` usable anywhere a framework can provide batch cookie reads and writes. Only `updateSession` imports `NextRequest` and `NextResponse` directly. The Next.js peer range is `>=14` in `packages/ssr/package.json`.
+
+## Related
+
+- [`@motherbase/client`](/docs/packages/client/) — the client these helpers wrap.
+- [Framework quickstarts](/docs/getting-started/frameworks/) — the same cookie contract wired into Nuxt, SvelteKit, and others.
+- [Auth](/docs/platform/auth/) — session lifetimes and the methods a session can come from.

@@ -1,0 +1,454 @@
+---
+title: "Framework Quickstarts"
+description: "Connect a Next.js, React, Vue, Nuxt, SvelteKit, Expo, or Node application to a Motherbase project."
+order: 3
+---
+
+Every quickstart below assumes a running project. Create one first with the [Quickstart](/docs/getting-started/quickstart/), then open **Project Studio → Connect** for the exact API URL, WebSocket URL, and project keys.
+
+## Start with a generated app
+
+For a ready-to-customize authentication flow, scaffold a Next.js or React app with the
+official templates:
+
+```bash
+npx create-motherbase-app my-app --template next
+# or
+npx create-motherbase-app my-app --template react
+```
+
+The templates include sign in, sign up, password reset, OAuth callback, profile editing,
+passkeys and MFA settings. They use [`@motherbase/ui`](/docs/packages/ui/) and are still
+ordinary application code after generation. See [create-motherbase-app](/docs/packages/create-app/)
+for the setup options and template differences.
+
+## Common setup
+
+```bash
+npm install @motherbase/client
+# Only if you use realtime channels:
+npm install socket.io-client
+```
+
+Two values are needed everywhere:
+
+| Value | Where it comes from |
+|-------|---------------------|
+| API URL | Project Studio → Connect, for example `https://todo.example.com` |
+| Publishable key | Project Studio → Connect; optional, sent as the `apikey` header |
+
+The client is framework-agnostic. The only per-framework work is **where the session is stored**, chosen through `ClientOptions.storage`:
+
+| Runtime | Adapter |
+|---------|---------|
+| Browser SPA | `localStorageStorage()` |
+| Browser with server rendering | `cookieStorage()` |
+| Server (SSR, route handlers, middleware) | `serverCookieStorage(cookieMethods)` |
+| React Native / Expo | `keyValueStorage(AsyncStorage)` |
+| Anything else | Your own `SessionStorageAdapter` (`get` / `set`) |
+| Scripts and tests | `memoryStorage()` (default) |
+
+<Note>
+Only `@motherbase/ssr` is framework-specific: it ships the Next.js cookie plumbing. Every other framework uses `@motherbase/client` directly, plus 10 lines of cookie glue when it renders on a server.
+</Note>
+
+## Next.js (App Router)
+
+The only framework with a dedicated package.
+
+```bash
+npm install @motherbase/client @motherbase/ssr @motherbase/ui
+```
+
+```bash
+# .env.local
+NEXT_PUBLIC_MOTHERBASE_URL=https://todo.example.com
+NEXT_PUBLIC_MOTHERBASE_KEY=mb_publishable_...
+```
+
+Browser client, for Client Components:
+
+```tsx
+// lib/motherbase/client.ts
+'use client'
+
+import { createBrowserClient } from '@motherbase/ssr'
+
+export const motherbase = createBrowserClient(
+  process.env.NEXT_PUBLIC_MOTHERBASE_URL!,
+  process.env.NEXT_PUBLIC_MOTHERBASE_KEY,
+)
+```
+
+Server client, for Server Components, Route Handlers, and Server Actions:
+
+```ts
+// lib/motherbase/server.ts
+import { cookies } from 'next/headers'
+import { createServerClient } from '@motherbase/ssr'
+import type { CookieToSet } from '@motherbase/ssr'
+
+export async function createMotherbaseServerClient() {
+  const cookieStore = await cookies()
+
+  return createServerClient(
+    process.env.NEXT_PUBLIC_MOTHERBASE_URL!,
+    process.env.NEXT_PUBLIC_MOTHERBASE_KEY,
+    {
+      cookies: {
+        getAll: () => cookieStore.getAll(),
+        setAll: (cookiesToSet: CookieToSet[]) => {
+          try {
+            for (const { name, value, options } of cookiesToSet) {
+              cookieStore.set(name, value, options)
+            }
+          } catch {
+            // Server Components cannot write cookies; middleware refreshes instead.
+          }
+        },
+      },
+    },
+  )
+}
+```
+
+Middleware keeps the session fresh and owns the `Set-Cookie` write:
+
+```ts
+// middleware.ts
+import type { NextRequest } from 'next/server'
+import { updateSession } from '@motherbase/ssr'
+
+export function middleware(request: NextRequest) {
+  return updateSession(
+    request,
+    process.env.NEXT_PUBLIC_MOTHERBASE_URL!,
+    process.env.NEXT_PUBLIC_MOTHERBASE_KEY,
+  )
+}
+
+export const config = { matcher: ['/((?!_next/static|_next/image|favicon.ico).*)'] }
+```
+
+On Next.js 16, where the `middleware.ts` convention is deprecated, put the same call in `proxy.ts` and export it as
+`proxy`; `updateSession` is identical in either file.
+
+First query, in a Server Component:
+
+```tsx
+import { createMotherbaseServerClient } from '@/lib/motherbase/server'
+
+export default async function ProductsPage() {
+  const client = await createMotherbaseServerClient()
+  const { data: products, error } = await client
+    .from<{ id: string; name: string }>('products')
+    .select('id,name')
+
+  if (error) return <p>{error.message}</p>
+  return <pre>{JSON.stringify(products, null, 2)}</pre>
+}
+```
+
+<Warning>
+Return the `NextResponse` produced by `updateSession`. Replacing it with a new response drops the refreshed or cleared session cookie.
+</Warning>
+
+Details: [`@motherbase/ssr`](/docs/packages/ssr/).
+
+For complete auth screens instead of assembling each form, see
+[`@motherbase/ui`](/docs/packages/ui/).
+
+## React (Vite SPA)
+
+No server, so `localStorage` is enough.
+
+```bash
+# .env
+VITE_MOTHERBASE_URL=https://todo.example.com
+VITE_MOTHERBASE_KEY=mb_publishable_...
+```
+
+```ts
+// src/motherbase.ts
+import { createClient, localStorageStorage } from '@motherbase/client'
+
+export const motherbase = createClient(
+  import.meta.env.VITE_MOTHERBASE_URL,
+  import.meta.env.VITE_MOTHERBASE_KEY,
+  { storage: localStorageStorage() },
+)
+```
+
+`getSession()` asks the server who is signed in; `onAuthStateChange` then reports every later sign-in, sign-out and refresh:
+
+```tsx
+import { useEffect, useState } from 'react'
+import type { User } from '@motherbase/client'
+import { motherbase } from './motherbase'
+
+export function useUser() {
+  const [user, setUser] = useState<User | null>(null)
+
+  useEffect(() => {
+    motherbase.auth.getSession().then(({ data }) => {
+      setUser(data?.user ?? null)
+    })
+
+    const { data } = motherbase.auth.onAuthStateChange((_event, session) => {
+      setUser(session?.user ?? null)
+    })
+
+    return () => data.subscription.unsubscribe()
+  }, [])
+
+  return user
+}
+```
+
+```tsx
+await motherbase.auth.signIn.email({ email, password })
+const { data: rows, error } = await motherbase.from('products').select('*').limit(20)
+```
+
+Add the app origin (`http://localhost:5173`) to the project's `corsOrigins` in the Platform Console.
+
+## Vue 3 (Vite SPA)
+
+Identical wiring; the client is exported from a plain module and used from `setup()`.
+
+```ts
+// src/motherbase.ts
+import { createClient, localStorageStorage } from '@motherbase/client'
+
+export const motherbase = createClient(
+  import.meta.env.VITE_MOTHERBASE_URL,
+  import.meta.env.VITE_MOTHERBASE_KEY,
+  { storage: localStorageStorage() },
+)
+```
+
+```ts
+// src/composables/useUser.ts
+import { onUnmounted, ref } from 'vue'
+import type { User } from '@motherbase/client'
+import { motherbase } from '../motherbase'
+
+export function useUser() {
+  const user = ref<User | null>(null)
+
+  motherbase.auth.getSession().then(({ data }) => {
+    user.value = data?.user ?? null
+  })
+
+  const { data } = motherbase.auth.onAuthStateChange((_event, session) => {
+    user.value = session?.user ?? null
+  })
+  onUnmounted(() => data.subscription.unsubscribe())
+
+  return user
+}
+```
+
+## Nuxt
+
+Nuxt renders on both sides, so pick the adapter per side. Cookie storage on the browser makes the session readable by the server on the next request.
+
+```ts
+// plugins/motherbase.client.ts
+import { createClient, cookieStorage } from '@motherbase/client'
+
+export default defineNuxtPlugin(() => {
+  const { public: config } = useRuntimeConfig()
+  const client = createClient(config.motherbaseUrl, config.motherbaseKey, {
+    storage: cookieStorage(),
+  })
+  return { provide: { motherbase: client } }
+})
+```
+
+Server routes build a client per request from the H3 event cookies:
+
+```ts
+// server/utils/motherbase.ts
+import type { H3Event } from 'h3'
+import { createClient, serverCookieStorage } from '@motherbase/client'
+
+export function motherbaseFromEvent(event: H3Event) {
+  const { public: config } = useRuntimeConfig(event)
+
+  return createClient(config.motherbaseUrl, config.motherbaseKey, {
+    storage: serverCookieStorage({
+      getAll: () =>
+        Object.entries(parseCookies(event)).map(([name, value]) => ({ name, value })),
+      setAll: cookies => {
+        for (const { name, value, options } of cookies) {
+          setCookie(event, name, value, options)
+        }
+      },
+    }),
+  })
+}
+```
+
+```ts
+// server/api/products.get.ts
+export default defineEventHandler(async event => {
+  const client = motherbaseFromEvent(event)
+  const { data, error } = await client.from('products').select('id,name')
+  if (error) throw createError({ statusCode: error.status ?? 500, message: error.message })
+  return data
+})
+```
+
+## SvelteKit
+
+`event.cookies` already matches the `CookieMethods` shape, so the server client is a few lines in `hooks.server.ts`.
+
+```ts
+// src/hooks.server.ts
+import { createClient, serverCookieStorage } from '@motherbase/client'
+import { PUBLIC_MOTHERBASE_URL, PUBLIC_MOTHERBASE_KEY } from '$env/static/public'
+import type { Handle } from '@sveltejs/kit'
+
+export const handle: Handle = async ({ event, resolve }) => {
+  event.locals.motherbase = createClient(
+    PUBLIC_MOTHERBASE_URL,
+    PUBLIC_MOTHERBASE_KEY,
+    {
+      storage: serverCookieStorage({
+        getAll: () => event.cookies.getAll(),
+        setAll: cookies => {
+          for (const { name, value, options } of cookies) {
+            event.cookies.set(name, value, { path: '/', ...options })
+          }
+        },
+      }),
+    },
+  )
+
+  return resolve(event)
+}
+```
+
+```ts
+// src/routes/products/+page.server.ts
+export async function load({ locals }) {
+  const { data, error } = await locals.motherbase.from('products').select('id,name')
+  if (error) return { products: [], message: error.message }
+  return { products: data }
+}
+```
+
+In the browser, use `cookieStorage()` so both sides read the same `motherbase.session` cookie:
+
+```ts
+// src/lib/motherbase.ts
+import { createClient, cookieStorage } from '@motherbase/client'
+import { PUBLIC_MOTHERBASE_URL, PUBLIC_MOTHERBASE_KEY } from '$env/static/public'
+
+export const motherbase = createClient(PUBLIC_MOTHERBASE_URL, PUBLIC_MOTHERBASE_KEY, {
+  storage: cookieStorage(),
+})
+```
+
+<Warning>
+The shared session cookie is not `HttpOnly`, because browser auth code must write it. Treat the serialized session as sensitive and keep the application protected against script injection.
+</Warning>
+
+## Expo / React Native
+
+No `localStorage` and no cookies, so supply an async adapter over `AsyncStorage`.
+
+```bash
+npm install @motherbase/client @react-native-async-storage/async-storage
+```
+
+```ts
+// lib/motherbase.ts
+import AsyncStorage from '@react-native-async-storage/async-storage'
+import { createClient, keyValueStorage } from '@motherbase/client'
+
+export const motherbase = createClient(
+  process.env.EXPO_PUBLIC_MOTHERBASE_URL!,
+  process.env.EXPO_PUBLIC_MOTHERBASE_KEY,
+  { storage: keyValueStorage(AsyncStorage) },
+)
+```
+
+`keyValueStorage` wraps any `getItem` / `setItem` / `removeItem` store, so the `AsyncStorage` object a supabase-js app already passes works unchanged; an entry that will not parse reads as signed out instead of throwing. The stored session is loaded before the first request on its own; `await motherbase.hydrate()` is only needed when you want the stored session before anything else runs, for example to pick the first screen without a flash of the signed-out one.
+
+For OAuth, pass `disableRedirect: true` and open the returned URL yourself:
+
+```ts
+const { data } = await motherbase.auth.signIn.social({
+  provider: 'github',
+  callbackURL: 'myapp://auth/callback',
+  disableRedirect: true,
+})
+// open data.url in an in-app browser, then hand the callback deep link to
+// motherbase.auth.getSessionFromUrl(url)
+```
+
+`callbackURL` must be in the project's trusted origins. For Sign in with Apple or Google
+One Tap, hand over the native id token instead: no browser is involved.
+
+```ts
+await motherbase.auth.signIn.social({ provider: 'apple', idToken: { token, nonce } })
+```
+
+## Node / vanilla TypeScript
+
+Scripts, workers, and non-browser backends keep the default in-memory session.
+
+```ts
+import { createClient } from '@motherbase/client'
+
+const client = createClient(process.env.MOTHERBASE_URL!, process.env.MOTHERBASE_KEY)
+
+await client.auth.signIn.email({
+  email: process.env.MOTHERBASE_EMAIL!,
+  password: process.env.MOTHERBASE_PASSWORD!,
+})
+
+const { data, error } = await client.from('products').select('id,name').limit(50)
+```
+
+Node 18+ provides `fetch`. On older runtimes, pass one explicitly: `createClient(url, key, { fetch: myFetch })`. The constructor throws when no fetch implementation is available.
+
+<Note>
+A shared process-wide client means a shared session. For a request-scoped identity, create one client per request with a storage adapter holding that caller's session: `serverCookieStorage` over the request's cookies does exactly that, and so does `createServerClient` from `@motherbase/ssr`.
+</Note>
+
+## Realtime, in any framework
+
+Realtime is the same code everywhere once `socket.io-client` is installed:
+
+```ts
+const channel = client
+  .channel('room:products')
+  .on('postgres_changes', { event: '*', schema: 'public', table: 'products' }, payload => {
+    console.log(payload.eventType, payload.new, payload.old)
+  })
+  .subscribe(status => console.log(status))
+
+// on unmount
+await client.removeChannel(channel)
+```
+
+Subscribe from the browser or the device, not from a Server Component. `removeChannel` unsubscribes and forgets the channel, so mounting the component again starts clean.
+
+## Checklist
+
+1. Project created in the Platform Console.
+2. App origin listed in the project's `corsOrigins`.
+3. API URL and publishable key read from Project Studio → Connect.
+4. Storage adapter matching the runtime.
+5. RLS policies enabled for the tables being queried; `/rest/v1` blocks any operation no enabled policy allows.
+
+## Related
+
+- [SDK reference](/docs/reference/sdk/) — full method list.
+- [`@motherbase/ssr`](/docs/packages/ssr/) — the Next.js helpers in detail.
+- [Auth](/docs/platform/auth/) — providers, sessions, and OAuth setup.
+- [RLS](/docs/platform/rls/) — why an empty result may be a policy, not a bug.
+- [Todo app example](/docs/example/todo-app/) — end-to-end walkthrough.

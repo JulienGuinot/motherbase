@@ -1,0 +1,64 @@
+{
+  "name": "@motherbase/ui",
+  "version": "0.2.1",
+  "description": "Configurable React auth components for Motherbase",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./styles.css": "./styles.css"
+  },
+  "files": [
+    "dist",
+    "styles.css",
+    "README.md"
+  ],
+  "sideEffects": [
+    "./styles.css"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepack": "npm run build",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "playground": "vite playground --host 127.0.0.1 --port 5174 --strictPort --force",
+    "playground:check": "tsc -p playground/tsconfig.json"
+  },
+  "dependencies": {
+    "@motherbase/client": "^2.0.0",
+    "blobatar": "^2.7.0",
+    "qrcode": "^1.5.4"
+  },
+  "peerDependencies": {
+    "react": ">=18"
+  },
+  "devDependencies": {
+    "@testing-library/react": "^16.3.2",
+    "@types/qrcode": "^1.5.6",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "jsdom": "^29.1.1",
+    "react": "^19.2.6",
+    "react-dom": "^19.2.6",
+    "typescript": "^5.4.2",
+    "vite": "^8.0.12",
+    "vitest": "^5.0.0"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/JulienGuinot/motherbase.git",
+    "directory": "packages/ui"
+  },
+  "homepage": "https://github.com/JulienGuinot/motherbase#readme",
+  "bugs": {
+    "url": "https://github.com/JulienGuinot/motherbase/issues"
+  }
+}

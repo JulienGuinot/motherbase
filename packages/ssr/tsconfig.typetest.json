@@ -1,0 +1,12 @@
+{
+  /* Type-level tests (`*.test-d.ts`), as in packages/client: the package
+     tsconfig only covers `src` because that is what ships. */
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": ".",
+    "declaration": false,
+    "declarationMap": false
+  },
+  "include": ["src", "tests"]
+}

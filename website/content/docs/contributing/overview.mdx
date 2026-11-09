@@ -1,0 +1,114 @@
+---
+title: "Repo & Toolchain"
+description: "Repository layout, Node version, install, the Turborepo pipeline, and every root script."
+order: 1
+---
+
+## Layout
+
+```text
+apps/server        project API + Platform Console (two entrypoints, one codebase)
+apps/studio        Next.js 15 + React 19 admin app
+packages/client    @motherbase/client — SDK
+packages/ssr       @motherbase/ssr — SSR helpers
+packages/cli       @motherbase/cli — operator CLI
+packages/ai        @motherbase/ai — agent loop
+packages/contracts @motherbase/contracts — shared route paths and types
+deploy/            compose files, Traefik, console stack, operator scripts
+docs/              design notes and deep dives
+scripts/           repo tooling
+data/              runtime data (assistant store, etc.)
+```
+
+## Node
+
+`22.12.0`, pinned in `.nvmrc` and `.node-version`, enforced by `engines: { node: ">=22.12.0" }` and a `preinstall` hook (`scripts/check-node-version.cjs`) that fails the install on an older runtime.
+
+```bash
+nvm use            # or fnm use
+npm run install:all   # npm ci --legacy-peer-deps
+```
+
+## Turborepo
+
+`turbo.json` defines four tasks:
+
+| Task | Config |
+|---|---|
+| `build` | `dependsOn: ["^build"]`, caches `dist/**` and `.next/**` (minus `.next/cache/**`) |
+| `test` | `dependsOn: ["build"]` — tests always run against built packages |
+| `lint` | no dependencies |
+| `dev` | `cache: false`, `persistent: true` |
+
+```bash
+npm run build   # turbo run build
+npm run test    # turbo run test
+npm run lint    # turbo run lint
+```
+
+## Root scripts
+
+| Script | What it does |
+|---|---|
+| `preinstall` | `scripts/check-node-version.cjs`: refuses an unsupported Node before anything installs |
+| `install:all` | `npm ci --legacy-peer-deps` |
+| `setup` | `bash ./setup.sh` |
+| `verify` | `lint && build && test` — the same three CI runs, in one command |
+| `dev` | Project API (`@motherbase/server`) |
+| `console:dev` / `console:start` | Platform Console |
+| `start` | Project API, production mode |
+| `studio:dev` / `studio:mock` / `studio:build` | Studio |
+| `sdk:build` | Build `@motherbase/client` |
+| `ui:preview` | The `@motherbase/ui` component playground |
+| `edge-runtime` | The Deno edge sidecar (`deploy/edge-runtime/main.ts`), reading `apps/server/.env` |
+| `cli` | `node packages/cli/bin/motherbase.js` |
+| `swagger` | Regenerate `apps/server/openapi.json` |
+| `docs:routes` | Regenerate `docs/admin-routes.md` from the controller decorators |
+| `docs:cli` | Regenerate `docs/cli-commands.md` from the CLI command registry |
+| `docs:settings` | Regenerate `docs/settings.md` from the settings registry |
+| `prisma:generate` / `prisma:migrate` / `prisma:deploy` / `prisma:studio` | Prisma |
+| `db:seed` | Seed a development database |
+| `infra` / `infra:down` | `docker compose up db minio -d` and stop |
+| `docker:up` / `docker:build` | Root `docker-compose.yml` |
+
+## Deep dives in `docs/`
+
+| File | Topic |
+|---|---|
+| `DESIGN.md` | The UI coherence contract the Studio bundle has to follow |
+| `glossary.md` | Platform Console vs Project Studio, and the naming rules |
+| `email-templates.md` | Editable auth email templates |
+| `auth/per-organization-sso.md` | Turning on SSO and registering a per-org IdP |
+| `admin-routes.md` | **Generated.** `npm run docs:routes` writes it from the controller decorators; `apps/server/tests/route-manifest.unit.test.ts` fails the build on drift |
+| `publishing-the-sdk.md` | Release process for the npm packages |
+| `edge-functions.md` | How the Deno sidecar runs a function, for someone reading the backend |
+| `cli-commands.md` | **Generated.** `npm run docs:cli` writes it from the CLI command registry; `packages/cli/test/docs.test.js` fails on drift |
+| `settings.md` | **Generated.** `npm run docs:settings` writes it from the settings registry; `apps/server/tests/settings-docs.unit.test.ts` fails on drift |
+
+This repo's `npm run docs:sync` (`scripts/sync-backend-docs.mjs`) then copies
+`docs/admin-routes.md` into the [Admin API reference](/docs/reference/admin-api/),
+`packages/client/COMPATIBILITY.md` into the [SDK reference](/docs/reference/sdk/), and
+`docs/cli-commands.md` into the [CLI commands](/docs/cli/commands/) page and the [CLI overview](/docs/cli/overview/)'s command table, and
+`docs/settings.md` into the [settings reference](/docs/reference/settings/), each between
+its own `BEGIN/END` markers. Regenerate them in the backend first; `npm test` here
+fails when any block is stale.
+
+<Note>
+Product documentation lives on this site, not in the repository. `docs/rls.md`,
+`docs/sdk.md`, `docs/mcp.md` and `docs/migrating-from-supabase.md` are stubs that link
+here — the two copies used to drift, and the site is the one readers see. Edit the page
+here; leave the stub alone.
+</Note>
+
+<Note>
+Dated audits and reviews do not live in `docs/`: they go stale the day their findings are
+fixed, and the next contributor spends a session chasing bugs that no longer exist. Five
+such files were deleted in one pass; git history keeps them. A report belongs in the pull
+request, not in a new file.
+</Note>
+
+## Next
+
+- [Local development](/docs/contributing/development/) — running the API, Console and Studio.
+- [Testing & CI](/docs/contributing/testing/) — what runs, and what CI enforces.
+- [Code conventions](/docs/contributing/conventions/) — folder layout and the patterns to preserve.

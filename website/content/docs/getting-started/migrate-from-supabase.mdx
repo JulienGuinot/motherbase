@@ -1,0 +1,558 @@
+---
+title: "Migrate from Supabase"
+description: "Move a Supabase project to Motherbase: schema, data, RLS policies, auth users, storage objects, edge functions and secrets."
+order: 6
+---
+
+Motherbase has a built-in Supabase importer that moves a whole project, not only its database.
+
+Six sections, three credentials. Each credential unlocks more of the import, and each section is
+independent: a missing credential downgrades that section to a note instead of failing the run,
+and a section that fails never takes another down.
+
+| Credential | What it brings across |
+|---|---|
+| Postgres connection string (required) | the `public` schema, your other non-Supabase schemas, table data, RLS policies, email/password users from `auth.users`, and the bucket catalog |
+| `service_role` key | the storage objects' bytes. Without it, buckets are created empty |
+| Management API token (`sbp_…`) | edge functions, ported from Deno, and project secrets |
+
+Still not copied: Vault entries, realtime config, auth provider settings, and Supabase-managed
+internal schemas.
+
+<Note>
+The importer treats the Supabase connection string as a secret. It is sent to the target project admin API, used server-side for `pg_dump`, `psql`, and read-only auth queries, then discarded. Temporary dump files are written under `BACKUP_DIR` and removed after the run.
+</Note>
+
+## Before you import
+
+You need:
+
+- a running Motherbase project
+- access to its Platform Console or direct admin token
+- a Supabase Postgres connection string with read access to `public` — use the **session
+  pooler URI on port 5432**, copied from Supabase's Connect panel. The other two do not work:
+  the direct connection (`db.<ref>.supabase.co`) is IPv6-only and fails to resolve from most
+  hosts, and the transaction pooler (port 6543) cannot run `pg_dump`
+- read access to `auth.users` if you want to import users
+- `pg_dump` and `psql` available in the Motherbase API runtime, which the official image includes
+
+Create a backup of the empty or current target project first:
+
+```bash
+motherbase db dump before-supabase-import.sql
+```
+
+For a production migration, run the first import into a fresh staging Motherbase project. Validate schema, RLS, auth, and app flows before switching traffic.
+
+## Link the target project
+
+Log in to the Platform Console, then link the target project:
+
+```bash
+motherbase login --url https://console.example.com
+motherbase projects list
+motherbase link my-project
+motherbase status
+```
+
+For CI or server automation, you can skip local config:
+
+```bash
+MOTHERBASE_CONSOLE_URL=https://console.example.com \
+MOTHERBASE_TOKEN=$MOTHERBASE_TOKEN \
+MOTHERBASE_PROJECT=my-project \
+motherbase status
+```
+
+Direct single-project mode also works:
+
+```bash
+MOTHERBASE_URL=https://my-project.example.com \
+MOTHERBASE_ADMIN_TOKEN=$MOTHERBASE_ADMIN_TOKEN \
+motherbase status
+```
+
+## Preview first
+
+Run a dry-run preview. It counts everything it would import, without writing to Motherbase.
+
+```bash
+motherbase import --from-supabase "$SUPABASE_DB_URL"   --service-role-key "$SUPABASE_SERVICE_ROLE_KEY"   --management-token "$SUPABASE_ACCESS_TOKEN"   --preview --json
+```
+
+The preview returns:
+
+```json
+{
+  "tables": [
+    { "name": "todos", "rows": 1200 }
+  ],
+  "policies": 6,
+  "authUsers": 42,
+  "buckets": [
+    { "name": "avatars", "objects": 310, "bytes": 48211904 }
+  ],
+  "edgeFunctions": ["send-receipt"],
+  "secrets": 4,
+  "notes": []
+}
+```
+
+If `auth.users` cannot be read, the preview still works for schema/data and adds a note that auth import will be skipped or fail.
+
+## Run the import
+
+Drop `--preview` and keep the credentials you used for it:
+
+```bash
+motherbase import --from-supabase "$SUPABASE_DB_URL"   --service-role-key "$SUPABASE_SERVICE_ROLE_KEY"   --management-token "$SUPABASE_ACCESS_TOKEN"   --yes --json
+```
+
+The CLI sends this admin request to the linked project:
+
+```http
+POST /api/admin/import/supabase
+Content-Type: application/json
+
+{
+  "connectionString": "postgresql://...",
+  "serviceRoleKey": "eyJ...",
+  "managementToken": "sbp_...",
+  "include": {
+    "schema": true, "data": true, "auth": true,
+    "storage": true, "edgeFunctions": true, "secrets": true
+  },
+  "confirm": "IMPORT"
+}
+```
+
+For a dry-run through the API:
+
+```json
+{
+  "connectionString": "postgresql://...",
+  "include": {
+    "schema": true, "data": true, "auth": true,
+    "storage": true, "edgeFunctions": true, "secrets": true
+  },
+  "preview": true
+}
+```
+
+The response summary reports every section separately, under an overall `status` of `success`,
+`partial` or `failed`:
+
+```json
+{
+  "status": "partial",
+  "schema": { "applied": true, "warnings": "..." },
+  "data": { "applied": true, "includedInDump": true },
+  "auth": { "imported": 42, "skipped": 0, "errors": [] },
+  "storage": { "buckets": 2, "objects": 310, "skipped": 0, "errors": [] },
+  "edgeFunctions": { "imported": 1, "enabled": 1, "needsPorting": 0, "errors": [] },
+  "secrets": { "imported": 4, "skipped": 1, "errors": [] },
+  "notes": []
+}
+```
+
+`partial` means at least one section did not fully land — read its `errors` and the `notes`
+before switching traffic.
+
+`schema.warnings` means `psql` reported per-statement issues while the import continued. Review them before going live.
+
+## Partial imports
+
+Schema + auth, without table data:
+
+```bash
+motherbase import --from-supabase "$SUPABASE_DB_URL" --no-data --yes
+```
+
+Schema + data, without auth users:
+
+```bash
+motherbase import --from-supabase "$SUPABASE_DB_URL" --no-auth --yes
+```
+
+Each section has its own `--no-` flag: `--no-data`, `--no-auth`, `--no-storage`,
+`--no-edge-functions`, `--no-secrets`.
+
+The admin API supports the same control with `include`:
+
+```json
+{
+  "include": { "schema": true, "data": false, "auth": true, "storage": false }
+}
+```
+
+## What happens internally
+
+Schema and data use `pg_dump` from Supabase and `psql` into the Motherbase project database.
+
+The dump is restricted to the portable app schema:
+
+```text
+--schema=public
+--no-owner
+--no-privileges
+--exclude-schema=auth
+--exclude-schema=storage
+--exclude-schema=graphql
+--exclude-schema=realtime
+--exclude-schema=vault
+--exclude-schema=supabase_functions
+--exclude-schema=supabase_migrations
+```
+
+Your **other** schemas come along with `public`. Supabase's own RLS guide tells you to keep
+`SECURITY DEFINER` helpers out of `public`, usually in a schema named `private`, and to call
+them from policies and triggers. Dumping `public` alone would produce a dump that cannot load
+(`schema "private" does not exist`), so the importer dumps every schema you defined and skips
+only the Supabase-managed ones. The summary lists which extra schemas came across. What those
+helpers *call* in a Supabase-managed schema (`net.http_post`, `cron.schedule`) still has no
+equivalent, and fails at runtime rather than at import.
+
+Three rewrites happen on the way in:
+
+- **Supabase roles are created for you.** A `public` dump grants to roles such as
+  `service_role` and `authenticator` that a fresh project does not have. The importer
+  pre-creates them as privilege-free `NOLOGIN` roles so those grants parse. They hold nothing
+  beyond what the dump itself grants.
+- **The dump preamble is trimmed** of settings this project's PostgreSQL does not recognise, so
+  a source on a newer PostgreSQL (a `SET transaction_timeout` from a PG17 source, for example)
+  does not abort the load. `CREATE SCHEMA public` becomes `CREATE SCHEMA IF NOT EXISTS public`,
+  since every project database already has that schema and the bare statement would roll the
+  whole import back.
+- **`auth.uid()` in imported policies is cast** — see [RLS compatibility](#rls-compatibility).
+
+<Warning>
+**Schema and data load atomically, auth users do not.** The dump is applied in one transaction
+with `ON_ERROR_STOP`, so a single failing statement rolls back the whole schema and data load
+while the independent user import still succeeds. That is the "only my users got imported"
+outcome, and the summary names the statement that caused it.
+</Warning>
+
+After the load the importer re-reads both databases and compares tables, row counts,
+constraints, RLS state and policies, reporting the import as failed if they disagree. That
+comparison ignores the `auth.uid()` cast below (it is the importer's own doing) and nothing
+else. It runs *after* `psql` has committed: a verification failure means the objects are in
+your project and the comparison disagreed, not that nothing happened.
+
+Auth users are imported separately from `auth.users`:
+
+- `id` is preserved so existing owner columns can keep matching `auth.uid()`.
+- `email` becomes `email` and `classicEmail`.
+- `encrypted_password` is stored as `passwordHash`.
+- bcrypt hashes are accepted on first login and migrated to argon2 after a successful password check.
+- existing Motherbase emails are skipped, not overwritten.
+- usernames are generated from the email local part and deduplicated.
+
+## RLS compatibility
+
+Supabase and Motherbase both support `auth.uid()`, `auth.jwt()`, `anon`, and `authenticated`, but there is one important type difference: Motherbase `auth.uid()` returns `text`.
+
+Left alone, the first imported policy comparing a `uuid` column to `auth.uid()` would fail with
+`operator does not exist: uuid = text`:
+
+```sql
+-- Supabase-style policy against a uuid user_id
+USING (auth.uid() = user_id)
+```
+
+The importer therefore casts each `auth.uid()` in the dump to `(auth.uid())::uuid`, which
+reproduces the source's own typing: an expression that was `uuid` on Supabase stays `uuid`, and
+one written as `auth.uid()::text` stays `text`. You do not have to fix imported policies by
+hand.
+
+Policies you write yourself in Motherbase compare `auth.uid()` as `text` — only imported ones
+are cast. For new tables, standardize on text owner columns:
+
+```sql
+user_id text DEFAULT auth.uid()
+```
+
+Also review policies that reference Supabase-only schemas or functions, for example `storage.objects`, `auth.users`, `vault`, `extensions`, `realtime`, or custom extension schemas.
+
+## Storage migration
+
+Buckets and objects are part of the import. Buckets come from the source's `storage.buckets`
+catalog over the same connection the dump used, with their public/private visibility. Object
+bytes come from the Storage API, which is the only place they exist, so they need the
+`service_role` key.
+
+Without the key the buckets are still created, empty, and the summary says how many objects were
+left behind. Re-running the import with the key moves them: a re-run reuses the bucket slugs from
+the earlier one, which is what makes it resumable.
+
+Two things to watch in the summary:
+
+- **Bucket names are slugified.** `my_bucket` and `my-bucket` are two distinct Supabase buckets
+  that both map to `my-bucket`, so the second gets a `-2` suffix rather than merging into the
+  first and overwriting its files. Object keys are untouched, but client code addressing the
+  bucket by name has to follow the rename, and the summary lists every one.
+- **Stored Supabase storage URLs are rewritten** to point at this project after the objects land.
+
+Object keys are unchanged, so rows that already store a path keep working, and application code
+ports as is:
+
+```ts
+await client.storage.from('avatars').upload(`${userId}/avatar.png`, file, { upsert: true })
+const { data } = await client.storage.from('avatars').download(`${userId}/avatar.png`)
+const files = await client.storage.from('avatars').list(userId)
+```
+
+Keys are normalised and traversal-checked, so `../` in a key is refused rather than cleaned up:
+a key that needed rewriting is not the key you meant. The server-issued file id still works
+anywhere a path does, which keeps code written before path addressing running.
+
+What is different:
+
+- `{ transform }` works on `download`, `getPublicUrl` and `createSignedUrl`, served by
+  `/storage/v1/render/image` with the Supabase limits (width/height up to 2500,
+  `cover`/`contain`/`fill`, quality 20–100, `origin`/`webp`/`avif`; no SVG output). Without
+  `format`, WebP is negotiated from `Accept`.
+- `upsert` works: without it, a second write to the same key is a `409` rather than a silent
+  replacement. `contentType` works too.
+- `cacheControl` is **not** part of `UploadOptions`, so a ported call naming it is a type error
+  rather than an option quietly dropped. Cache headers come from the driver, and from the render
+  endpoint for a transform.
+- Bucket administration from the client (`createBucket`, `listBuckets`, `deleteBucket`, …) needs
+  a **secret** key, so it is a server-side call. See the [SDK reference](/docs/reference/sdk/).
+
+Supabase policies on `storage.objects` do port: turn on storage RLS and write them against
+`storage.files` (or the `storage.objects` view over it). See
+[Storage → Authorization](/docs/platform/storage/#authorization).
+
+## Edge functions and secrets
+
+Both need a Supabase personal access token (`--management-token`, from
+[your Supabase account tokens](https://supabase.com/dashboard/account/tokens)).
+
+Each function keeps its **slug**, which is its route: a function called at
+`/functions/v1/send-receipt` on Supabase is called at `/api/edge/send-receipt` here, so client
+code only changes its base URL. The Deno source is ported on the way in.
+
+A function is imported **enabled** only if the ported source passes the same deploy-time bundle
+gate the Studio deploy button runs. Anything else is stored **disabled** and counted in
+`needsPorting`, so the migration stays lossless and you finish the port by hand. When the port
+itself never got tested (an unresolvable import short-circuits the deploy), the rewritten source
+is kept as a head start; when a deploy was tried and failed, the original source is kept, because
+then the rewrite is the prime suspect.
+
+Access carries over too. A function that had `verify_jwt: true` on Supabase is imported
+private (callable with a user session or a secret project key); one that had `verify_jwt: false`,
+typically a Stripe or GitHub webhook receiver, is imported **Public**, so its deliveries keep
+arriving. The summary lists the public ones: each should check its sender's signature
+itself. See [Who can call a function](/docs/platform/edge-functions/#who-can-call-a-function).
+
+A function whose name or route already exists here is skipped rather than overwritten, and shows
+up in `edgeFunctions.errors`.
+
+Project secrets land in this project's edge-function secret store. Supabase-managed `SUPABASE_*`
+secrets are skipped on purpose: they point at the source project. Imported functions should use
+this project's own URL and keys.
+
+## App code changes
+
+Replace the Supabase package with Motherbase:
+
+```bash
+npm remove @supabase/supabase-js
+npm install @motherbase/client
+npm install socket.io-client # only if you use realtime
+```
+
+Then let the CLI do the import rewrite and tell you what will not port:
+
+```bash
+npx motherbase migrate codemod ./src            # dry run, prints what it would change
+npx motherbase migrate codemod ./src --write    # apply
+```
+
+It rewrites `@supabase/supabase-js` to `@motherbase/client` and `@supabase/ssr` to
+`@motherbase/ssr`, then reports every call this SDK does not implement, with a file, a line and
+what to do instead. It is a text pass, not an AST pass, so a match inside a comment or a string
+is still reported — over-reporting in a list you read yourself beats missing one.
+
+Initialize the client:
+
+```ts
+import { createClient, localStorageStorage } from '@motherbase/client'
+
+export const client = createClient(
+  process.env.NEXT_PUBLIC_MOTHERBASE_URL!,
+  process.env.NEXT_PUBLIC_MOTHERBASE_KEY,
+  { storage: localStorageStorage() },
+)
+```
+
+Most CRUD calls stay the same:
+
+```ts
+const { data, error } = await client
+  .from('todos')
+  .select('*')
+  .eq('done', false)
+  .order('created_at', { ascending: false })
+```
+
+`.rpc()`, relational embedding, the full filter set, broadcast and presence
+channels, OAuth helpers and `storage.list()` all exist — most application code
+compiles unchanged after the package swap.
+
+The differences that will actually bite are behavioural rather than missing:
+
+| Difference | What to do |
+|---|---|
+| An unbounded `select()` is capped at `api.rest.maxRows`, 1000 by default | Paginate with `.range(from, to)` and read `Content-Range`, or pass an explicit `.limit()` |
+| A write returns no rows unless asked, as in PostgREST | Keep the `.select()` after a write wherever you read its result; without it `data` is `null` |
+| An unfiltered `update()` or `delete()` is refused with 400 | Add a filter. This is deliberate: `supabase-js` would delete every visible row |
+| `client.schema('other').from()` throws | Tables are served from `public` only — use a view in `public`. `client.schema(name).rpc()` *does* work, for the schemas a feature exposes (Queues' `pgmq_public`); any other is refused with `PGRST106` |
+| Better Auth sessions have no refresh token | Drop `refreshSession()` / `setSession()`: `auth.getSession()` revalidates, and the SDK does it on a `401` by itself |
+| `explain()` is admin-only and answers `403` for a normal caller | Do not ship code that depends on it |
+
+There is no `pg_graphql`. If you query Supabase over GraphQL, that path has no equivalent and
+has to be rewritten as REST calls.
+
+The authoritative, per-method list is
+[`COMPATIBILITY.md`](https://github.com/JulienGuinot/motherbase/blob/master/packages/client/COMPATIBILITY.md),
+generated by a contract test that runs every listed `supabase-js` call against a
+live server. Do not trust a hand-written table, including this one, over that.
+
+### Regenerate your types
+
+```bash
+npx motherbase gen types typescript > src/database.types.ts
+```
+
+The emitted shape is the `supabase-js` `Database` shape (`Row`, `Insert`, `Update`,
+`Relationships`, `Enums`, `Functions`), so `createClient<Database>` types `from()`,
+`rpc()`, and the Prisma-style `client.db.<table>` methods.
+
+### Port auth
+
+Auth is the one layer that is **not** a package swap. `client.auth` is
+[Better Auth](https://www.better-auth.com/docs)'s own client (since `@motherbase/client`
+2.0), so the supabase-js auth names are gone and porting is a rename. List what needs
+renaming in your code first:
+
+```bash
+npx motherbase migrate codemod .   # --write rewrites the imports
+```
+
+The [compatibility matrix](/docs/reference/sdk/#compatibility-matrix) names the Better Auth
+call for every supabase-js one. The common ones:
+
+| supabase-js | Motherbase |
+|---|---|
+| `signUp({ email, password })` | `signUp.email({ email, password, name })` |
+| `signInWithPassword({ email, password })` | `signIn.email({ email, password })` |
+| `signInWithOAuth({ provider, options })` | `signIn.social({ provider, callbackURL })` |
+| `signInWithOtp` then `verifyOtp` | `emailOtp.sendVerificationOtp({ email, type: 'sign-in' })` then `signIn.emailOtp({ email, otp })` |
+| `resetPasswordForEmail(email)` | `emailOtp.requestPasswordReset({ email })` then `emailOtp.resetPassword({ email, otp, password })` |
+| `updateUser({ data })` | `updateUser({ name, image, … })`, fields flat |
+| `updateUser({ password })` | `changePassword({ currentPassword, newPassword })`, or `updateUserCredentials({ password, nonce })` after `reauthenticate()` |
+| `getUser()` | `getSession()` |
+| `auth.mfa.*` | `twoFactor.*` |
+| `signInWithSSO({ domain })` | `signIn.sso({ domain, callbackURL })` |
+| `signInWithIdToken({ provider, token })` | `signIn.social({ provider, idToken: { token } })` |
+| `getUserIdentities` / `linkIdentity` / `unlinkIdentity` | `listAccounts` / `linkSocial` / `unlinkAccount` |
+
+What ports unchanged: `onAuthStateChange` (with `INITIAL_SESSION`), `signOut`,
+`exchangeCodeForSession`, `auth.admin.*` (secret key required) and the supabase-js spellings
+on the stored session (`session.access_token`, `user.user_metadata`). The remaining
+differences come from Better Auth **bearer** sessions:
+
+- **No refresh token.** `refreshSession()` and `setSession()` do not exist. `getSession()`
+  asks the server; the SDK revalidates on a `401` by itself (single-flight) and clears the
+  session with `SIGNED_OUT` when the token is dead. There is no `TOKEN_REFRESHED` event.
+- **`getSession()` is the verified read.** The locally stored session, without a network call,
+  is `client.hydrate()`.
+- **PKCE is supported.** Create the client with `auth: { flowType: 'pkce' }`; the `?code=` the
+  redirect comes back with is exchanged on load (or by `exchangeCodeForSession(code)`) in the
+  same browser that started the flow. Implicit flow remains the default.
+- **Password reset is a one-time code**, not a redirect link.
+- **Anonymous sign-in** must be enabled in `auth.methods.anonymous`; `signIn.anonymous()`
+  creates a user rather than an `anon` request, and `updateUserCredentials({ email })` makes
+  it permanent without changing its id.
+
+Organizations, teams, passkeys, SSO providers and per-user API keys have no supabase-js
+equivalent; they are under `client.auth` too. See the [SDK reference](/docs/reference/sdk/#auth).
+
+### Port realtime
+
+`client.channel(name).on('postgres_changes' | 'broadcast' | 'presence', …)`, `.subscribe()`,
+`.send()`, `.track()`, `.presenceState()` and `removeChannel()` are API-identical. Notes and gaps:
+
+- **Private channels** (`config: { private: true }`) are authorized by RLS policies on
+  `realtime.messages`, as on Supabase: SELECT to receive, INSERT to send or track.
+- Only those three event types are accepted. `.on('system', …)` throws.
+- **`postgres_changes` is fed by the API, not by the WAL**, so a write made inside an `.rpc()`
+  function body, by a trigger, or from the SQL editor emits nothing. See
+  [Realtime → Delivery](/docs/platform/realtime/#delivery).
+
+The transport is Socket.IO, not the Supabase Realtime wire protocol. That is invisible through
+the SDK, but any non-JS client speaking the Supabase wire protocol directly will not connect.
+
+### Port edge functions
+
+`client.functions.invoke(name, { body, method, headers })` ports directly. `region` is accepted
+and warned about, then ignored: a self-hosted Motherbase runs every function in one place. A
+failing function still resolves `{ data: null, error }` rather than throwing, but `error` is a
+real `FunctionsHttpError` / `FunctionsFetchError` instance, so an `instanceof` check ported from
+supabase-js keeps working.
+
+### Keys and `service_role`
+
+Supabase's `anon` key becomes a **publishable** key, and the `service_role` key
+becomes a **secret** key. Both are on Project Settings → API keys.
+
+```ts
+// Browser: publishable key, RLS decides everything (as `anon` did)
+createClient(url, process.env.NEXT_PUBLIC_MOTHERBASE_KEY)
+
+// Server: secret key, runs as service_role and bypasses RLS
+createClient(url, process.env.MOTHERBASE_SECRET_KEY!)
+```
+
+One scope difference to plan for: a secret key opens the data plane and
+`client.auth.admin.*`, but **not** SQL or DDL. Code that used the service key to
+run arbitrary SQL has to move to a migration, the CLI or the admin API. See
+[API Keys](/docs/platform/api-keys/).
+
+Note also that key enforcement is off by default here, so a project accepts
+callers that send no key at all until you turn it on.
+
+## Post-import checklist
+
+Run these checks before switching users over:
+
+```bash
+motherbase db tables
+motherbase users list
+motherbase rls list
+motherbase storage buckets list
+motherbase inspect advisor
+motherbase inspect shield
+```
+
+Then verify in the app:
+
+- users can sign in with existing email/password accounts
+- owner-scoped rows still match `auth.uid()`
+- anonymous routes only expose data intended for `anon`
+- `PATCH` and `DELETE` calls include filters
+- realtime subscriptions receive expected table events
+- stored storage paths and URLs resolve (keys are kept as is, Supabase storage URLs were rewritten)
+- the functions listed as imported **Public** are the ones you expect to be open
+- any `schema.warnings` from the import are resolved or accepted
+
+## Rollback
+
+If the target project was empty, the cleanest rollback is to delete and recreate it from the Platform Console.
+
+If you imported into an existing project, restore the backup you created before import:
+
+```bash
+motherbase db restore before-supabase-import.sql --confirm
+```

@@ -1,0 +1,157 @@
+---
+title: "Request Lifecycle"
+description: "Every middleware a request passes through in the project API, in mount order, and what each one enforces."
+order: 2
+---
+
+The project API is a single Express app assembled in `apps/server/app.ts`. Mount order is the contract — this page follows it top to bottom.
+
+## Before the app: boot-time gates
+
+Two checks can stop the process before it ever listens:
+
+| Gate | Code | Behaviour |
+|---|---|---|
+| Environment validation | `apps/server/config/env.ts` | Zod-validates `process.env`; prints every offending key and `process.exit(1)` |
+| Production CORS allowlist | `middlewares/cors.middleware.ts` → `validateProdCorsConfig()` | Refuses to boot in production without an explicit origin allowlist |
+
+`app.set('trust proxy', env.TRUST_PROXY)` is applied only when `TRUST_PROXY` is set. Behind Traefik this matters: without it every client shares the proxy IP and collapses into one rate-limit bucket. With it set and **no** proxy in front, clients can forge `X-Forwarded-For`. Opt in deliberately.
+
+## The chain
+
+| # | Middleware | File | What it does |
+|---|---|---|---|
+| 1 | `rejectScannerProbes` | `middlewares/scanner-probe.ts` | Answers bot probes with a bare `404` before anything logs them: a first path segment that is a dotfile (except `.well-known`), `wp-*`, `wordpress`, `phpmyadmin`, `cgi-bin` or `*.php`/`*.asp(x)`/`*.jsp`/`*.cgi`, and any method but `GET`/`HEAD`/`OPTIONS` on `/`. Only the first segment is inspected, so a storage key named `.env` further down a path is untouched |
+| 2 | `morgan('dev')` | — | Console request log. Skipped when `NODE_ENV=test` |
+| 3 | `requestId` | `middlewares/request-id.middleware.ts` | Correlation id, echoed as `x-request-id` and carried into every log line and error envelope |
+| 4 | `requestLogger` | `middlewares/request-logger.ts` | Meters the request, and on `finish` pushes one line into the shared `LogBuffer` + shield telemetry |
+| 5 | `helmet()` | — | Security headers, with `Cross-Origin-Resource-Policy: cross-origin` |
+| 6 | `cors(delegate)` | `middlewares/cors.middleware.ts` | Origin allowlist read **per request** from the `server.cors` settings group, falling back to `CORS_ORIGINS`; storage routes also get their bucket's own CORS rules |
+| 7 | `globalLimiter` | `middlewares/rate-limit.ts` | Built-in scope limiter (global / auth / rest / edge) |
+| 8 | `customRulesLimiter` | `middlewares/custom-rate-limit.ts` | Operator-defined rules, most-restrictive-wins |
+| 9 | `captchaGuard` | `middlewares/captcha-guard.ts` | CAPTCHA on the routes **Attack Protection** lists outside `/api/auth` (`captchaRoutes`). After the limiters, so a flood of tokenless calls is throttled before it costs a provider round trip |
+| 10 | Auth rate limits | `auth/rate-limits.ts` | The per-kind **Auth · Rate limits** on `/api/auth`, ahead of Better Auth |
+| 11 | Better Auth routes | `auth/routes.ts` | `registerProjectAuthRoutes` owns `/api/auth/*` (with `authLimiter` on credential endpoints); mounted **before** body parsers because it reads the raw body |
+| 12 | Storage protocol routes | `registerStorageProtocolRoutes` | TUS resumable uploads and the S3 protocol stream their own bodies, so they are mounted before any parser |
+| 13 | Body parsers | — | `urlencoded` and `express.json` (both keep `req.rawBody` for webhook signatures), `cookieParser`, `express.raw()`; `/api/admin/db` gets a 25 MB JSON limit for the CLI's migration bodies |
+| 14 | `/docs/sdk.md` | `app.ts` | Serves `docs/sdk.md` |
+| 15 | Public bucket static | — | Only `S3_PUBLIC_BUCKET` is served statically, with the user-content headers; private objects require the authenticated endpoint |
+| 16 | `scopePerRequest(container)` | Awilix | Creates the per-request DI scope on `req.container` |
+| 17 | Controllers | `controllers/*.controller.ts` | Auto-loaded by `awilix-express`'s `loadControllers` |
+| 18 | Edge mail callback | `services/admin/edge-sandbox.ts` | `POST /internal/edge-runtime/mail`: a function's `sendMail()`, authenticated by a per-invocation token |
+| 19 | `/api/health-check` | `app.ts` | `SELECT 1`; `200` with `db: "connected"` or `503` |
+| 20 | `/api/docs` | `config/openapi.ts` | Swagger UI |
+| 21 | `GET /` | `app.ts` | Service descriptor: `{ name, docs: '/api/docs', health: '/api/health-check' }`, no version |
+| 22 | 404 | `app.ts` | `app.all('*')` forwards `new HttpException('Page not found', 404, 'NOT_FOUND')` into the error handler |
+| 23 | Error handler | `middlewares/api-error.middleware.ts` | Last. Normalizes every error into one envelope |
+
+Project Studio is not mounted here: the Platform Console server (`console/server.ts`) serves
+it at `/studio` and redirects `/console/*` there with a `308`.
+
+<Warning>
+Ordering is load-bearing in two places: Better Auth must precede the body parsers, and the error handler must stay last so no forwarded error escapes production masking.
+</Warning>
+
+## Route-level guards
+
+These are not global — controllers opt in with `@before([...])`.
+
+| Guard | File | Rule |
+|---|---|---|
+| `authMiddleware` | `middlewares/auth.middleware.ts` | Validates a Better Auth session (cookie **or** bearer/JWT), reloads the full Prisma user onto `req.user` |
+| `optionalAuthMiddleware` | same | Same, but anonymous requests continue |
+| `requireRole(...roles)` | `middlewares/require-role.ts` | Runs after auth; `401` when `req.user.role` is not listed |
+| `adminGuard` / `adminOnly` | `middlewares/platform-admin.middleware.ts` | Guards every `/api/admin` route |
+| `bucketTokenGuard(perm)` | `middlewares/bucketToken.middleware.ts` | Verifies a bucket bearer token against `:slug` for `read`/`write`/`delete` |
+| `bucketCors` | `middlewares/bucketCors.middleware.ts` | Per-bucket CORS rules for storage routes |
+| `edgeInvokeGuard` | `middlewares/edge-invoke-guard.ts` | Gates public edge-function invocation |
+| `validateRequest` | `middlewares/validate-request.ts` | Turns `express-validator` results into a validation error response |
+
+### adminGuard: two ways in
+
+```ts
+// 1. Console proxy: X-Platform-Token matched against PLATFORM_SERVICE_TOKEN
+//    → synthetic { id: 'platform', role: 'ADMIN', platform: true }
+// 2. Normal session with role ADMIN
+```
+
+A present-but-wrong `X-Platform-Token` is rejected immediately — it never falls through to session auth. Comparison uses `lib/safe-equal.ts` (constant time).
+
+### edgeInvokeGuard
+
+Allows the call when any of these hold, else `401`:
+
+1. `EDGE_PUBLIC_INVOKE_ENABLED=true`, or
+2. the request is authenticated, or
+3. `x-motherbase-edge-token` (or `x-edge-invoke-token`) matches `EDGE_INVOKE_TOKEN`, or
+4. a **secret** project API key is presented (`apikey`, or a `Bearer mb_…`); a publishable key
+   is not enough, or
+5. the function is marked public (`EdgeFunction.isPublic`). The two lookups come last, so a
+   session or the static token never pays for them; an unknown route is still a `401`, not a
+   `404`.
+
+The route runs `edgeOptionalAuthMiddleware` rather than the plain optional one: a bearer that
+is not a session (a cron secret, a webhook's own token) is passed through to the function
+instead of being refused, so a public function can authenticate its callers itself.
+
+## Rate limiting in two layers
+
+**Built-in scopes** (`middlewares/rate-limit.ts`) — window and per-scope maxima both live-tunable through the `security.rateLimit` settings group:
+
+| Scope | Env seed | Default |
+|---|---|---|
+| global | `RATE_LIMIT_GLOBAL_MAX` | 1000 |
+| auth | `RATE_LIMIT_AUTH_MAX` | 20 |
+| REST read | `RATE_LIMIT_REST_READ_MAX` | 300 |
+| REST write | `RATE_LIMIT_REST_WRITE_MAX` | 120 |
+| edge | `RATE_LIMIT_EDGE_MAX` | 60 |
+
+Buckets key on `user:<id>` when authenticated, otherwise `ip:<addr>`.
+
+Every knob in the `security.rateLimit` group applies live. The maximums are read through a
+function on each request; the **window** (`windowMin`, seeded from `RATE_LIMIT_WINDOW_MIN`)
+cannot be, because `express-rate-limit` reads `windowMs` once at construction — so changing
+it rebuilds the limiters instead. Rebuilding resets the counters, which is the honest
+behaviour: a count of 40 means nothing once the period it was counted over has changed.
+A save that leaves the window alone does not rebuild.
+
+Counters live in the process, so limits are **per API instance**. One project runs one API
+container, which is the deployment this is written for; if you run several replicas of the
+same project behind a load balancer, each enforces its own share of the limit. The same
+applies to the custom-rule store below, the log buffer and the shield telemetry — but not
+to scheduled work, which takes database leases. Every connection is tagged
+`motherbase-api:<instanceId>`, so the Shield report counts live instances and warns when
+there is more than one. See [known issues](/docs/contributing/known-issues/).
+
+Keying on `ip:<addr>` also depends on `TRUST_PROXY` being set correctly behind a reverse
+proxy — leave it unset behind Traefik and every client shares the proxy's IP in a single
+bucket, so one caller can exhaust the limit for everyone.
+
+**Custom rules** (`middlewares/custom-rate-limit.ts` + `lib/rate-limit-rules.ts`) — operator-defined, loaded from the `security.rateLimitRules` group, evaluated most-restrictive-wins, backed by an in-memory `FixedWindowStore`. Identity resolution (user id / role / API-key hash) runs **only** when an enabled rule actually keys on it, so purely IP-based rule sets add no per-request session lookup. Roles are read live from the database, never trusted from the token. Invalid saved rules are ignored and the previous set is kept, so a bad save can never switch limiting off.
+
+## Realtime path
+
+Socket.IO is mounted at path `/ws` on the same HTTP server, with its CORS origin list derived from `CORS_ORIGINS` (in production, an empty allowlist denies cross-origin sockets). An `io.use` handshake middleware validates an optional bearer token via Better Auth and, on success, attaches `socket.data.user = { id, role }`. Connections without a token are accepted as anonymous.
+
+## Error envelope
+
+Every error — thrown, forwarded, or a 404 — exits through `createApiErrorHandler`:
+
+```json
+{ "status": 0, "code": "NOT_FOUND", "message": "Page not found", "requestId": "…" }
+```
+
+`status` is literally `0` in the body — the HTTP status is the response's own. `requestId`
+is present whenever the correlation middleware set one.
+
+`normalizeApiError` decides the public message:
+
+- `ApplicationError` with `expose: true` → its own message and `code`.
+- A recognised database constraint failure → a fixed sentence keyed off the SQLSTATE. No schema name, value, or SQL text reaches the client.
+- Anything else → the internal message in development, a generic message in production.
+
+Errors are logged when they are unknown or `>= 500`; the log line also lands in the `LogBuffer` with `source: 'http'`.
+
+## Shutdown
+
+`installProcessSafety` (`lib/process-safety.ts`) keeps an unhandled rejection from killing the process and drains in flight requests on restart, closing in order: bucket-deletion scheduler, realtime outbox scheduler, Prisma, the RLS pool, and Socket.IO.

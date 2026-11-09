@@ -1,0 +1,88 @@
+---
+title: "Storage Pipeline"
+description: "Drivers, the reservation state machine behind presigned uploads, size and MIME enforcement, quotas and cleanup."
+order: 9
+---
+
+Source: `apps/server/services/storage`. Two drivers behind one interface, plus a reservation store that makes presigned uploads safe.
+
+## Drivers
+
+`IStorageDriver` (`storage.types.ts`) is implemented twice:
+
+| Driver | File | Notes |
+|---|---|---|
+| Local filesystem | `local.driver.ts` | `STORAGE_DRIVER=local`. `getSignedUploadUrl()` is not supported — presign is an S3-only flow |
+| S3-compatible | `s3.driver.ts` | MinIO, AWS S3, Cloudflare R2. Presigned GET/PUT via `@aws-sdk/s3-request-presigner` |
+
+Common surface: `put`, `delete`, `getObject`, `headObject`, `getSignedDownloadUrl`, `getSignedUploadUrl`.
+
+| TTL | Value |
+|---|---|
+| Download URL | 3600 s |
+| Upload URL | 900 s |
+
+## Direct upload
+
+```text
+POST /api/files  (multipart)
+  → uploadLimitsFor      storage.limits narrowed by the bucket's own, capped at MAX_UPLOAD_BYTES
+  → assertWithinLimits   size in 0 … maxBytes; mime allowed by every list that is set ("type/*" supported)
+  → exactSizeStream      streams while counting bytes
+  → driver.put
+```
+
+`exactSizeStream` (`sized-stream.ts`) is the enforcement point, not a check before the fact: it counts bytes **while streaming**, aborts the moment the declared size is exceeded, and rejects a stream that ends short:
+
+```text
+Upload exceeded its declared size of <n> bytes
+Upload ended at <m> bytes; expected <n>
+```
+
+It is an async generator wrapped with `Readable.from`, so normal Node backpressure is retained — a large upload never buffers in memory to be measured.
+
+`uploadLimitsFor(bucket)` (`storage.service.ts`) is the one answer every upload door asks for — multipart, presign, resumable (TUS) and the S3 protocol: the project-wide `storage.limits` (`maxUploadBytes`, `allowedMimeTypes`), clamped to `MAX_UPLOAD_BYTES` (`MAX_UPLOAD_MB`, default 25), then narrowed by the bucket's own `fileSizeLimit` and `allowedMimeTypes` (`upload-limits.ts`). `assertWithinLimits` then requires a safe integer size within that maximum (`400 size must be a safe integer between 0 and <n> bytes`) and a MIME type that every non-empty list allows (`400 file type "<mime>" is not allowed`). When the settings cannot be read, uploads keep working at the environment ceiling with no MIME restriction.
+
+## Presigned upload: the reservation state machine
+
+`upload-reservation.store.ts` exists because a presigned PUT bypasses the API entirely — the object appears in the bucket without the server seeing a byte. The database therefore tracks the intent:
+
+```text
+reserve ──▶ File(status: pending, uploadExpiresAt)
+   │
+   ├── finalize ──▶ claim (pending → finalizing) ──▶ headObject ──▶ ready
+   │                                   │
+   │                                   └── failure ──▶ revert
+   ├── activate ──▶ ready              (direct upload path)
+   ├── release  ──▶ row removed
+   └── expiry   ──▶ cleanupExpired removes row + object
+```
+
+Key properties, all deliberate:
+
+- **Claims commit before storage I/O.** The database lock is held only for the state transition, never across a network round trip to S3.
+- **Conditional transitions** mean `finalize` and the cleanup sweep can never act on the same reservation — one of them loses the claim.
+- `finalize` verifies the object with `headObject` and records the real size and MIME, so a client cannot lie about what it uploaded.
+- A failed finalize **reverts** the row instead of leaving it stuck in `finalizing`.
+
+The `FileStatus` enum (`pending`, `finalizing`, `deleting`, `ready`) is exactly this machine, and `@@index([status, uploadExpiresAt])` is what makes the sweep cheap.
+
+## Quotas
+
+`Bucket.quotaBytes` is enforced inside the reservation transaction: the bucket row is locked (`lockBucket`), writability is asserted (`assertBucketWritable`), and the reservation is rejected when it would exceed the quota. Locking the bucket is what prevents two concurrent uploads from each seeing room for the last megabyte.
+
+## Cleanup
+
+`StorageCleanupSchedulerService` runs `*/5 * * * *` and calls `cleanupExpired`, limit 100 per pass, removing both the row and the orphaned object. Without it, a presign that was never finalized would hold quota forever.
+
+## Deletion
+
+Deleting a bucket with objects creates a `BucketDeletionJob` rather than blocking the request — leased, batched, resumable, and queryable after the bucket is gone. See [background jobs](/docs/architecture/background-jobs/).
+
+## Exposure
+
+Only `S3_PUBLIC_BUCKET` is served statically by Express. Private objects are reachable exclusively through the authenticated endpoints (`/api/files/:id/raw`, `/api/files/:id/url`) or a scoped bucket token (`/api/storage/:slug/…`). Per-bucket CORS is applied by `bucketCors.middleware.ts`, independent of the project-wide CORS group.
+
+Storage events are delivered to per-bucket webhooks (`BucketWebhook`), and failures are logged with `source: 'storage'`.
+
+User-facing view: [Storage](/docs/platform/storage/) and the [Studio storage screen](/docs/studio/storage/).

@@ -1,0 +1,165 @@
+---
+title: "Edge Functions"
+description: "Server-side TypeScript stored in the database and executed in a private Deno runtime, one process per function."
+order: 7
+---
+
+Edge Functions are TypeScript or JavaScript stored in your project's database and executed on demand over HTTP. They run in a **private Deno runtime** that the API reaches over its own network: one OS process per function, a hard memory cap on that process, a timeout that kills it, and a `fetch` that refuses private addresses.
+
+Each project has its own edge runtime container, and inside it two functions never share a process.
+
+Two authoring styles are supported, and a Supabase function runs verbatim.
+
+## Module style (recommended)
+
+Write a normal ES module with a default handler. `import` works: Deno resolves `npm:`, `jsr:`, `node:` and URL specifiers, and a bare package name (`'nanoid'`) is rewritten to `npm:nanoid` for you, so code written against Node imports keeps working. Every import is resolved **at deploy time** — a function whose dependency does not resolve is refused then, not on its first call.
+
+```js
+import { customAlphabet } from 'nanoid'
+
+export default async (req) => {
+  const { name } = await req.json()
+  return new Response(JSON.stringify({ id: customAlphabet('abc', 8)(), hello: name }), {
+    status: 200,
+    headers: { 'content-type': 'application/json' },
+  })
+}
+```
+
+The handler receives a `Request` and returns a `Response`; its status, headers and body become the HTTP response verbatim, so a handler answering `400` reaches its caller as a `400`.
+
+`Deno.serve(handler)` works too, which is what makes a Supabase edge function run unchanged — it records the handler instead of binding a port. A module that both exports a default and calls `Deno.serve` is ambiguous, and the explicit `export default` wins.
+
+Returning something other than a `Response` is allowed: the value becomes the invocation's payload. It crosses a JSON wire, so a `Date` arrives as an ISO string, a `Map` as `{}`, and a `BigInt` is reported as an error rather than silently dropped.
+
+A multi-file function (an entrypoint plus `_shared/*`) is supported: at most 256 files and 20 MB, written into the worker's own temporary directory for the invocation.
+
+## Expression style (legacy)
+
+```js
+(async (context) => {
+  return { message: `Hello, ${context.name ?? 'world'}!` }
+})(context)
+```
+
+The resolved value becomes the response payload. Existing functions keep working unchanged: expression code is wrapped into a module with a default handler for you, and statement-shaped code (`const a = 1; a + 1`) is handled too.
+
+## Invoke
+
+```http
+POST /api/edge/:route
+Content-Type: application/json
+
+{ "name": "world" }
+```
+
+```ts
+const { data, error } = await client.functions.invoke('hello', { body: { name: 'world' } })
+```
+
+From Studio, **Edge Functions → Invoke** runs the same sandbox and records a log entry.
+
+## Who can call a function
+
+Invocation is private by default. `POST /api/edge/:route` is let through when the first of
+these holds, and answers `401` otherwise:
+
+| Caller | How |
+|---|---|
+| A signed-in user | The session the SDK already sends |
+| A trusted server (a backend job, a cron) | A **secret** project API key (`apikey: mb_secret_…`, or `Authorization: Bearer mb_secret_…`). A publishable key is refused |
+| A trusted server, the older way | `x-motherbase-edge-token` (or `x-edge-invoke-token`) matching `EDGE_INVOKE_TOKEN` |
+| Anyone, for **one** function | The function is marked **Public** |
+| Anyone, for **every** function | `EDGE_PUBLIC_INVOKE_ENABLED=true` on the project |
+
+Prefer the secret key for server-to-server calls: it is minted and revoked in **Project
+Settings → API keys**, with no variable to set. The two variables are read from the project's
+`.env.prod` on a Console project; update the project after changing them so the API is
+recreated.
+
+A webhook receiver (Stripe, GitHub, a payment provider) is the case for **Public**: the sender
+has no session and will not send your token. Open the function in **Project Studio → Edge
+Functions** and switch it to **Public** from its header; Studio asks for confirmation before
+opening it, never before closing it. A public function still receives whatever
+`Authorization` header the sender attaches (a cron secret, a webhook token): an unknown
+bearer is passed through to your code rather than refused.
+
+<Warning>
+Public means anyone with the URL. Verify the sender inside the function, typically by
+checking the provider's signature header against a secret from `env`, before acting on the
+payload. The Shield report lists every public function so the list gets reviewed.
+`EDGE_PUBLIC_INVOKE_ENABLED=true` opens all of them at once and is reported as a critical
+finding; prefer the per-function switch.
+</Warning>
+
+The CLI does not set the flag: `motherbase functions deploy` leaves an existing function's
+**Public** state as it was, and a new function starts private.
+
+## Available inside a function
+
+The Deno runtime provides the whole standard Web platform — `Request`, `Response`, `Headers`,
+`URL`, `crypto`, `TextEncoder`, `fetch`, timers, `structuredClone` — plus Node built-ins through
+`node:` imports. On top of that, the runtime installs:
+
+| Global | Notes |
+|---|---|
+| `console.log/warn/error` | Captured into the invocation's `stdout`, `[warn]` / `[error]` prefixed |
+| `context` | Frozen copy of the JSON payload |
+| `env` | Frozen edge secrets. On by default; set `EDGE_SECRETS_ENABLED=false` to withhold them |
+| `Deno.env.get(name)` | The same secrets, for Supabase-shaped code. `Deno.env.set`/`.delete` throw with the reason |
+| `Deno.serve(handler)` | Records the handler rather than binding a port |
+| `fetch` | Replaced by a guard that refuses private addresses and redirects. See below |
+| `sendMail` | Posts to this project's SMTP through the API. See [Sending email](#sending-email) |
+
+The process itself is granted network access and a temporary directory of its own, and nothing
+else: no access to the host environment, to the API's own filesystem, or to the database.
+
+### What `fetch` refuses
+
+A call is rejected — as a catchable error naming the reason — when the URL is not absolute, uses
+a scheme other than `http:`/`https:`, targets `localhost`, resolves to a private or reserved
+address, or answers with a redirect. Redirects are refused even for an allowlisted origin,
+because an open redirect on your own API would otherwise launder a request to any destination.
+
+An operator can exempt specific origins from the address check with
+`EDGE_ALLOWED_INTERNAL_ORIGINS` (exact `scheme://host:port` values, comma-separated) — which is
+how a function is allowed to call the project's own API inside Docker.
+
+## Sending email
+
+```js
+await sendMail({ to: 'sales@example.com', subject: 'New lead', text: 'body' })
+await sendMail({ to: 'sales@example.com', subject: 'New lead', html: '<b>body</b>' })
+```
+
+A function has no SMTP of its own, so the API sends the message. It is the same `TransporterService` and the same `email.smtp` settings the auth emails (magic links, OTP, password resets) already use: configure SMTP once under Settings and functions inherit it. There is no API key to store and nothing to sign up for. See [notifications](/docs/platform/notifications/).
+
+`sendMail` throws — a normal error you can catch — when `to` is missing or is not an address, when `subject` is missing, when neither `text` nor `html` is given, or when SMTP is unconfigured and the server refuses the message. The validation runs on the API, not inside the function: operator code is the untrusted side of that boundary. The credential it posts with is minted for that one invocation, so it is already dead when the call returns.
+
+There is no queue and no retry. If losing a notification matters, write the row first and send afterwards, so a failed send still leaves the data behind. A third-party HTTP mail API (Resend, Postmark, SendGrid) still works through `fetch` if you would rather not run SMTP — `sendMail` is the zero-configuration path, not the only one.
+
+## Limits
+
+| Limit | Default | Ceiling |
+|---|---|---|
+| Memory | 128 MB | `EDGE_MAX_MEMORY_MB`, default 512 |
+| Wall clock | 5000 ms | `EDGE_MAX_TIMEOUT_MS`, default 60000 |
+| Source files (multi-file function) | — | 256 files, 20 MB |
+
+A function's own `memoryLimitMb` / `timeoutMs` are a **request**, not an authority: they are clamped into `[8 MB, ceiling]` and `[100 ms, ceiling]`, so one badly configured function cannot decide how much of the host it gets.
+
+The memory cap is enforced on the whole process, not just the JavaScript heap, so a function filling `ArrayBuffer`s is stopped by it too. Going over it ends the invocation with an error naming the limit.
+
+## Scheduling
+
+Set a cron expression on a function and the edge-function scheduler invokes it on a timer, through the same runtime as an HTTP call. A scheduled run has no request of its own, so the handler is still handed a `Request` (`POST http://edge.local/`) and reads its payload from `context`. See [background jobs](/docs/architecture/background-jobs/).
+
+## Secrets
+
+Secrets are stored per project and exposed as `env.NAME`. They are what [Integrations](/docs/platform/integrations/) writes when you connect a provider. Managing them requires `secrets.manage` through the Console proxy.
+
+## Logs
+
+Each invocation appends an `EdgeFunctionLog` row: `status`, `durationMs`, `stdout`, `errorMessage`. Failures also reach the shared log stream with `source: 'edge'`.
+
+Runtime internals — the worker pool, the memory watchdog, the compatibility bootstrap and the egress guard: [edge runtime](/docs/architecture/edge-runtime/).

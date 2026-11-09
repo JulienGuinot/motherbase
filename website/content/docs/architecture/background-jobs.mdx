@@ -1,0 +1,123 @@
+---
+title: "Background Jobs"
+description: "Every in-process worker: cadence, leasing, retries, retention, and how they are made testable and restart-safe."
+order: 8
+---
+
+A project API runs nine background workers in-process, plus the metrics sampler. There is no queue service, no external scheduler, and no second daemon — deliberately, because a single-VPS deployment should not need one.
+
+## The workers
+
+| Worker | Service | Cadence | Trigger |
+|---|---|---|---|
+| Realtime outbox | `RealtimeOutboxSchedulerService` | 2 s poll **+** Postgres `LISTEN/NOTIFY` | New outbox row |
+| Bucket deletion | `BucketDeletionSchedulerService` | 2 s poll, 2 jobs in parallel | Queued deletion job |
+| Storage cleanup | `StorageCleanupSchedulerService` | cron `*/5 * * * *` | Expired upload reservations |
+| Backups | `BackupSchedulerService` | `backup.schedule.cron`, default `0 3 * * *` | Config |
+| Edge function schedules | `EdgeFunctionSchedulerService` | per-function cron | `EdgeFunction.schedule` |
+| Data retention | `DataRetentionSchedulerService` | `data.retention.cron` | Config |
+| Log persistence | `LogPersistenceService` | 1 s flush, or at 500 queued lines | Each log-buffer line, copied to `platform.request_logs` when log history is on |
+| Log drains | `LogDrainService` | 2 s flush, batches of 500, per drain | Each log-buffer line, copied to every enabled drain |
+| Application cron | `initCron` (`helpers/cron.helper.ts`) | per job | App-defined |
+
+All of them are skipped when `NODE_ENV=test`, so a unit run never spawns real timers. The realtime outbox worker
+starts last, once the database connection is up, just before the server listens.
+
+The two log workers subscribe to the same in-memory log buffer the Logs screen reads. Each keeps its own queue,
+capped at 10,000 lines: past that, lines are dropped and counted rather than allowed to grow the heap. A drain also has
+its own backoff, so one dead destination never holds up another, and a batch that keeps failing is dropped after its
+maximum attempts; that count is the drain's delivery status in Studio.
+
+The metrics sampler (`services/admin/metrics.service.ts`) is not a scheduler: it starts when the module loads and
+samples every 10 s into the in-memory series behind Observability (see [Logs & observability](/docs/studio/logs/#metric-series)).
+
+## Pluggable schedulers
+
+`apps/server/lib/schedulers.ts` defines two tiny interfaces so every worker is deterministic in tests:
+
+```ts
+interface Scheduler         { schedule(cronExpr: string, fn: () => void): ScheduledTask }
+interface IntervalScheduler { every(intervalMs: number, task: () => void): ScheduledTask }
+```
+
+Production uses `nodeCronScheduler` and `nodeIntervalScheduler`; tests inject a fake that captures the callback and fires it without real time. The interval scheduler calls `timer.unref()`, so a poller never keeps the event loop alive on its own.
+
+## The realtime outbox worker
+
+The most involved one, and the pattern worth understanding (`services/realtime/realtime-outbox.service.ts`).
+
+| Constant | Value |
+|---|---|
+| Poll interval | 2 s |
+| Worker concurrency | 1 |
+| Max events per run | 100 |
+| Lease | 60 s, heartbeated every 20 s |
+| Max attempts | 8 |
+| Retention sweep | hourly |
+| Completed retention | 7 days |
+| Failed retention | 30 days |
+
+Claiming is a single statement:
+
+```sql
+… WHERE status = 'pending' OR (status = 'processing' AND "leaseExpiresAt" < NOW())
+ORDER BY "createdAt", "id"
+FOR UPDATE SKIP LOCKED LIMIT 1
+```
+
+`FOR UPDATE SKIP LOCKED` makes overlapping claims safe; the lease plus heartbeat means a worker that dies mid-event releases it after 60 s instead of stranding it.
+
+Two wake-up paths coexist. A `NOTIFY` on the `realtime_outbox` channel wakes the worker immediately; the 2 s poll is the fallback when `LISTEN` is unavailable. A trigger that lands mid-drain is **coalesced into a follow-up pass** rather than dropped — the worst case is one redundant empty drain.
+
+<Note>
+Delete retries are scoped to the socket ids captured **before** the delete. A reconnect or a process restart produces new ids, so a replayed delete is never sent to a session whose pre-delete visibility cannot be proven. The audience is stored as `{ mode: 'disabled' | 'all' | 'restricted' }` on the outbox row.
+</Note>
+
+## Data retention
+
+`services/admin/data-retention.service.ts`, config group `data.retention`:
+
+| Field | Purges |
+|---|---|
+| `webhookDeliveryDays` | `WebhookDelivery` rows |
+| `edgeFunctionLogDays` | `EdgeFunctionLog` rows |
+| `batchSize`, `maxBatchesPerRun` | Work cap per run |
+| `cron`, `enabled` | Cadence |
+
+Realtime outbox retention is applied too, separately for completed and failed rows (`realtime-outbox-retention.ts`, each between 0 and 3650 days; an invalid value is rejected rather than coerced).
+
+Every target deletes in **small ordered batches** and the whole run is capped, so maintenance never opens a long-lived transaction on a live database. A failing target does not stop the others: the run summary reports per-target `{ deleted, batches, truncated, error? }`.
+
+## Bucket deletion
+
+A `BucketDeletionJob` row is claimed with a lease, processes objects in batches, and records `deletedObjects` against `totalObjects` with `attempts` and `nextAttemptAt` for backoff. Two jobs run in parallel. The job survives a restart, and the row deliberately has **no** foreign key to the bucket so it stays queryable after the bucket is gone.
+
+## Storage cleanup
+
+Every five minutes, expired upload reservations are released (`StorageService.cleanupExpiredReservations`) so a presign that was never finalized does not hold a slot forever. See [storage pipeline](/docs/architecture/storage-pipeline/).
+
+## Edge function schedules
+
+`EdgeFunctionSchedulerService` reads every function with a `schedule` and registers one cron task per function, invoking it through the same sandbox as an HTTP call. `reschedule()` rebuilds the set after a function is created, edited or deleted — no restart.
+
+## Backups
+
+Node-cron rather than `pg_cron`, because `pg_dump` is a shell command, not SQL. Overlapping runs are skipped and the schedule is rebuilt live on config change. See [backups](/docs/self-hosting/backups-and-restore/).
+
+## Observing all of it
+
+Runs are recorded in the job ledger (`JobLedgerService`), which raises `consecutive_failures`, `missed_window`, `dead_letter_depth` and `backup_older_than_rpo` alerts. Background work also writes to the shared log stream through `logActivity` with sources `job`, `webhook`, `edge`, `storage` and `realtime` — without which a job that never ran would be indistinguishable from a job that ran fine. See [Observability](/docs/platform/observability/).
+Every scheduler also **declares itself** to `JobInventoryService`: what it does in one sentence,
+the file that owns it, the console route that owns its configuration, whether an operator may
+force a run, and whether its cadence is data or a constant in code. The console builds its list
+from those declarations joined to the ledger, rather than from the ledger alone — which could
+only ever show a job that had already run at least once.
+
+`POST /admin/jobs/:id/run` routes to the scheduler that declared the id and calls the same
+`runOnce()` the timer calls, recorded with `trigger: 'manual'` so a forced run is never mistaken
+for evidence that the schedule is alive. `platform.job_runs` keeps each run's `output` and, for a
+scheduled edge function, its `stdout` and returned value — including for a failed run.
+
+## Shutdown
+
+`installProcessSafety` stops the bucket-deletion and realtime-outbox schedulers, then disconnects Prisma, ends the RLS pool and closes Socket.IO — so a deploy drains in-flight work instead of severing it.

@@ -1,0 +1,110 @@
+---
+title: "Settings System"
+description: "How operator-editable settings groups are defined, validated, encrypted, cached and applied live without a restart."
+order: 3
+---
+
+Almost everything an operator can change in Studio is a **settings group**: a named bundle of fields with a Zod schema and an environment fallback. Saving one takes effect on the next request — no redeploy, no restart.
+
+## The registry
+
+One entry per group, assembled in `apps/server/config/settings/index.ts` from three domain files:
+
+| File | Groups |
+|---|---|
+| `config/settings/auth.groups.ts` | `auth.*` (methods, signup, sessions, social, custom OAuth, 2FA, passkey, phone OTP, hooks, API keys, SSO, organization, tokens) |
+| `config/settings/messaging.groups.ts` | `email.smtp`, `email.templates`, `phone.sms`, `push.fcm`, `push.apns` |
+| `config/settings/platform.groups.ts` | `server.cors`, `security.rateLimit`, `security.rateLimitRules`, `storage.*`, `backup.schedule`, `data.retention`, `realtime.*`, `api.rest`, `api.keys`, `ai.assistant`, `git.github` |
+
+Lookups exposed by the registry:
+
+```ts
+getGroup(key)          // GroupDef | undefined
+groupHasSecrets(key)   // any field with secret / secretKeys?
+listGroups()           // [{ key, label }]
+```
+
+## Shape of a group
+
+From `config/settings/types.ts`:
+
+```ts
+interface GroupDef {
+  key: string
+  label: string
+  description?: string
+  fields: FieldDef[]
+  schema: z.ZodType<Record<string, unknown>>
+  envFallback: () => Record<string, unknown>
+}
+```
+
+A field declares how the console renders it *and* how the server treats it:
+
+| Property | Meaning |
+|---|---|
+| `type` | `text` \| `number` \| `password` \| `bool` \| `json` \| `select` |
+| `secret` | Encrypted at rest, masked in API responses |
+| `secretKeys` | For `json` values: property names inside each entry to encrypt and mask |
+| `required`, `default`, `placeholder`, `help` | Validation and console affordances |
+| `options` | Choices for `select` |
+| `multiline` | Render `text` as a textarea |
+
+## Resolution order
+
+`SettingsService.get(key)` (`apps/server/services/settings.service.ts`) resolves a group like this:
+
+1. In-process cache hit → return it.
+2. Read the `AppSetting` row keyed by the group name. If present, that JSON value wins and every `secret` field is decrypted.
+3. If absent, call `envFallback()` — the group resolves entirely from environment variables.
+4. Fill in any missing field from its `default`.
+5. Cache and return.
+
+`SettingsService.source(key)` reports which of the two won: `'db'` or `'env'`. A saved group is a **database override of the environment**; `reset(key)` deletes the row and the group falls back to env again.
+
+<Note>
+The cache is per group and invalidated on `set()` / `reset()`. Because settings are read through the service on each request path that needs them (CORS, rate limits, auth assembly), a save is visible immediately.
+</Note>
+
+## Secrets
+
+- Encryption uses `CONFIG_ENCRYPTION_KEY` (base64, 32 bytes) through `helpers/crypto.helper.ts`.
+- If the key is not configured, non-secret settings still work; attempting to **save** a secret fails with `Set CONFIG_ENCRYPTION_KEY to store secret settings.` (HTTP 400) rather than failing at boot.
+- API responses never return secret values. They return the sentinel `__SECRET_SET__` (`SECRET_SENTINEL`) when a value exists, or `''` when it does not.
+- Saving the sentinel back means "keep what is stored". For `json` fields with `secretKeys`, entries are paired to the previously stored entry by `providerId` (arrays) or object key, so re-saving a provider list does not wipe the credentials you did not retype.
+
+## Validation and attribution
+
+`set()` merges the incoming payload with the current values (restoring sentinels), then runs `group.schema.parse`. A `ZodError` becomes:
+
+```text
+400  Invalid <Group label> settings — providers.0.clientId: Required
+```
+
+The row is upserted into `AppSetting` with `updatedById`. That column is a foreign key to `User`, and the Console proxy authenticates as a synthetic platform admin with no `User` row — so the id is resolved first and stored as `null` when it does not map to a real user.
+
+## Who consumes a group
+
+Consumption is deliberately spread across the code that needs it, not centralized:
+
+| Group | Consumer |
+|---|---|
+| `server.cors` | CORS delegate in `app.ts`, per request |
+| `security.rateLimit` | `applyRateLimitLimits()` at boot and on save |
+| `security.rateLimitRules` | `applyRateLimitRules()`, custom rules engine |
+| `auth.*` | `auth/auth-manager.ts` rebuilds the Better Auth instance |
+| `email.smtp`, `email.templates` | `services/transporter.service.ts`, `auth/email-templates.ts` |
+| `phone.sms` | `services/sms.service.ts` |
+| `storage.provider`, `storage.limits` | `services/storage/*` |
+| `backup.schedule` | `BackupSchedulerService` |
+| `data.retention` | `DataRetentionSchedulerService` |
+| `realtime.*` | `services/realtime/*` |
+| `ai.assistant` | `services/admin/ai-config.service.ts` |
+| `api.rest`, `api.keys` | `services/rest-api/*` and `middlewares/api-key.middleware.ts` |
+| `git.github` | `services/admin/git/*` |
+
+The full field-by-field table lives in the [settings reference](/docs/reference/settings/).
+
+## Environment, not settings
+
+A few values stay environment-only because they are needed **before** the database is reachable: `DATABASE_URL`, `JWT_SECRET`, `CONFIG_ENCRYPTION_KEY`, `PLATFORM_SERVICE_TOKEN`, `TRUST_PROXY`, `APP_NAME`. Mode-derived defaults shared by the project API and the Console (compose file, projects directory, scheme, domain suffix) live in `apps/server/config/mode-defaults.ts` — the Console cannot import `config/env.ts`, which validates the project schema and exits on a missing `DATABASE_URL` it has no reason to hold.

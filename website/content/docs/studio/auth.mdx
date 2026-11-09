@@ -1,0 +1,125 @@
+---
+title: "Authentication Screens"
+description: "Users, providers, MFA, passkeys, organizations, sessions, hooks, policies and auth settings in Studio."
+order: 5
+---
+
+Route group: `/p/:id/auth/*`, index is **Users**. Source: `apps/studio/src/features/auth` (plus `database` for policies and the Role Access matrix).
+
+| Screen | Path | What it edits |
+|---|---|---|
+| Users | `auth` (index) | Accounts, via the admin users API |
+| Providers | `auth/providers` | `auth.methods`, `auth.social`, `auth.oauth.custom`, `auth.phoneOtp` |
+| MFA | `auth/mfa` | `auth.twoFactor` |
+| Passkeys | `auth/passkeys` | `auth.passkey` |
+| Organizations | `auth/organizations` | `auth.organization`, with the separate project-wide `auth.sso` switch shown on the same page |
+| Sessions | `auth/sessions` | Live sessions per user |
+| Hooks | `auth/hooks` | `auth.hooks.signUp`, `.accessToken`, `.send`, `.events` |
+| Rate limits | `auth/rate-limits` | `auth.rateLimits` (per-kind limits; the global auth limit is `security.rateLimit`, under Project Settings → Security) |
+| URL configuration | `auth/url-configuration` | `auth.urls` |
+| Attack protection | `auth/protection` | `auth.attackProtection`: CAPTCHA on auth endpoints and on any other route, and breached-password protection |
+| Third-party auth | `auth/third-party` | `auth.thirdParty` |
+| Audit | `auth/audit` | `auth.audit_log_entries`, newest first: `GET /admin/auth/audit-logs?action=&log_type=&actor=&from=&to=&page=&per_page=` (at most 500 per page) |
+| Settings | `auth/settings` | `auth.signup`, `auth.tokens`, `auth.sessions`, `auth.apiKey` (user API keys), and the delivery transports `email.smtp`, `email.templates`, `phone.sms` |
+| Policies | `auth/policies` | Postgres RLS policies |
+| Role Access | `auth/access` | Nothing — read-only matrix of what `anon` and `authenticated` can do per table |
+
+Every settings screen reads and writes a group through the shared helpers in `shared/lib/settings.ts`:
+
+```text
+GET    /admin/settings                → every group, with where its value comes from (`source`)
+GET    /admin/settings/:group
+PUT    /admin/settings/:group
+DELETE /admin/settings/:group      → revert to the environment fallback
+POST   /admin/settings/email/test  { to }
+POST   /admin/settings/sms/test    { to }
+```
+
+Saving rebuilds the project's Better Auth instance in place — no redeploy. Field-by-field defaults are in the [settings reference](/docs/reference/settings/); the feature semantics are in [Auth](/docs/platform/auth/).
+
+## Users
+
+`features/auth/api/users.api.ts`:
+
+| Action | Endpoint |
+|---|---|
+| List | `GET /admin/users` |
+| Detail | `GET /admin/users/:id` |
+| Create | `POST /admin/users` |
+| Promote / demote | `POST /admin/users/:id/promote`, `POST /admin/users/:id/demote` |
+| End every session of a user | `POST /admin/users/:id/revoke-sessions` |
+| Reset password | `POST /admin/users/:id/reset-password` `{ password }` |
+| Delete | `DELETE /admin/users/:id` |
+| Update profile fields | `PATCH /admin/users/:id` |
+| Mark the email verified or not | `POST /admin/users/:id/email-verification` `{ emailVerified }` |
+| Impersonate | `POST /admin/users/:id/impersonate`, then `POST /admin/users/:id/impersonate/stop` `{ token }` |
+| Revoke one session | `DELETE /admin/users/:id/sessions/:sessionId` |
+| Every active session (the **Sessions** screen) | `GET /admin/users/sessions?page=&per_page=` → `{ sessions, page, perPage, total }`, newest first, 50 per page by default |
+
+`UserDrawer` shows a user with their sessions and identities; `CreateUserModal` creates one.
+
+**Impersonate** opens a 15-minute session as that user and returns its bearer token. It mints a new session — no
+credential of the user is read, returned or logged — and it is not Better Auth's admin plugin, which needs the caller's
+own project session and answers through cookies. Through the Console proxy it requires `secrets.manage` and writes an
+audit entry; the token itself is never audited.
+
+The **Sessions** screen pages through every active session in the project with the same `page` / `per_page` shape and
+caps as the audit log next to it (at most 500 per page).
+
+<Note>
+Through the Console proxy, `/admin/users` and the credential-adjacent actions require the `secrets.manage` capability, not just `content.write` — see the [proxy capability map](/docs/console/proxy/).
+</Note>
+
+## Operator sign-in
+
+`features/auth/api/session.api.ts` handles Studio's own login:
+
+| Call | Purpose |
+|---|---|
+| `POST /platform/login` | Console login (returns `twoFactor` and `mustChangePassword`) |
+| `POST /auth/login` | Project-level login when Studio is served by a project API |
+| `GET /admin/session` | Current admin session |
+| `POST /auth/two-factor/verify-totp` | Second factor, with `trustDevice` |
+
+`PasswordChangeRequired` + `PasswordChangeForm` implement the forced rotation flow described in [Console users](/docs/console/users-and-orgs/).
+
+## Operator two-factor
+
+`features/auth/api/twoFactor.api.ts` enrolls the **operator's own** 2FA:
+
+```text
+GET  /auth/get-session
+POST /auth/two-factor/enable   { password }   → enrolment payload
+POST /auth/two-factor/verify-totp { code }
+POST /auth/two-factor/disable  { password }
+```
+
+Enabling and disabling both require the current password.
+
+## Providers screen composition
+
+`ProviderMethodsPanel` (email/password, magic link and email OTP), `ProviderSocialPanel` (the built-in social list, with `AuthProviderLogo`), `ProviderCustomPanel` (generic OIDC/OAuth2) and `ProviderPhonePanel` (SMS OTP: the `auth.phoneOtp` behaviour only). The Twilio credentials are the `phone.sms` transport, shared with SMS second factors, so they live under **Authentication → Settings → Phone / SMS** next to SMTP, with the **Send test SMS** action. Individual credentials render through `ProviderField`, which shows the `__SECRET_SET__` sentinel rather than a stored secret — retyping is only needed when you actually rotate a key.
+
+## Attack protection
+
+CAPTCHA (hCaptcha or Cloudflare Turnstile) is one switch, one provider and one secret, applied to two lists:
+
+| Field | Guards | Enforced by |
+|---|---|---|
+| **Guarded auth endpoints** (`captchaAuthEndpoints`) | Any of sign-up, password sign-in, anonymous sign-in, magic-link, email-code and SMS-code requests, and both password recoveries. All of them by default, as in Supabase. | Better Auth's captcha plugin |
+| **Other guarded routes** (`captchaRoutes`) | Any other route, as method + path glob: a table's REST API (`/rest/v1/<table>`), an edge function (`/api/edge/<name>`), storage. `*` matches any run of characters; no method means every method. | `middlewares/captcha-guard.ts` |
+
+The editor offers the tables of `public` ready-made ("guard a table's inserts" adds `POST /rest/v1/<table>`).
+Both lists read the token from the same `x-captcha-response` header and answer the same way: `400 Missing CAPTCHA
+response` without one, `403 Captcha verification failed` with a bad one, `503` when the provider cannot be reached.
+A preflight (`OPTIONS`) is never guarded. A server-side caller of a guarded route must send a token too.
+
+```ts
+await client.auth.signUp.email({ email, password, name, fetchOptions: { headers: { 'x-captcha-response': captchaToken } } });
+await client.from('orders').insert(order).setHeader('x-captcha-response', captchaToken);
+await client.functions.invoke('chat', { body, headers: { 'x-captcha-response': captchaToken } });
+```
+
+Anonymous/guest sign-in is available when `auth.methods.anonymous` is enabled. It creates
+a real user with `is_anonymous = true`; an unauthenticated request remains the separate
+`anon` data-plane role and does not create a user.

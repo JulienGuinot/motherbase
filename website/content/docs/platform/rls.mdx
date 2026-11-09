@@ -1,0 +1,370 @@
+---
+title: "Row Level Security"
+description: "Native PostgreSQL RLS in Motherbase: roles, JWT claims, SQL policies, REST, and Realtime."
+order: 4
+---
+
+Motherbase uses native PostgreSQL Row Level Security. Policies are real `CREATE POLICY` rules stored in `pg_policies`: there is no application-level policy layer to learn or to get out of sync with the database.
+
+## Runtime model
+
+Every REST data request runs through the RLS data plane:
+
+1. Motherbase maps the request to `anon`, `authenticated` or `service_role`.
+2. It opens a dedicated PostgreSQL transaction.
+3. It runs `SET LOCAL ROLE anon|authenticated|service_role`.
+4. It injects JWT claims with `set_config('request.jwt.claims', ..., true)`.
+5. PostgreSQL evaluates the table policies.
+
+The role comes from what the caller presented: nothing or a publishable key is
+`anon`, a user access token is `authenticated`, and a **secret** project API key is
+`service_role`, which holds `BYPASSRLS` and is therefore not subject to the
+policies on this page at all. That is the role trusted server code runs as. See
+[API Keys](/docs/platform/api-keys/).
+
+Prisma remains the control-plane tool for auth, settings, Studio, Console, and internal tables. User data routes under `/rest/v1/:model` use the RLS pool so the database enforces access.
+
+Storage can be brought under the same model: turn on `storage.policies` and
+policies on `storage.files` decide every object read and write instead of the
+built-in owner rule. See [Storage](/docs/platform/storage/#authorization).
+
+## Claims and helpers
+
+Motherbase provides Supabase-style helpers:
+
+| Helper | Returns |
+|--------|---------|
+| `auth.jwt()` | JSON claims from `request.jwt.claims` |
+| `auth.uid()` | current user id as `text`, from the JWT `sub` claim |
+| `auth.role()` | `anon`, `authenticated` or `service_role` |
+| `auth.email()` | the user's email from the JWT `email` claim, or `NULL` when it is absent |
+
+All four are `STABLE` and executable by `anon`, `authenticated` and `service_role`.
+
+Authenticated requests carry:
+
+```json
+{
+  "sub": "<user-id>",
+  "role": "authenticated",
+  "email": "user@example.com",
+  "user_role": "USER"
+}
+```
+
+`user_role` is `USER` or `ADMIN` and comes from the Motherbase user record. An
+anonymous request carries only `{ "role": "anon" }` — no `sub`, so `auth.uid()` is
+null. A `service_role` request carries the same four claims with `role` set to
+`service_role`, keeping `sub` when a user token rode along with the secret key.
+
+The roles, the `auth` schema and these helpers are installed by a foundation migration
+that also grants the data-plane roles broad access to public tables, sets default grants
+so future public tables inherit them, enables RLS on existing public tables, and
+explicitly **revokes** access to the sensitive control-plane tables — so auth, settings
+and console data are never reachable over REST no matter what policies you write.
+
+<Note>
+Use `text` owner columns such as `user_id text` unless you explicitly cast `auth.uid()` to another type.
+</Note>
+
+## Create policies from SQL Editor
+
+Open **Project Studio → SQL Editor** and run normal PostgreSQL DDL.
+
+```sql
+CREATE TABLE todo (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  title text NOT NULL,
+  done boolean NOT NULL DEFAULT false,
+  user_id text NOT NULL DEFAULT auth.uid(),
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+```
+
+Tables created from the SQL editor or Table editor have RLS enabled automatically. Running it again is safe:
+
+```sql
+ALTER TABLE todo ENABLE ROW LEVEL SECURITY;
+```
+
+Then create an owner-scoped policy so each user sees, edits, and deletes only their own rows. One `FOR ALL` policy covers every command:
+
+```sql
+CREATE POLICY "todo owner access"
+ON todo
+FOR ALL
+TO authenticated
+USING (auth.uid() = user_id)
+WITH CHECK (auth.uid() = user_id);
+```
+
+There is deliberately no `anon` policy: a signed-out request carries no `auth.uid()`, so it matches no policy and RLS blocks it. For a public read board, add `TO anon USING (true)` for `SELECT` instead — but remember anonymous rows are shared by everyone, since `anon` requests carry no `auth.uid()` to scope them by.
+
+For admin-only access, decide on a claim instead of an owner column:
+
+```sql
+CREATE POLICY "admin only"
+ON audit_log
+FOR ALL
+TO authenticated
+USING (auth.jwt() ->> 'user_role' = 'ADMIN')
+WITH CHECK (auth.jwt() ->> 'user_role' = 'ADMIN');
+```
+
+Split the policy per command when you need different rules per verb:
+
+```sql
+CREATE POLICY "todo owner read"
+ON todo
+FOR SELECT
+TO authenticated
+USING (auth.uid() = user_id);
+
+CREATE POLICY "todo owner insert"
+ON todo
+FOR INSERT
+TO authenticated
+WITH CHECK (auth.uid() = user_id);
+
+CREATE POLICY "todo owner update"
+ON todo
+FOR UPDATE
+TO authenticated
+USING (auth.uid() = user_id)
+WITH CHECK (auth.uid() = user_id);
+
+CREATE POLICY "todo owner delete"
+ON todo
+FOR DELETE
+TO authenticated
+USING (auth.uid() = user_id);
+```
+
+<Warning>
+RLS enabled with no policies means no rows are visible to `anon` or `authenticated`. RLS disabled makes `/rest/v1` refuse the table with a `403`, but anything else that runs SQL as the caller (a function called through `rpc()`) is then decided by the table grants alone, and those are broad. Treat a table with RLS off as open.
+</Warning>
+
+## Create policies from Policies UI
+
+Open **Project Studio → Authentication → Policies** to inspect tables, toggle RLS, and add/edit/drop policies. The UI writes real PostgreSQL policies and shows the SQL expressions behind them.
+
+Useful templates:
+
+| Template | SQL idea |
+|----------|----------|
+| Owner only | `auth.uid() = user_id` |
+| Authenticated only | `auth.role() = 'authenticated'` |
+| Public read | `true` for `anon` SELECT |
+| Admin only | `auth.jwt() ->> 'user_role' = 'ADMIN'` |
+
+You can always bypass the templates and paste raw `CREATE POLICY` SQL in the SQL editor.
+
+## Policy presets
+
+A preset installs a complete, coherent policy set on a table in one step, along with the
+matching table grants — the pair that has to be right together and is easy to get half
+right by hand. Apply one from **Project Studio → Authentication → Policies**, from
+`POST /api/admin/rls/tables/:table/preset`, or from the CLI:
+
+```bash
+motherbase rls preset todo owner_only --owner-column user_id
+motherbase rls preset todo owner_only --owner-column user_id --replace   # drop existing first
+```
+
+| Preset | `anon` | `authenticated` | Policy |
+|---|---|---|---|
+| `starter` | `SELECT` | full CRUD | Anyone reads, any signed-in user writes **any** row. For prototypes |
+| `public_crud` | full CRUD | full CRUD | Everything open. Use for genuinely public data only |
+| `authenticated_crud` | — | full CRUD | Signed in is the whole check |
+| `admin_only` | — | full CRUD | `auth.jwt() ->> 'user_role' = 'ADMIN'` |
+| `blocked` | — | — | No policies and no grants: unreachable over REST, reachable from the SQL editor |
+| `owner_only` | — | full CRUD | `<owner> = auth.uid()` on both `USING` and `WITH CHECK` |
+| `org_scoped` | — | full CRUD | `<org> = auth.jwt() ->> '<claim>'` — multi-tenant |
+| `public_read_owner_write` | `SELECT` | full CRUD | Everyone reads; only the owner inserts, updates and deletes |
+| `soft_delete` | `SELECT` | full CRUD | Rows with `<deleted>` set are invisible; `DELETE` is rewritten to a timestamp write |
+
+### Parameters
+
+Four presets are parameterised, because the column carrying ownership is a per-schema
+decision and a preset that hard-codes one name is a preset most tables cannot use:
+
+| Flag | Default | Used by |
+|---|---|---|
+| `--owner-column` | `owner_id` | `owner_only`, `public_read_owner_write` |
+| `--org-column` | `org_id` | `org_scoped` |
+| `--org-claim` | `org_id` | `org_scoped` |
+| `--deleted-column` | `deleted_at` | `soft_delete` |
+
+Column names are validated as plain identifiers before any DDL is built, so a name that is
+not an identifier is refused rather than quoted into the policy body.
+
+A table created from the **SQL Editor** gets RLS on and no policy: closed until you write
+one. A table created from the **Table editor** gets the preset chosen in the modal, and
+`admin_only` is preselected, so it is closed to ordinary users too until you add policies or
+pick another preset.
+
+<Note>
+`owner_only` sets **`WITH CHECK` as well as `USING`** on purpose. With `USING` alone a
+caller could update a row they own into one owned by somebody else — the read check passes
+on the old row and nothing examines the new one. Any owner policy you write by hand needs
+both clauses for the same reason.
+</Note>
+
+<Note>
+`soft_delete` also installs a `BEFORE DELETE` trigger, and it has to. Under these policies a
+caller cannot mark a row deleted with a plain `UPDATE`: when an `UPDATE` needs read access
+— any `WHERE` clause does — Postgres applies the `SELECT` policy to the **new** row as well
+as the old one, so setting the timestamp makes the row vanish mid-statement and the write
+fails with `new row violates row-level security policy`. The trigger turns an ordinary
+`DELETE` into the timestamp write instead. The `DELETE` policy still decides which rows are
+reachable, so the trigger can never touch a row the caller could not have deleted anyway.
+</Note>
+
+## Verifying a policy
+
+### Who can do what
+
+**Project Studio → Authentication → Role Access** shows, for every table, what a
+signed-out visitor (`anon`) and a signed-in user (`authenticated`) can read, insert,
+update and delete through the API. Each cell is one of **every row**, **only rows a
+policy allows**, or **not allowed**; click a table to see which grant or policy decides
+each one. There is nothing to type: it is read from the table grants and the policies.
+
+It follows PostgreSQL's rules rather than a reading of the policy list:
+
+- No `GRANT` for the command means not allowed, whatever the policies say.
+- With RLS off, the grant alone decides: every row.
+- A policy with no `USING` / `WITH CHECK` lets nothing through; it does not mean `true`.
+  `AS RESTRICTIVE` policies only ever narrow what the permissive ones allow.
+- `UPDATE` and `DELETE` only reach rows the role can also `SELECT`, because PostgreSQL
+  applies the `SELECT` policies as soon as the statement has a `WHERE` clause.
+
+### Running a query as a caller
+
+Reading a policy expression tells you what you meant, not what PostgreSQL does. The
+simulator closes that gap: it really executes your query, as a chosen role, with chosen
+claims in `request.jwt.claims`, so `auth.uid()` and `auth.jwt()` resolve exactly as they
+will in production. You get the row set, not a prediction.
+
+Use the CLI (or the `motherbase mcp` tools):
+
+```bash
+motherbase rls simulate --sql "select * from todo" --as anon
+motherbase rls simulate --sql "select * from todo" --as usr_0193abc
+motherbase rls simulate --sql "select * from todo" \
+  --as authenticated --claims '{"sub":"usr_0193abc","org_id":"acme"}'
+```
+
+Three properties make that safe to expose, and each is enforced rather than assumed:
+
+| Property | How |
+|----------|-----|
+| Runs as `anon` or `authenticated`, never the schema owner | It uses the data-plane pool. The owner bypasses RLS, so a simulation as the owner would prove nothing |
+| Read only | Rejected unless it is a single `SELECT`, `WITH`, `VALUES` or `TABLE`. Data-modifying CTEs and `EXPLAIN ANALYZE` are refused by the same checks the SQL console uses |
+| Nothing left behind | The transaction is **always** rolled back, including on success. The read-only checks are static analysis and static analysis is never complete, so the rollback does not depend on them being right |
+
+A statement timeout (default 5 s, ceiling 30 s) and a row cap (default 100, ceiling
+1000) bound what a careless query costs the instance; `truncated` says when the cap cut
+the answer.
+
+<Warning>
+The simulator endpoint is admin-guarded. It executes caller-supplied SQL, and its whole
+purpose is to see the rows another user would see.
+</Warning>
+
+### Why do I see nothing?
+
+Two independent gates produce an empty result. They fail differently and are fixed
+differently, so the simulator names which one closed:
+
+- **`deniedBy: "grant"`** — the role holds no `SELECT` privilege. PostgreSQL *raises*
+  rather than filtering, so you get an error, not an empty list. No policy can rescue
+  this; the fix is a `GRANT`.
+- **`deniedBy: "policy"`** — RLS is on and no policy grants this role read access. The
+  table can only ever return 0 rows, silently.
+
+Every table the query touches is listed with its policies, their `USING` and `WITH CHECK`,
+and whether each **applies** to this caller: a policy granted only to `authenticated` is
+not the explanation for what an `anon` call saw.
+
+Attribution comes from a plan built on the control plane, deliberately. When RLS is on and
+no policy matches, the planner collapses the scan to a one-time false filter and the
+relation vanishes from the plan — so planning under the simulated role would lose exactly
+the table you most need named.
+
+### Why is *this row* hidden?
+
+Run the query as two callers and compare. In Studio that is **Compare two callers**; over
+the admin API:
+
+```
+POST /api/admin/rls/simulate/diff
+{ "sql": "select * from todo",
+  "left":  { "userId": "usr_a" },
+  "right": { "userId": "usr_b" } }
+```
+
+You get both row sets plus the symmetric difference, next to the policies that could have
+decided. If both sides are identical when you expected them to differ, the policy is not
+discriminating on anything that changes between those two callers.
+
+## The advisor
+
+```bash
+motherbase rls lint
+motherbase rls lint --level critical
+```
+
+**Project Studio → Advisors** surfaces the same report. The rules that matter for RLS:
+
+| Rule | Why it is a leak |
+|------|------------------|
+| `sec_rls_disabled` | RLS is off. `/rest/v1` refuses the table (`403`), but a function reached through `rpc()` that reads or writes it does so on every row |
+| `sec_no_policy` | RLS on with no policy: fully blocked. Safe, usually not intended |
+| `sec_anon_read_sensitive` / `sec_anon_read_open` | An `anon` `SELECT` with a permissive `USING` |
+| `sec_anon_write` | Unauthenticated writes. Almost never intended |
+| `sec_auth_write_unscoped` | Any signed-in user can write any row |
+| `sec_policy_joins_unprotected` | The policy decides access by reading another table with RLS off. Whoever can write there grants themselves access here |
+| `sec_definer_callable_by_anon` | A `SECURITY DEFINER` function runs as its owner and ignores RLS entirely. One `anon` can execute is a hole through every policy in the database |
+| `perf_policy_unindexed_column` | The policy filters on an unindexed column, evaluated per candidate row, so every query on the table pays for it |
+
+Trigger functions are excluded from the `SECURITY DEFINER` rule: they take no arguments and
+return `trigger`, so an `EXECUTE` grant on one is not a callable entry point.
+
+## Differences from Supabase
+
+- Only the `public` schema is exposed over REST, so policies elsewhere are not reachable
+  through the data API. `client.schema(name).rpc()` still reaches functions in another schema
+  for the schemas a feature exposes — see the [SDK reference](/docs/reference/sdk/).
+- `auth.uid()`, `auth.jwt()` and `auth.role()` exist and read `request.jwt.claims`, as in
+  Supabase.
+- The secret key (`mb_secret_…`) runs as `service_role` and bypasses RLS, as Supabase's
+  does, but that is all it opens: SQL, DDL, backups and settings stay behind the admin API
+  and its own RBAC. A leaked secret key exposes the data, not the schema. See
+  [API Keys](/docs/platform/api-keys/).
+
+## Operation rules
+
+| Operation | Clause |
+|-----------|--------|
+| `SELECT` | `USING (...)` decides visible rows |
+| `INSERT` | `WITH CHECK (...)` validates new rows |
+| `UPDATE` | `USING (...)` selects existing rows, `WITH CHECK (...)` validates the result |
+| `DELETE` | `USING (...)` selects deletable rows |
+
+PostgreSQL also needs a matching `SELECT` policy for `UPDATE` to work as expected. Without it, the row can exist but the caller cannot see it, so the update affects zero rows.
+
+## REST and Realtime
+
+REST calls under `/rest/v1/:model` obey PostgreSQL RLS for `GET`, `POST`, `PATCH`, and `DELETE`.
+
+Realtime table events respect RLS by default: for an insert or update, each connected socket only receives the row if it can `SELECT` it. A delete cannot be checked after the fact, so its audience is captured **before** the row goes and only those sockets receive it. See [Realtime → RLS visibility](/docs/platform/realtime/#rls-visibility).
+
+## Practical checklist
+
+- Enable RLS on every public app table (Studio does it for tables it creates; a migration has to say so).
+- One `FOR ALL` policy is right when every verb follows the same rule; split per command as soon as they differ (public read, owner write).
+- Add indexes on owner columns used by policies, for example `CREATE INDEX ON todo (user_id);`.
+- Keep the secret key out of browser code; frontend clients use the publishable key and the user's session.
+- Put privileged helper functions in a private, unexposed schema.
+- Review **Project Studio → Advisors** after changing policies.

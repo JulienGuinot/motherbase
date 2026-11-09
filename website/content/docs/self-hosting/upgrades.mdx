@@ -1,0 +1,137 @@
+---
+title: Upgrades
+description: Upgrade and roll back the Motherbase platform and individual projects while preserving Docker volumes.
+order: 8
+---
+
+Motherbase separates the platform checkout and shared images from each project's Compose lifecycle. The canonical release workflow is also summarized in [Updates](/docs/getting-started/updates); this page focuses on what the self-hosting scripts execute.
+
+## Before an upgrade
+
+From a one-line installation, change to `~/motherbase`. From a backend checkout, check its Git state:
+
+```bash
+git status --short
+```
+
+Take a project database backup and copy any artifact that must survive host or volume loss. See [Backups and restore](/docs/self-hosting/backups-and-restore).
+
+<Warning>
+Do not use `./setup.sh --reset`, `./deploy/reset.sh`, or `docker compose down -v` for an upgrade. Every one can delete project volumes.
+</Warning>
+
+## Upgrade the platform
+
+```bash
+./deploy/update.sh              # pull the current branch, then redeploy
+./deploy/update.sh --no-pull    # redeploy the working tree as it is
+```
+
+`update.sh` is a guard around the manual pair below: it refuses to run when `.env`
+is missing or the repo has uncommitted changes, the two states where an upgrade
+silently becomes a reinstall with fresh secrets that no longer open the existing
+database volume. It then runs `./setup.sh --yes`.
+
+An install from the published bundle has no `.git`. There `update.sh` downloads the bundle of the latest
+release (`MOTHERBASE_BUNDLE_URL`) and its checksum (`MOTHERBASE_BUNDLE_SHA256_URL`, by default the bundle
+URL plus `.sha256`), refuses to go on unless the SHA-256 matches, and only then unpacks it over the
+install directory. The bundle carries no `.env`, so secrets and volumes stay as they are; a failed
+download or a mismatch leaves the install untouched.
+
+```bash
+git pull
+./setup.sh --yes           # add --prod on a VPS install
+```
+
+With an existing `.env`, setup keeps the current root, Console, and Traefik environment files and repairs missing Console fields instead of regenerating all secrets.
+
+On a VPS, the rerun:
+
+1. Recovers `DOMAIN`, `CONSOLE_DOMAIN`, and `ACME_EMAIL` from the existing files.
+2. Resolves external MinIO, MinIO client, Traefik, Nginx proxy, and Docker CLI references to immutable repository digests and persists them.
+3. Recreates production Traefik with `--force-recreate --remove-orphans`.
+4. Pulls the prebuilt PostgreSQL, API, Console, edge runtime and orchestrator images for the commit, or rebuilds them (with `motherbase-deps`) when they are not published or `--build` is passed.
+5. Finds each currently running project API through Docker Compose labels, force-recreates only that API with `--no-deps`, and requires its health endpoint to return `200` within 120 seconds.
+6. Recreates the Console and waits for it to answer internally.
+
+Database, MinIO, backup, assistant, and Console project volumes are not removed by this path. Stopped projects are not selected by the running-API reconciliation loop.
+
+## Update a project
+
+Use the project's runtime controls in the Platform Console, or:
+
+```bash
+motherbase projects update <id>
+```
+
+The current orchestrator implementation runs project `pull`, then `up -d --remove-orphans`. Pull always targets the remote `minio` and `minio-init` services. It also pulls `api` only when the configured API image is not a local `motherbase-api:<tag>` reference. The locally built database image is not pulled.
+
+Use rebuild when Compose must build from the checkout:
+
+```bash
+motherbase projects rebuild <id>
+```
+
+Rebuild runs `docker compose up --build -d --remove-orphans`. Neither update nor rebuild passes `-v`, so named volumes remain attached.
+
+## Internal migrations
+
+The root `Dockerfile` starts each API with:
+
+```text
+wait-for-db.js -> run-migrations.js -> dist/app.js
+```
+
+The database wait uses the host and port from `DATABASE_URL` and defaults to a 120-second timeout with one-second retries. `apps/server/scripts/run-migrations.js` then runs Prisma `migrate deploy`.
+
+Before deploying, it checks for one known failed migration, `20260720030000_data_retention`. If that migration has neither finished nor been marked rolled back, the script runs Prisma `migrate resolve --rolled-back` for it and then retries normal deployment. No other failed migration is automatically resolved.
+
+A migration failure exits the container before the API starts. Diagnose it from the project API logs rather than repeatedly recreating the whole platform.
+
+## Application migrations
+
+Runtime upgrades do not replace schemas managed by your own project migration workflow. The existing updates guide documents:
+
+```bash
+motherbase migrations list
+motherbase migrations diff
+motherbase migrations apply <id>
+```
+
+Use direct `npm run prisma:deploy` only for maintenance when you have verified which database `DATABASE_URL` targets.
+
+## Release checks
+
+If `UPDATE_CHECK_URL` is present in `deploy/console/.env`, the Console accepts a payload containing `version`, `tags`, or Docker-Hub-style `results[].name`, filters for semantic versions, and displays the highest version. It does not run an upgrade.
+
+After changing that value, recreate the Console with the command documented in [Updates](/docs/getting-started/updates).
+
+## Roll back a project runtime
+
+First inspect the project's logs:
+
+```bash
+motherbase projects logs <id>
+```
+
+Then either select a known-good `API_IMAGE` in the project's `.env.prod` and run update, or check out source matching the intended image and run rebuild. `apps/server/console/services/orchestrator.service.ts` treats `.env.prod` as authoritative for editable project configuration.
+
+A runtime rollback does not reverse database migrations.
+
+## Roll back the platform
+
+The source-supported rollback described in [Updates](/docs/getting-started/updates/) is:
+
+```bash
+git checkout <previous-sha>
+./deploy/update.sh --no-pull
+```
+
+`--no-pull` matters: without it `update.sh` pulls the branch forward again and undoes
+the checkout.
+
+This rebuilds and recreates runtime containers from the older checkout while retaining volumes.
+
+<Warning>
+There is no automatic down-migration path in `setup.sh`, `apps/server/scripts/run-migrations.js`, or the deploy scripts. If the newer release changed data incompatibly, restoring a pre-upgrade database backup is a separate operation; the restore service applies a plain SQL dump to the current database and does not clear it first.
+</Warning>

@@ -1,0 +1,77 @@
+---
+title: "Postgres Triggers"
+description: "Create, inspect, enable, disable, and drop real PostgreSQL triggers from Project Studio."
+order: 8
+---
+
+Motherbase manages real PostgreSQL triggers: `CREATE TRIGGER ... EXECUTE FUNCTION ...`. The old app-level trigger table has been removed; use Webhooks and Realtime for app events, and use this page for database-side automation.
+
+## Studio workflow
+
+Open **Project Studio → Database → Triggers**.
+
+The page lists non-internal triggers from the `public` schema, grouped by table. Each trigger shows its timing, events, orientation, target function, enabled state, and full PostgreSQL definition.
+
+You can:
+
+- create a trigger from a guided form
+- switch to advanced SQL for custom `CREATE TRIGGER` statements
+- enable or disable an existing trigger
+- edit by dropping the old trigger and creating a new definition
+- drop a trigger from a table
+
+## Create a trigger function
+
+Triggers execute PostgreSQL functions that return `trigger`. Create the function first from **Project Studio → Database → Functions** or the SQL editor:
+
+```sql
+CREATE OR REPLACE FUNCTION public.set_updated_at()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  NEW.updated_at = now();
+  RETURN NEW;
+END;
+$$;
+```
+
+## Create a trigger
+
+From the guided form, choose the table, timing, events, orientation, and function. Motherbase generates SQL like:
+
+```sql
+CREATE TRIGGER "todo_set_updated_at"
+  BEFORE UPDATE ON public."todo"
+  FOR EACH ROW
+  EXECUTE FUNCTION public."set_updated_at"();
+```
+
+Advanced mode lets you paste raw trigger SQL for cases the form does not model, such as `WHEN` clauses, `UPDATE OF column`, constraint triggers, or triggers on views.
+
+## Admin endpoints
+
+Project Studio uses admin-only endpoints:
+
+```http
+GET    /api/admin/schema/triggers
+GET    /api/admin/schema/trigger-functions
+POST   /api/admin/schema/triggers
+POST   /api/admin/schema/triggers/:name/enabled
+DELETE /api/admin/schema/triggers/:name?table=<table>
+```
+
+`POST /api/admin/schema/triggers` accepts `{ "sql": "<CREATE TRIGGER ...>" }`.
+
+`POST /api/admin/schema/triggers/:name/enabled` accepts:
+
+```json
+{
+  "table": "todo",
+  "enabled": false
+}
+```
+
+<Warning>
+Trigger names are unique per table, not globally. Mutating endpoints require both the trigger name and table. Editing a trigger is implemented as drop then create because PostgreSQL does not alter a trigger body in place.
+</Warning>

@@ -1,0 +1,255 @@
+---
+title: "AI Package"
+description: "Architecture of the Motherbase agent loop, normalized event stream, tool execution, provider adapters, and server integration."
+order: 4
+---
+
+`@motherbase/ai` is a provider-neutral runtime used by the server's built-in assistant. It is a private workspace package, not published to npm: this page documents it for contributors. The public barrel in `packages/ai/src/index.ts` re-exports the agent, events, types, providers, registry, HTTP executor, and thread-store interfaces.
+
+## Core model
+
+The shared types live in `packages/ai/src/types.ts`.
+
+```ts
+interface ProviderConfig {
+  provider: ProviderId // one of PROVIDER_IDS, see Providers below
+  model: string
+  apiKey: string
+  baseUrl?: string
+}
+
+interface ProviderAdapter {
+  id: ProviderId
+  stream(req: ProviderRequest): AsyncIterable<ProviderEvent>
+}
+```
+
+A `ProviderRequest` contains `model`, `system`, conversation `messages`, declared `tools`, `maxTokens`, and an `AbortSignal`. Conversation history uses three normalized message forms:
+
+- user: `{ role: 'user', text }`;
+- assistant: `{ role: 'assistant', text, toolCalls? }`;
+- tool: `{ role: 'tool', results }`.
+
+A `ToolCall` has `id`, `name`, and object-shaped `input`. A `ToolResultMessage` correlates by `callId` and `name` and can set `isError`.
+
+## Agent loop
+
+`runAgent(options)` in `packages/ai/src/agent.ts` is an async generator bounded by `maxSteps`.
+
+```ts
+import { runAgent, READ_TOOLS, createHttpExecutor } from '@motherbase/ai'
+
+const execute = createHttpExecutor({
+  baseUrl: 'https://api.example.com/api/admin',
+  token: userBearerToken,
+})
+
+for await (const event of runAgent({
+  adapter,
+  model: 'gpt-5',
+  system: 'Answer using project facts.',
+  messages: [{ role: 'user', text: 'Which tables have RLS?' }],
+  tools: READ_TOOLS,
+  maxSteps: 12,
+  maxTokens: 8192,
+  signal: abortController.signal,
+  execute,
+})) {
+  console.log(event)
+}
+```
+
+Each step:
+
+1. calls `adapter.stream()` with the accumulated history;
+2. forwards text deltas, tool calls, usage, and errors;
+3. collects the assistant text and tool calls into one assistant message;
+4. invokes optional `onMessage` so the caller can persist it;
+5. ends with `done/end_turn` when no tool was requested;
+6. otherwise executes every declared call, appends one tool message, and starts the next provider step.
+
+Unknown tool names fail closed and never reach `execute()`. If any requested call is a write and `autoApproveWrites` is not true, the loop emits a `tool_proposal` for every write in that turn, executes none of that turn's calls, and returns. If the step budget is exhausted, it emits `{ type: 'truncated', steps: maxSteps }`.
+
+Provider failures end the run without persisting a partial assistant message. Normal provider `done` events are consumed by the loop; the loop emits its own final `done/end_turn` when the conversation finishes without more calls.
+
+## Event stream
+
+`ProviderEvent` and `AgentEvent` are defined in `packages/ai/src/events.ts`.
+
+| Event | Payload | Producer |
+|-------|---------|----------|
+| `text_delta` | `text` | Provider adapter |
+| `tool_call` | `call` | Provider adapter |
+| `usage` | `inputTokens`, `outputTokens` | Provider adapter |
+| `error` | `message` | Provider adapter or server integration |
+| `done` | `end_turn`, `tool_use`, `max_tokens`, or `error` | Adapter and agent lifecycle |
+| `thread` | `threadId` | Server chat service |
+| `tool_result` | Call id, name, result, optional error flag | Agent loop |
+| `tool_proposal` | Proposed write `ToolCall` | Agent loop |
+| `truncated` | Step count | Agent loop |
+
+Every provider translates its vendor stream into this union. That keeps the transport independent from Anthropic content blocks, OpenAI deltas, and Gemini parts.
+
+## Tool specification
+
+`ToolSpec` is declared in `packages/ai/src/types.ts`:
+
+```ts
+interface ToolSpec {
+  name: string
+  description: string
+  input: Record<string, unknown>
+  mode: 'read' | 'write'
+  http: {
+    method: 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE'
+    path: string
+  }
+  summarize?: (result: unknown) => unknown
+  validate?: (input: Record<string, unknown>) => string | null
+}
+```
+
+`input` is JSON Schema passed verbatim to provider tool definitions. HTTP paths may interpolate `{param}` from call input. `summarize` reduces a successful payload before it returns to the model; `validate` can reject an input without making a request.
+
+The registry in `packages/ai/src/tools/registry.ts` exports `READ_TOOLS` (`mode: 'read'`):
+
+| Tool | Request | Result control |
+|------|---------|----------------|
+| `list_schemas` | `GET /schema/schemas` | None |
+| `list_tables` | `GET /schema/tables` | Caps rows at 200 |
+| `list_indexes` | `GET /schema/tables/{table}/indexes` | Requires `table` |
+| `list_schema_indexes` | `GET /schema/indexes` | Caps rows at 200 |
+| `list_enum_types` | `GET /schema/enums` | Caps rows at 100 |
+| `list_roles` | `GET /database/roles` | None |
+| `list_column_privileges` | `GET /database/column-privileges` | Requires `table` |
+| `list_publications` | `GET /database/publications` | None |
+| `get_postgres_config` | `GET /database/config` | None |
+| `list_functions` | `GET /schema/functions` | Caps rows at 100 |
+| `list_triggers` | `GET /schema/triggers` | Caps rows at 100 |
+| `list_extensions` | `GET /schema/extensions` | Caps rows at 100 |
+| `run_select` | `POST /sql/readonly` | Validates read-only SQL and caps rows at 50 |
+| `rls_status` | `GET /rls/tables` | Caps rows at 200 |
+| `security_advisor` | `GET /advisor` | None |
+| `read_logs` | `GET /logs` | Caps rows at 50 |
+| `read_metrics` | `GET /metrics/requests` | None |
+| `read_performance` | `GET /performance` | Caps rows at 25 |
+| `advise_indexes` | `POST /performance/index-advisor` | None |
+| `list_queues` | `GET /queues` | Caps rows at 100 |
+
+and `WRITE_TOOLS` (`mode: 'write'`), which `runAgent` proposes instead of executing unless `autoApproveWrites` is on:
+
+| Tool | Request |
+|------|---------|
+| `create_table` | `POST /schema/tables` with `{ sql, policyPreset? }` |
+| `create_index` | `POST /schema/tables/{table}/indexes` |
+| `create_policy` | `POST /rls/policies` |
+
+Each write tool maps to one narrow admin endpoint that validates its own input server-side, so there is no SQL string
+to police for writes. `ALL_TOOLS` is both arrays, and `toolByName(name)` searches it.
+
+### Read-only SQL guard
+
+`isReadOnlySql(sql)` accepts one statement beginning with `select`, `with`, `explain`, `show`, `table`, or `values`. It rejects additional semicolons, write keywords anywhere in the statement, and named side-effecting functions such as `pg_terminate_backend`, file access, large-object import/export, `dblink`, and `set_config`.
+
+The client-side check is paired with `POST /sql/readonly`, whose server implementation is expected to use a PostgreSQL read-only transaction. Source: `packages/ai/src/tools/registry.ts`.
+
+## HTTP executor
+
+`createHttpExecutor(options)` in `packages/ai/src/tools/executor.ts` returns a function matching `runAgent`'s `execute` option.
+
+`ExecutorOptions` contains an absolute admin `baseUrl`, the caller's bearer `token`, optional `fetchImpl`, and optional `timeoutMs` defaulting to 30 seconds. `buildUrl()`:
+
+- substitutes and URL-encodes `{param}` path variables;
+- adds unused input fields as query parameters for GET and DELETE;
+- leaves other inputs for the JSON request body.
+
+The executor resolves the spec through `toolByName`, runs validation before network I/O, forwards the caller's bearer token, unwraps a top-level `data` property, applies `summarize`, and returns `ToolOutcome { result, isError }`. HTTP failures include the status in the tool result; fetch and timeout failures become error results instead of thrown agent errors.
+
+## Providers
+
+Provider descriptors are defined in `packages/ai/src/providers/index.ts`.
+
+| Id | Adapter | Default model | Suggested models | Base URL required |
+|----|---------|---------------|------------------|-------------------|
+| `anthropic` | `createAnthropicAdapter` | `claude-opus-5` | `claude-opus-5`, `claude-sonnet-5`, `claude-haiku-4-5` | No |
+| `openai` | `createOpenAIAdapter` | `gpt-5` | `gpt-5`, `gpt-5-mini` | No |
+| `gemini` | `createGeminiAdapter` | `gemini-2.5-pro` | `gemini-2.5-pro`, `gemini-2.5-flash` | No |
+| `deepseek` | `createOpenAIAdapter` | `deepseek-chat` | `deepseek-chat`, `deepseek-reasoner` | No, prefilled |
+| `qwen` | `createOpenAIAdapter` | `qwen-plus` | `qwen3-max`, `qwen-plus`, `qwen-flash` | No, prefilled |
+| `glm` | `createOpenAIAdapter` | `glm-4.6` | `glm-4.6`, `glm-4.5-air` | No, prefilled |
+| `moonshot` | `createOpenAIAdapter` | `kimi-k2-0905-preview` | `kimi-k2-0905-preview`, `kimi-k2-turbo-preview` | No, prefilled |
+| `mistral` | `createOpenAIAdapter` | `mistral-large-latest` | `mistral-large-latest`, `mistral-medium-latest`, `codestral-latest` | No, prefilled |
+| `xai` | `createOpenAIAdapter` | `grok-4` | `grok-4`, `grok-code-fast-1` | No, prefilled |
+| `groq` | `createOpenAIAdapter` | `openai/gpt-oss-120b` | `openai/gpt-oss-120b`, `llama-3.3-70b-versatile`, `moonshotai/kimi-k2-instruct-0905` | No, prefilled |
+| `openrouter` | `createOpenAIAdapter` | `openrouter/auto` | `openrouter/auto` | No, prefilled |
+| `compatible` | `createOpenAIAdapter` | Empty | None | Yes |
+
+`PROVIDER_IDS` (in `types.ts`) is the single list of ids: the server's settings schema, its `AI_PROVIDER` env schema and the console's validation are all built from it. `PROVIDERS` contains the descriptors in the same order, `getProvider(id)` returns the matching descriptor, and `providerSummaries()` returns them without their code, which is what `GET /api/admin/ai/providers` and the console's org AI view send to Studio. A descriptor's `create(config)` builds the adapter.
+
+The "prefilled" rows are OpenAI-compatible vendors: their descriptor carries a `defaultBaseUrl`, and `endpointOf(config)` resolves the endpoint a configuration talks to, the saved `baseUrl` first, that default otherwise.
+
+### Anthropic
+
+`packages/ai/src/providers/anthropic.ts` maps assistant calls to `tool_use` blocks and tool results to user-side `tool_result` blocks. It assembles streamed `input_json_delta` chunks by content-block index, emits a tool call when the block stops, and maps message usage and stop reasons. The SDK client receives `apiKey` and optional `baseUrl`.
+
+### OpenAI and compatible endpoints
+
+`packages/ai/src/providers/openai.ts` prepends the system message, maps tool specs to function tools, and serializes assistant/tool messages in Chat Completions format. Tool-call arguments are assembled across streamed chunks by index and emitted after the stream ends. Empty or incomplete calls emit an error rather than dispatching a blank id/name. The `compatible` id and every prefilled vendor use the same adapter with another `baseUrl`. OpenAI receives the token limit as `max_completion_tokens`; every other endpoint receives `max_tokens`, the name the vendors cloning the API document. Only OpenAI's `/models` catalogue is filtered to chat families; other vendors' catalogues are listed as returned.
+
+### Gemini
+
+`packages/ai/src/providers/gemini.ts` maps user/assistant history to Gemini contents and tool results to `functionResponse` parts. Gemini tool calls do not provide ids, so the adapter creates stable per-instance ids using an incrementing sequence. Cumulative usage metadata is held and emitted once after streaming. The adapter constructs `GoogleGenAI` with the API key; `baseUrl` is not used.
+
+All three adapters catch client construction and stream failures, then emit `error` followed by `done/error`.
+
+## Thread store contract
+
+`packages/ai/src/store.ts` defines `ThreadStore` with create, list, get, append, pending-call, rename, and delete operations. Threads are scoped by `project` and `userId`; `ThreadWithMessages` adds ordered `messages` and `pending`.
+
+The server implementation in `apps/server/services/admin/ai-thread-store.sqlite.ts` stores threads and messages in SQLite, assigns message sequence numbers inside a transaction, and falls back to an in-memory database if its data directory cannot be opened.
+
+## Supporting exports
+
+The barrel also exposes the supporting type and conversion seams used by tests and integrations:
+
+| Area | Exports |
+|------|---------|
+| Messages and accounting | `AgentMessage`, `Usage`, `JSONSchema` |
+| Agent options | `RunAgentOptions` |
+| Provider metadata | `ProviderDescriptor` |
+| Thread scoping | `ThreadScope`, `PendingCall` |
+| Vendor wire conversion | `toAnthropicMessages`, `toOpenAIMessages`, `toGeminiContents` |
+
+The conversion functions expose the same mappings used inside their adapters; they do not make network calls. Sources: `packages/ai/src/providers/anthropic.ts`, `packages/ai/src/providers/openai.ts`, and `packages/ai/src/providers/gemini.ts`.
+
+## Server integration
+
+`apps/server/controllers/ai.controller.ts` mounts admin-only routes under `/api/admin/ai`:
+
+| Route | Behavior |
+|-------|----------|
+| `GET /providers` | Returns descriptor metadata without factory functions or API keys |
+| `POST /test` | Runs the configured provider connectivity test |
+| `GET /threads` | Lists threads for the caller's project/user scope |
+| `GET /threads/:id` | Returns an owned thread |
+| `PATCH /threads/:id` | Renames an owned thread |
+| `DELETE /threads/:id` | Deletes an owned thread |
+| `POST /chat` | Streams `AgentEvent` values as server-sent events |
+
+The controller enforces ownership before reading, renaming, or deleting a thread. The chat route uses `fetch` plus a readable stream on the frontend because browser `EventSource` cannot POST. It aborts work when the request closes, copies only the caller's bearer token, derives an admin base URL ending in `/api/admin`, and writes each event as `data: <json>`.
+
+The controller delegates the actual run to `apps/server/services/admin/ai-chat.service.ts`. That service:
+
+1. resolves project AI settings, falling back to Console settings through `apps/server/services/admin/ai-config.service.ts`;
+2. creates or loads an owned thread and emits its id;
+3. appends the user's message;
+4. builds the configured provider adapter;
+5. creates an HTTP executor with the caller's token;
+6. runs `runAgent` with `READ_TOOLS`, configured `maxSteps`, `maxTokens: 8192`, and message persistence through `onMessage`.
+
+This preserves the caller's existing admin permissions and audit path: tools call the same `/api/admin/*` controllers as Studio, with no service-token substitution. Provider API keys stay inside configuration resolution and adapter construction and are not placed on streamed events.
+
+## Related
+
+- [AI assistant](/docs/platform/ai-assistant/) — the product view: providers, tools, approvals, SSE transport.
+- [Studio assistant dock](/docs/studio/api-tools/) — where it appears in the UI.

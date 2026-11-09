@@ -1,0 +1,108 @@
+---
+title: "Backups & Restore"
+description: "Scheduled and manual pg_dump backups, retention, offsite upload, restore, project export and staging clone."
+order: 7
+---
+
+Backups are per project and run inside the project's own API container. Source: `apps/server/services/admin/backup.service.ts` and `backup-scheduler.service.ts`.
+
+## Where they live
+
+`BACKUP_DIR` (default `backups`), resolved relative to the process working directory. Every path that comes from an API call is resolved **inside** that root:
+
+```text
+absolute path        → 400 Backup path must be relative to BACKUP_DIR
+../escape.sql        → 400 Backup path escapes BACKUP_DIR
+missing file         → 404 Backup file not found: <name>
+```
+
+<Note>
+`AI_DATA_DIR` (the assistant's SQLite store) is deliberately a **different** directory, so restoring a database backup never touches conversation history.
+</Note>
+
+## Schedule
+
+The effective config is the `backup.schedule` settings group, which overrides the environment seeds:
+
+| Field | Env seed | Default |
+|---|---|---|
+| `enabled` | `BACKUP_ENABLED` | `false` |
+| `cron` | `BACKUP_CRON` | `0 3 * * *` |
+| `retention` | `BACKUP_RETENTION` | `7` |
+| `offsite` | `BACKUP_OFFSITE` | `false` |
+
+`BackupSchedulerService` runs in-process via node-cron, because `pg_cron` cannot run `pg_dump` — that is a shell command, not SQL. Overlapping runs are skipped, and the schedule is rebuilt live when you save the config (no restart).
+
+Each cycle: dump, prune local to `retention`, and — when offsite is on — upload and prune remote.
+
+## What a backup is
+
+```bash
+pg_dump --dbname <DATABASE_URL> --format=plain --no-owner --no-privileges --file <BACKUP_DIR>/motherbase-db-<timestamp>.sql
+```
+
+Plain SQL, no owner or privilege statements, so it restores cleanly into a database owned by a different role. `PG_BIN_DIR` tells the server where `pg_dump` / `psql` live when they are not on `PATH` (common on native Windows/macOS dev machines).
+
+## Offsite
+
+Offsite is active only when **both** `STORAGE_DRIVER=s3` and `backup.schedule.offsite` are true. Uploads go to `BACKUP_BUCKET` (default `backups`) — never the public bucket. Dedicated `BACKUP_S3_*` credentials are used when set; otherwise the main `S3_*` values are reused with the dedicated bucket.
+
+Remote dumps are listed, pruned by the same retention, and can be downloaded back into `BACKUP_DIR` before restoring.
+
+## Restore
+
+```text
+POST /api/admin/backups/restore   { file: "…​.sql", confirm: "RESTORE" }
+POST /api/admin/backups/restore   { key:  "…​.sql", confirm: "RESTORE" }   # offsite
+```
+
+Without `confirm: "RESTORE"` the API returns `400 Restore requires confirm=RESTORE`. The restore itself is:
+
+```bash
+psql <DATABASE_URL> --set ON_ERROR_STOP=1 --file <backup>
+```
+
+<Warning>
+`ON_ERROR_STOP=1` means the restore aborts at the first failing statement rather than half-applying a dump. It still runs **into the live database** — take a fresh backup first, and prefer restoring into a clone when you are unsure of the dump's provenance.
+</Warning>
+
+## Project export
+
+`POST /api/admin/backups/export` writes a JSON snapshot of the project's shape — schema graph, RLS policies and edge functions — with `secrets: "omitted"`. It is a portable description of the project, not a data dump; use it alongside a SQL backup, not instead of one.
+
+## Full project archive
+
+```text
+POST /api/admin/backups/export-full   { file?: "motherbase-full-<timestamp>.tar" }
+```
+
+A `.tar` holding `database.sql` plus every ready storage object under `storage/<bucket>/<key>`.
+This is the one export that carries your files; `/backups/export` above carries only the shape.
+
+Restore does **not** read a `.tar` — it runs `psql` and nothing else. Unpack first:
+
+```text
+POST /api/admin/backups/extract   { file: "motherbase-full-<timestamp>.tar" }
+```
+
+It writes the entries to `<name>-extracted/` under `BACKUP_DIR`, and promotes the dump to a
+first-class backup row named `<name>-database.sql`, so it shows up in the backup list and Restore
+can take it from there. Storage objects are left on disk for you to put back. Anything but a full
+archive answers `400`, and an archive entry whose path would escape the extraction directory
+answers `400` rather than being written.
+
+## Clone to staging
+
+```text
+POST /api/admin/backups/clone-staging  { targetDatabaseUrl, confirm: "CLONE" }
+```
+
+Takes a fresh dump and restores it into the database URL you supply. Requires `confirm: "CLONE"` and a non-empty target. The destination is overwritten — point it at staging.
+
+## Project data on the host
+
+A project's persistent state is its Docker volumes under the compose stack plus its directory in `PROJECTS_DIR` (`.env.prod`, `manifest.json`). Updating a project keeps both; `destroy` deletes the directory and brings the stack down. See [projects](/docs/console/projects/) and [upgrades](/docs/self-hosting/upgrades/).
+
+## Monitoring backups
+
+The job ledger raises `backup_older_than_rpo` when the newest backup is older than 26 hours by default (a daily backup plus two hours of slack), and `consecutive_failures` after three failed runs. See [Observability](/docs/platform/observability/).

@@ -1,0 +1,155 @@
+.layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr);
+  gap: 56px;
+  align-items: center;
+}
+
+.root {
+  width: 100%;
+  min-width: 0;
+}
+
+/* Stacked, the figure is a lead-in: smaller and above the terminal */
+@media (max-width: 860px) {
+  .layout {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 24px;
+  }
+  .figure {
+    order: -1;
+    max-width: 300px;
+  }
+}
+
+.terminal {
+  overflow: hidden;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-pop), 0 0 0 4px var(--accent-soft);
+}
+
+.topbar {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  min-height: 48px;
+  padding: 8px 10px 8px 12px;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--border);
+}
+
+.trafficLights {
+  display: inline-flex;
+  gap: 5px;
+  margin-right: 3px;
+}
+
+.trafficLights i {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  opacity: 0.7;
+}
+
+.trafficLights i:nth-child(1) { background: var(--red); }
+.trafficLights i:nth-child(2) { background: var(--amber); }
+.trafficLights i:nth-child(3) { background: var(--green); }
+
+.panelLabel {
+  margin-left: auto;
+  color: var(--text-mute);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.commandList {
+  padding: 12px 0 9px;
+}
+
+.commandRow {
+  display: flex;
+  align-items: center;
+  min-height: 34px;
+}
+
+.prompt {
+  width: 42px;
+  color: var(--green);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-align: center;
+  opacity: 0.72;
+  user-select: none;
+}
+
+.commandRow code {
+  min-width: 0;
+  padding-right: 14px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.8;
+  overflow-wrap: anywhere;
+}
+
+
+.copyRow {
+  display: flex;
+  justify-content: flex-end;
+  min-height: 45px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--border);
+}
+
+.actions {
+  margin-top: 17px;
+}
+
+@media (max-width: 520px) {
+  .topbar {
+    min-height: 52px;
+    gap: 8px;
+    padding-inline: 10px;
+  }
+
+  .trafficLights {
+    gap: 4px;
+    margin-right: 0;
+  }
+
+  .trafficLights i {
+    width: 7px;
+    height: 7px;
+  }
+
+  .commandList {
+    padding-block: 8px 6px;
+  }
+
+  .commandRow {
+    min-height: 33px;
+  }
+
+  .prompt {
+    width: 34px;
+  }
+
+  .commandRow code {
+    padding-right: 10px;
+    font-size: 10px;
+  }
+
+  .actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+    margin-top: 14px;
+  }
+
+  .actions > :global(.btn) {
+    justify-content: center;
+    padding-inline: 8px;
+    text-align: center;
+  }
+}

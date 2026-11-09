@@ -1,0 +1,900 @@
+// Prisma schema: PostgreSQL data layer for a Motherbase project.
+// Run `npm run prisma:migrate` after editing to apply changes.
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["multiSchema"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+  schemas  = ["auth", "storage", "platform", "public"]
+}
+
+enum UserStatus {
+  active
+  deleted
+
+  @@schema("auth")
+}
+
+enum UserRole {
+  USER
+  ADMIN
+
+  @@schema("auth")
+}
+
+enum DevicePlatform {
+  ios
+  android
+  web
+
+  @@schema("platform")
+}
+
+enum FileVisibility {
+  public
+  private
+
+  @@schema("storage")
+}
+
+enum FileStatus {
+  pending
+  finalizing
+  deleting
+  ready
+
+  @@schema("storage")
+}
+
+enum BucketDeletionJobStatus {
+  queued
+  running
+  completed
+  failed
+
+  @@schema("storage")
+}
+
+model User {
+  id                  String     @id @default(uuid())
+  email               String     @unique
+  classicEmail        String?
+  appleEmail          String?
+  appleId             String?
+  googleId            String?
+  googleEmail         String?
+  // Nullable because Better Auth does not populate it. The user.create.before
+  // hook (auth/instance.ts) assigns one via UserService.getRandomUsername when
+  // the sign-up supplies none, and leaves it null if that generation fails.
+  username            String?    @unique
+  firstName           String?
+  lastName            String?
+  imageUrl            String?
+  emailVerified       Boolean    @default(false)
+  // Better Auth phoneNumber plugin columns (SMS OTP sign-in).
+  phoneNumber         String?    @unique
+  phoneNumberVerified Boolean?   @default(false)
+  // Better Auth core columns. `name` is required by Better Auth's user model but
+  // kept optional here so pre-Better-Auth create paths (import/seed/admin) still
+  // compile during the migration; Better Auth always supplies it.
+  name                String?
+  image               String?
+  twoFactorEnabled    Boolean?   @default(false)
+  // Better Auth anonymous plugin. True for a guest created by
+  // `signInAnonymously()`, cleared once the user links a real identity.
+  // Surfaced to RLS as the `is_anonymous` JWT claim (lib/rls-claims.ts).
+  isAnonymous         Boolean?   @default(false)
+  role                UserRole   @default(USER)
+  status              UserStatus @default(active)
+  createdAt           DateTime   @default(now())
+  updatedAt           DateTime   @updatedAt
+
+  devices      Device[]
+  files        File[]
+  appSettings  AppSetting[]
+  // Better Auth relations.
+  sessions     Session[]
+  accounts     Account[]
+  twofactors   TwoFactor[]
+  members      Member[]
+  invitations  Invitation[]
+  passkeys     Passkey[]
+  ssoProviders SsoProvider[]
+  teamMembers  TeamMember[]
+
+  @@map("users")
+  @@schema("auth")
+}
+
+// --- Better Auth core models (added in phase 2a) -----------------------------
+// Generated via `@better-auth/cli generate`. Better Auth owns these tables;
+// passwords live on Account.password, sessions/OTP/verification here.
+
+model Session {
+  id                   String   @id @default(uuid())
+  expiresAt            DateTime
+  token                String
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+  ipAddress            String?
+  userAgent            String?
+  userId               String
+  user                 User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  activeOrganizationId String?
+  activeTeamId         String?
+  // Set only on operator impersonation sessions (never on a real sign-in), which
+  // is what makes one distinguishable everywhere it is listed. Same column name
+  // Better Auth's admin plugin uses, so mounting that plugin later needs no
+  // second migration.
+  impersonatedBy       String?
+  // Authenticator assurance level, Supabase's `aal` claim: 'aal2' once this
+  // session passed a second factor (auth/instance.ts), else null = aal1.
+  aal                  String?
+
+  @@unique([token])
+  @@index([userId])
+  @@map("session")
+  @@schema("auth")
+}
+
+model Account {
+  id                    String    @id @default(uuid())
+  accountId             String
+  providerId            String
+  userId                String
+  user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  accessToken           String?
+  refreshToken          String?
+  idToken               String?
+  accessTokenExpiresAt  DateTime?
+  refreshTokenExpiresAt DateTime?
+  scope                 String?
+  password              String?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  @@index([userId])
+  @@map("account")
+  @@schema("auth")
+}
+
+model Verification {
+  id         String   @id @default(uuid())
+  identifier String
+  value      String
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([identifier])
+  @@map("verification")
+  @@schema("auth")
+}
+
+/// One row per PKCE code that has been exchanged, so a code is single use.
+/// The hash of the code is the primary key: the claim is the insert, and the
+/// duplicate loses on the constraint rather than on a read that another
+/// exchange can interleave with. Rows outlive the code's own TTL only until
+/// the expiry sweep, which is what makes the marker safe to delete.
+model PkceCode {
+  codeHash  String   @id
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([expiresAt])
+  @@map("pkce_code")
+  @@schema("auth")
+}
+
+/// Supabase's `auth.audit_log_entries`, column for column, so a query or a
+/// dashboard written against Supabase reads it unchanged. One row per auth
+/// event (sign-in, sign-up, token refresh, user deleted...), written by
+/// AuthAuditService and pruned by DataRetentionService.
+model AuthAuditLogEntry {
+  instanceId String?   @map("instance_id") @db.Uuid
+  id         String    @id @default(uuid()) @db.Uuid
+  /// `{ action, actor_id, actor_username, actor_via_sso, log_type, traits }`.
+  payload    Json?
+  createdAt  DateTime? @default(now()) @map("created_at") @db.Timestamptz(6)
+  ipAddress  String    @default("") @map("ip_address") @db.VarChar(64)
+
+  @@index([instanceId], map: "audit_logs_instance_id_idx")
+  @@index([createdAt], map: "audit_logs_created_at_idx")
+  @@map("audit_log_entries")
+  @@schema("auth")
+}
+
+model Jwks {
+  id         String    @id @default(uuid())
+  publicKey  String
+  privateKey String
+  createdAt  DateTime  @default(now())
+  expiresAt  DateTime?
+  /// ES256, RS256 or EdDSA. Read by verifiers to import the public key.
+  alg        String?
+  crv        String?
+  /// standby | in_use | previously_used | revoked (see auth/signing-keys.ts).
+  status     String    @default("standby")
+
+  @@map("jwks")
+  @@schema("auth")
+}
+
+model TwoFactor {
+  id                      String    @id @default(uuid())
+  secret                  String
+  backupCodes             String
+  userId                  String
+  user                    User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  verified                Boolean?  @default(true)
+  failedVerificationCount Int?      @default(0)
+  lockedUntil             DateTime?
+
+  @@index([secret])
+  @@index([userId])
+  @@map("twoFactor")
+  @@schema("auth")
+}
+
+model Organization {
+  id          String       @id @default(uuid())
+  name        String
+  slug        String       @unique
+  logo        String?
+  createdAt   DateTime     @default(now())
+  metadata    String?
+  members     Member[]
+  invitations Invitation[]
+  teams       Team[]
+
+  @@map("organization")
+  @@schema("auth")
+}
+
+model Member {
+  id             String       @id @default(uuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  userId         String
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role           String       @default("member")
+  createdAt      DateTime     @default(now())
+
+  @@index([organizationId])
+  @@index([userId])
+  @@map("member")
+  @@schema("auth")
+}
+
+model Invitation {
+  id             String       @id @default(uuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  email          String
+  role           String?
+  status         String       @default("pending")
+  expiresAt      DateTime
+  createdAt      DateTime     @default(now())
+  inviterId      String
+  user           User         @relation(fields: [inviterId], references: [id], onDelete: Cascade)
+  teamId         String?
+
+  @@index([organizationId])
+  @@index([email])
+  @@map("invitation")
+  @@schema("auth")
+}
+
+// --- Better Auth plugin models (passkey / apiKey / sso / organization teams) --
+// Field shapes derived from getAuthTables(auth.options) against better-auth@1.6.23
+// with @better-auth/passkey, @better-auth/api-key, @better-auth/sso. Better Auth
+// owns these tables and supplies app-layer defaults for generated fields.
+
+model Passkey {
+  id           String   @id @default(uuid())
+  name         String?
+  publicKey    String
+  userId       String
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  credentialID String
+  counter      Int
+  deviceType   String
+  backedUp     Boolean
+  transports   String?
+  createdAt    DateTime @default(now())
+  aaguid       String?
+
+  @@index([userId])
+  @@map("passkey")
+  @@schema("auth")
+}
+
+model ApiKey {
+  id                  String    @id @default(uuid())
+  configId            String
+  name                String?
+  start               String?
+  referenceId         String
+  prefix              String?
+  key                 String
+  refillInterval      Int?
+  refillAmount        Int?
+  lastRefillAt        DateTime?
+  enabled             Boolean   @default(true)
+  rateLimitEnabled    Boolean   @default(true)
+  rateLimitTimeWindow Int?
+  rateLimitMax        Int?
+  requestCount        Int       @default(0)
+  remaining           Int?
+  lastRequest         DateTime?
+  expiresAt           DateTime?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+  permissions         String?
+  metadata            String?
+
+  @@index([referenceId])
+  @@map("apikey")
+  @@schema("auth")
+}
+
+model SsoProvider {
+  id             String  @id @default(uuid())
+  issuer         String
+  oidcConfig     String?
+  samlConfig     String?
+  userId         String?
+  user           User?   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  providerId     String  @unique
+  organizationId String?
+  domain         String
+
+  @@index([organizationId])
+  @@map("ssoProvider")
+  @@schema("auth")
+}
+
+model Team {
+  id             String       @id @default(uuid())
+  name           String
+  /// Maintained by Better Auth (1.7+) on every team membership change.
+  memberCount    Int          @default(0)
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime?    @updatedAt
+  teamMembers    TeamMember[]
+
+  @@index([organizationId])
+  @@map("team")
+  @@schema("auth")
+}
+
+model TeamMember {
+  id            String   @id @default(uuid())
+  teamId        String
+  team          Team     @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  userId        String
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /// Better Auth (1.7+): hash of (teamId, userId). Null on rows from before
+  /// 1.7, which Better Auth still finds by the pair.
+  membershipKey String?  @unique
+  createdAt     DateTime @default(now())
+
+  @@index([teamId])
+  @@index([userId])
+  @@map("teamMember")
+  @@schema("auth")
+}
+
+model Device {
+  id        String         @id @default(uuid())
+  userId    String
+  token     String         @unique
+  platform  DevicePlatform
+  createdAt DateTime       @default(now())
+  updatedAt DateTime       @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("devices")
+  @@schema("platform")
+}
+
+model File {
+  id              String         @id @default(uuid())
+  ownerId         String?
+  bucketId        String?
+  bucket          String
+  key             String
+  mime            String?
+  size            Int            @default(0)
+  visibility      FileVisibility @default(private)
+  status          FileStatus     @default(ready)
+  uploadExpiresAt DateTime?
+  url             String?
+  /// Hex MD5 of the bytes, when they streamed through the server. The S3 ETag.
+  etag            String?
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  owner     User?   @relation(fields: [ownerId], references: [id], onDelete: SetNull)
+  bucketRef Bucket? @relation(fields: [bucketId], references: [id], onDelete: SetNull)
+
+  @@unique([bucket, key])
+  @@index([ownerId])
+  @@index([bucketId])
+  @@index([bucketId, createdAt(sort: Desc)])
+  @@index([status, uploadExpiresAt])
+  @@map("files")
+  @@schema("storage")
+}
+
+model Bucket {
+  id               String         @id @default(uuid())
+  slug             String         @unique
+  name             String
+  description      String?
+  visibility       FileVisibility @default(private)
+  quotaBytes       BigInt?
+  /// Largest object this bucket accepts, in bytes. Null defers to storage.limits.
+  fileSizeLimit    BigInt?
+  /// MIME allowlist (`image/*` wildcards allowed). Empty defers to storage.limits.
+  allowedMimeTypes String[]       @default([])
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+
+  files    File[]
+  tokens   BucketToken[]
+  cors     BucketCors?
+  webhooks BucketWebhook[]
+
+  @@map("buckets")
+  @@schema("storage")
+}
+
+/// Credentials for the S3 protocol endpoint. The secret is encrypted, not
+/// hashed: SigV4 needs it to recompute the signature.
+model S3AccessKey {
+  id              String    @id @default(uuid())
+  description     String
+  accessKeyId     String    @unique
+  secretEncrypted String
+  lastUsedAt      DateTime?
+  createdAt       DateTime  @default(now())
+
+  @@map("s3_access_keys")
+  @@schema("storage")
+}
+
+model S3MultipartUpload {
+  id          String   @id
+  bucketSlug  String
+  key         String
+  contentType String?
+  createdAt   DateTime @default(now())
+
+  parts S3MultipartPart[]
+
+  @@index([bucketSlug, key])
+  @@map("s3_multipart_uploads")
+  @@schema("storage")
+}
+
+model S3MultipartPart {
+  uploadId   String
+  partNumber Int
+  size       Int
+  etag       String
+  createdAt  DateTime @default(now())
+
+  upload S3MultipartUpload @relation(fields: [uploadId], references: [id], onDelete: Cascade)
+
+  @@id([uploadId, partNumber])
+  @@map("s3_multipart_parts")
+  @@schema("storage")
+}
+
+model BucketToken {
+  id          String    @id @default(uuid())
+  bucketId    String
+  name        String
+  lookupId    String?   @unique
+  token       String    @unique
+  permissions String[]
+  expiresAt   DateTime?
+  createdAt   DateTime  @default(now())
+
+  bucket Bucket @relation(fields: [bucketId], references: [id], onDelete: Cascade)
+
+  @@index([bucketId])
+  @@map("bucket_tokens")
+  @@schema("storage")
+}
+
+model BucketCors {
+  id             String   @id @default(uuid())
+  bucketId       String   @unique
+  allowedOrigins String[]
+  allowedMethods String[]
+  allowedHeaders String[]
+  maxAgeSec      Int      @default(3600)
+
+  bucket Bucket @relation(fields: [bucketId], references: [id], onDelete: Cascade)
+
+  @@map("bucket_cors")
+  @@schema("storage")
+}
+
+model BucketWebhook {
+  id       String   @id @default(uuid())
+  bucketId String
+  url      String
+  events   String[]
+
+  bucket Bucket @relation(fields: [bucketId], references: [id], onDelete: Cascade)
+
+  @@index([bucketId])
+  @@map("bucket_webhooks")
+  @@schema("storage")
+}
+
+/// Durable force-deletion state. The bucket id is deliberately not a foreign
+/// key: the completed job remains queryable after the bucket has been removed.
+model BucketDeletionJob {
+  id             String                  @id @default(uuid())
+  bucketId       String
+  bucketSlug     String
+  status         BucketDeletionJobStatus @default(queued)
+  totalObjects   Int
+  deletedObjects Int                     @default(0)
+  attempts       Int                     @default(0)
+  lastError      String?
+  nextAttemptAt  DateTime                @default(now())
+  leaseExpiresAt DateTime?
+  leaseToken     String?
+  startedAt      DateTime?
+  completedAt    DateTime?
+  createdAt      DateTime                @default(now())
+  updatedAt      DateTime                @updatedAt
+
+  @@index([status, nextAttemptAt, createdAt])
+  @@index([bucketId, createdAt])
+  @@map("bucket_deletion_jobs")
+  @@schema("storage")
+}
+
+model AppSetting {
+  key         String   @id
+  value       Json
+  updatedAt   DateTime @updatedAt
+  updatedById String?
+  updatedBy   User?    @relation(fields: [updatedById], references: [id])
+
+  @@map("app_settings")
+  @@schema("platform")
+}
+
+model Webhook {
+  id        String   @id @default(uuid())
+  name      String
+  url       String
+  events    String[]
+  enabled   Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  deliveries WebhookDelivery[]
+
+  @@map("webhooks")
+  @@schema("platform")
+}
+
+model WebhookDelivery {
+  id           String   @id @default(uuid())
+  webhookId    String
+  event        String
+  status       Int
+  ok           Boolean
+  durationMs   Int
+  test         Boolean  @default(false)
+  errorMessage String?
+  createdAt    DateTime @default(now())
+
+  webhook Webhook @relation(fields: [webhookId], references: [id], onDelete: Cascade)
+
+  @@index([webhookId])
+  @@index([createdAt, id])
+  @@map("webhook_deliveries")
+  @@schema("platform")
+}
+
+model EdgeFunction {
+  id            String   @id @default(uuid())
+  name          String   @unique
+  route         String   @unique
+  code          String   @default("")
+  enabled       Boolean  @default(true)
+  // Optional cron expression. When set, the edge function scheduler invokes
+  // this function on a timer (in-process, via the same sandbox as HTTP
+  // invocation) in addition to its route being callable on demand.
+  schedule      String?
+  // Per-function resource budget. Null means the service default; both are
+  // clamped by the console-global ceilings, so a function can ask for more
+  // than the default but never more than the host allows.
+  memoryLimitMb Int?
+  timeoutMs     Int?
+  // Callable with no session and no invoke token, for webhook receivers
+  // (Stripe, GitHub) that cannot send either. Off by default; the global
+  // EDGE_PUBLIC_INVOKE_ENABLED still opens every function at once.
+  isPublic      Boolean  @default(false)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  logs EdgeFunctionLog[]
+
+  @@map("edge_functions")
+  @@schema("platform")
+}
+
+model EdgeFunctionLog {
+  id           String   @id @default(uuid())
+  functionId   String
+  status       Int
+  durationMs   Int
+  stdout       String   @default("")
+  errorMessage String?
+  invokedAt    DateTime @default(now())
+
+  function EdgeFunction @relation(fields: [functionId], references: [id], onDelete: Cascade)
+
+  @@index([functionId])
+  @@index([invokedAt, id])
+  @@map("edge_function_logs")
+  @@schema("platform")
+}
+
+model EdgeFunctionSecret {
+  id        String   @id @default(uuid())
+  name      String   @unique
+  value     String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("edge_function_secrets")
+  @@schema("platform")
+}
+
+/// Keys a client app presents to reach the data plane. `ApiKey` above is Better
+/// Auth's per-user machine key and is a different thing: this one identifies the
+/// project, not a user. A `secret` key additionally runs the request as the
+/// `service_role` Postgres role, which bypasses RLS.
+model ProjectApiKey {
+  id        String    @id @default(uuid())
+  name      String
+  /// 'publishable' | 'secret'
+  type      String
+  /// Leading segment of the token, shown in lists so a key is identifiable.
+  prefix    String
+  /// sha256 of the full token. Carries the unique index used for verification.
+  tokenHash String    @unique
+  /// Clear token, publishable keys only. Null for secret keys by CHECK constraint.
+  token     String?
+  createdAt DateTime  @default(now())
+  revokedAt DateTime?
+
+  @@map("project_api_keys")
+  @@schema("platform")
+}
+
+/// Transactional realtime events written by the data-plane mutation itself.
+model RealtimeOutbox {
+  id             String    @id
+  model          String
+  dbName         String
+  action         String
+  payloads       Json
+  deleteAudience Json?
+  status         String    @default("pending")
+  attempts       Int       @default(0)
+  lastError      String?
+  availableAt    DateTime  @default(now())
+  leaseToken     String?
+  leaseExpiresAt DateTime?
+  processedAt    DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@map("realtime_outbox")
+  @@schema("platform")
+}
+
+// Versioned schema migrations authored/reviewed in Studio. `upSql`/`downSql` hold
+// the reviewed DDL; `checksum` is a hash of `upSql` used to detect edits after
+// creation (drift). Applied rows persist the normalized live schema snapshot and
+// its checksum. `status` transitions pending → applied → rolledback.
+//
+// `version` is the timestamp prefix of the `<version>_<name>.sql` file the
+// migration lives in, the key Supabase's `schema_migrations` history uses, so
+// the CLI can reconcile local files against this table. `origin` says where the
+// row was authored: `studio`, `cli` (pushed or repaired) or `git` (repo sync).
+model SchemaMigration {
+  id               String    @id @default(uuid())
+  version          String    @unique
+  name             String
+  origin           String    @default("studio")
+  upSql            String    @db.Text
+  downSql          String?   @db.Text
+  checksum         String
+  snapshot         Json?
+  snapshotChecksum String?
+  status           String    @default("pending")
+  appliedAt        DateTime?
+  createdAt        DateTime  @default(now())
+
+  @@map("schema_migrations")
+  @@schema("platform")
+}
+
+/// The Git repository this project imports migrations from.
+///
+/// One row, always: a project has one source of truth for its schema, the same
+/// way a Vercel project has one connected repo. `id` is pinned to `default` so
+/// "connect a second repo" is a constraint violation rather than a silent second
+/// row two sync runs would fight over.
+///
+/// The row exists as soon as OAuth completes, before a repo is chosen: that is
+/// the `owner == null` state ("authorized, not linked"). Tokens and the webhook
+/// secret are AES-GCM ciphertext (see crypto.helper) and never leave the server.
+model GitRepoLink {
+  id       String @id @default("default")
+  provider String @default("github")
+
+  /// Encrypted OAuth access token, and the account it belongs to.
+  accessToken  String @db.Text
+  accountLogin String
+
+  owner          String?
+  repo           String?
+  branch         String  @default("main")
+  /// Directory in the repo holding the .sql files, relative to the repo root.
+  migrationsPath String  @default("migrations")
+
+  /// Repo webhook id, so disconnecting can delete the hook we created.
+  webhookId     String?
+  /// Encrypted shared secret GitHub signs push payloads with.
+  webhookSecret String? @db.Text
+
+  /// Outcome of the last sync. `lastSyncStatus` is 'ok' | 'failed'.
+  lastSyncAt      DateTime?
+  lastSyncStatus  String?
+  lastSyncMessage String?   @db.Text
+  lastSyncSha     String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("git_repo_links")
+  @@schema("platform")
+}
+
+/// Durable copy of the in-memory log ring buffer (`lib/log-buffer.ts`), written
+/// in batches by LogPersistenceService when `logs.retention.enabled` is on.
+/// The buffer alone is bounded by RAM and dies with the process, so the Logs
+/// screen could never look further back than the last few hundred lines.
+/// Pruned by DataRetentionService, like the other operational log tables.
+model RequestLog {
+  id         Int      @id @default(autoincrement())
+  at         DateTime @default(now())
+  level      String
+  source     String
+  /// Logs Explorer source (lib/log-services.ts): api, rest, postgres, auth, ...
+  service    String   @default("platform")
+  message    String
+  method     String?
+  path       String?
+  status     Int?
+  durationMs Int?
+  ip         String?
+  userAgent  String?
+  requestId  String?
+  userId     String?
+
+  @@index([at, id])
+  @@index([level, at])
+  @@index([source, at])
+  @@index([service, at])
+  @@map("request_logs")
+  @@schema("platform")
+}
+
+/// Private, transaction-scoped capture context; never exposed through REST.
+model RestWriteRequest {
+  id          String            @id @db.Uuid
+  backend     Int               @unique
+  transaction BigInt
+  relation    BigInt
+  changes     RestWriteChange[]
+
+  @@map("rest_write_requests")
+  @@schema("platform")
+}
+
+model RestWriteChange {
+  ordinal   BigInt           @id @default(autoincrement())
+  requestId String           @db.Uuid
+  action    String
+  row       Json
+  request   RestWriteRequest @relation(fields: [requestId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([requestId], map: "rest_write_changes_request_idx")
+  @@map("rest_write_changes")
+  @@schema("platform")
+}
+
+/// A destination the project's logs are copied to (Project Settings > Log
+/// Drains). `config` holds the destination-specific fields, secrets included;
+/// the admin API masks them on the way out.
+model LogDrain {
+  id             String    @id @default(uuid())
+  name           String    @unique
+  /// webhook | datadog | loki
+  type           String
+  config         Json
+  enabled        Boolean   @default(true)
+  deliveredCount Int       @default(0)
+  failedCount    Int       @default(0)
+  droppedCount   Int       @default(0)
+  lastSuccessAt  DateTime?
+  lastErrorAt    DateTime?
+  lastError      String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@map("log_drains")
+  @@schema("platform")
+}
+
+/// Studio content, Supabase's `content` API: SQL snippets (`sql`), saved Logs
+/// Explorer queries (`log_sql`) and custom reports (`report`). `content` holds
+/// the type's payload ({ sql } or { charts }). A `user` item is its owner's
+/// alone; a `project` item is readable by every operator of the project and
+/// still editable only by its owner. `ownerId` is the console operator (see
+/// `operatorOf` in services/admin/content.service.ts).
+model StudioContent {
+  id          String               @id @default(uuid()) @db.Uuid
+  type        String
+  name        String
+  description String?
+  content     Json
+  visibility  String               @default("user")
+  ownerId     String
+  folderId    String?              @db.Uuid
+  favorite    Boolean              @default(false)
+  createdAt   DateTime             @default(now())
+  updatedAt   DateTime             @updatedAt
+  folder      StudioContentFolder? @relation(fields: [folderId], references: [id], onDelete: SetNull)
+
+  @@index([type, ownerId])
+  @@index([type, visibility])
+  @@map("content")
+  @@schema("platform")
+}
+
+/// A folder of private SQL snippets, owned by one operator.
+model StudioContentFolder {
+  id        String          @id @default(uuid()) @db.Uuid
+  name      String
+  ownerId   String
+  createdAt DateTime        @default(now())
+  items     StudioContent[]
+
+  @@index([ownerId])
+  @@map("content_folders")
+  @@schema("platform")
+}

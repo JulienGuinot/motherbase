@@ -1,0 +1,224 @@
+---
+title: "Database Screens"
+description: "Functions, triggers, extensions, migrations, backups, webhooks and cron — what each screen calls."
+order: 4
+---
+
+Route group: `/p/:id/database/*` (index redirects to `functions`). Source: `apps/studio/src/features/database`.
+
+Every screen that works on one schema has the **schema picker** in its header; the choice is shared across them.
+
+## Tables
+
+`/p/:id/database/tables`, `GET /admin/schema/table-stats?schema=`. The schema picker everywhere reads `GET /admin/schema/schemas`. Every table and view of the schema with its type,
+column count, estimated rows (`reltuples`, shown as **Not analyzed** until the first `ANALYZE`), size on disk and RLS
+state, and an **Open** link into the [Table editor](/docs/studio/tables/). The header filters by name and has the
+**New table** button, which creates the table in the selected schema.
+
+## Schema Visualizer
+
+`/p/:id/database/schemas`. An entity-relationship diagram of one schema: a card per table (primary keys and foreign-key
+columns marked, `!` after a non-nullable type) and a curve per foreign key. Drag a card by its header to rearrange;
+hovering one highlights its relations; **Auto layout** resets. It reads the same schema graph as the Table editor's
+Graph tab, and has the same **New table** button.
+
+## Enumerated types
+
+`/p/:id/database/types`, `GET`/`POST /admin/schema/enums?schema=`, `PATCH`/`DELETE /admin/schema/enums/:name?schema=`.
+
+Each type lists its values and the columns that use it. **New type** takes a name and its values. The values are
+edited in place as chips: renaming a chip and appending or inserting values are turned into the matching
+`ALTER TYPE … RENAME VALUE` / `ADD VALUE … BEFORE|AFTER` steps, sent in order. Chips have no remove button, because
+Postgres cannot drop an enum value (a row may hold it); an edit that would drop or merge values is refused. Dropping a
+type still used by a column is refused with the list of those columns. A type can also be created without leaving the
+Table editor, from the column type picker.
+
+## Indexes
+
+`/p/:id/database/indexes`, `GET /admin/schema/indexes?schema=`. Every index of the schema with its table, columns,
+method, size and definition. **Create index** picks a table, columns, `unique` and a method (`btree`, `hash`, `gist`,
+`gin`, `brin`, `spgist`) and calls `POST /admin/schema/tables/:name/indexes`; drop is
+`DELETE /admin/schema/indexes/:name`. Primary keys and unique constraints create their own indexes.
+
+## Roles
+
+`/p/:id/database/roles`, `GET`/`POST /admin/database/roles`, `PATCH`/`DELETE /admin/database/roles/:name`.
+
+Postgres roles: logins for a tool or service, or groups to grant privileges to. The list shows type, attributes,
+connection count and memberships; `pg_*` predefined roles are hidden behind **Show pg_* roles**, and roles the platform
+relies on are locked. A role has a password (write-only: blank keeps it), a connection limit (`-1` for unlimited) and
+the attributes **Can log in**, **Inherit privileges**, **Create databases**, **Create roles**, **Bypass row level
+security**, **Replication** and **Superuser**. An edit sends an `ALTER ROLE` of only the fields that changed. Renaming
+a role clears an MD5 password; SCRAM passwords survive.
+
+## Queues
+
+`/p/:id/database/queues`, `/admin/queues*` (`apps/server/services/admin/queue.service.ts`). Durable message queues in
+Postgres on `pgmq`, the Supabase Queues model.
+
+| Action | Endpoint |
+|---|---|
+| List, and whether pgmq and the API are on | `GET /admin/queues` |
+| Install pgmq | `POST /admin/queues/enable` |
+| Expose queues through the API | `PUT /admin/queues/expose` with `{ enabled }` |
+| Create | `POST /admin/queues` (`basic`, `unlogged`, or `partitioned` with `pg_partman`; optional RLS) |
+| Drop / purge | `DELETE /admin/queues/:name`, `POST /admin/queues/:name/purge` |
+| Send / read | `POST /admin/queues/:name/messages` with `{ message, delay }`, `POST /admin/queues/:name/read` with `{ vt, qty }` |
+| Archive / delete a message | `POST /admin/queues/:name/messages/:msgId/archive`, `DELETE /admin/queues/:name/messages/:msgId` |
+| Per-role permissions | `GET`/`PUT /admin/queues/:name/permissions` |
+
+A queue's drawer has **Messages**, **Archive** and **Permissions** tabs. **Expose Queues via the API** creates the
+`pgmq_public` schema (`send`, `send_batch`, `read`, `pop`, `archive`, `delete`), so clients reach queues through
+`/rest/v1/rpc` with `client.schema('pgmq_public').rpc('send', { queue_name, message })`; each call runs as the caller,
+so grant roles access per queue under **Permissions**.
+
+## Functions
+
+`functions.api.ts`: `GET /admin/schema/functions` lists Postgres functions with their return types, `POST /admin/schema/functions` creates one, `DELETE /admin/schema/functions/:signature` drops one (addressed by signature, since names overload). The list is and is the source for the function picker used by the trigger editor.
+
+## Triggers
+
+`triggers.api.ts` manages real Postgres triggers (`CREATE TRIGGER … EXECUTE FUNCTION …`). `TriggerEditorModal` composes table and function references (`TriggerTableRef`, `TriggerFnRef`) into a statement. Full semantics: [Postgres triggers](/docs/platform/triggers/).
+
+## Extensions
+
+`extensions.api.ts` lists installed and available extensions (`GET /admin/schema/extensions`), installs one (`POST /admin/schema/extensions/:name` — e.g. `pg_cron`, which the cron screen calls when the extension is missing) and removes one (`DELETE /admin/schema/extensions/:name`).
+
+## Publications
+
+`/p/:id/database/publications`, `GET`/`POST /admin/database/publications`, `PATCH`/`DELETE /admin/database/publications/:name`.
+
+A publication is a list: these tables (or every table), these kinds of change (`insert`, `update`, `delete`,
+`truncate`). It sends nothing by itself. A subscriber (another Postgres, Debezium, a warehouse loader) connects to
+the database over a replication connection, names the publication, and from then on receives every change it covers
+as it commits. **New publication** takes the name, the changes and the tables in one step. Each publication's
+**Connect** button shows the subscriber side: whether Postgres is reachable from outside (and where to publish a
+port if not, under Project Settings → Database access), the role, and a ready
+`CREATE SUBSCRIPTION … PUBLICATION <name>` statement. A banner warns when `wal_level` is not `logical`, in which case publications are defined but stream
+nothing until Postgres restarts with it.
+
+Publications do not drive Motherbase Realtime: which tables broadcast is chosen under Realtime.
+
+## Column privileges
+
+`/p/:id/database/column-privileges`, `GET`/`PUT /admin/database/column-privileges`.
+
+RLS policies decide which rows a role reaches; column privileges decide which columns of those rows. Pick a table and
+a role (`anon` = no signed-in user, `authenticated` = a signed-in user, `service_role` = the secret key, which skips
+RLS but not these grants), then uncheck what the role must not touch. `SELECT` reads the column, `INSERT` gives it a
+value on a new row, `UPDATE` changes it, `REFERENCES` lets a foreign key point at it. The page lists the columns the
+role cannot read. When the role holds a privilege on the whole table, unchecking one column replaces that grant with
+one on every other column, the only way Postgres can hide a single column.
+
+Postgres enforces it: a REST request that names a column the role may not read is refused, and so is `select=*`,
+which expands to every column. Clients of a table with hidden columns select the columns they need.
+
+## Settings
+
+`/p/:id/database/settings`:
+
+- **Connection**: how the API reaches Postgres and whether a port is published.
+- **SQL editor** (`database.sqlEditor`): whether the SQL editor may write. On by default; off, every statement runs in
+  a `READ ONLY` transaction. See [SQL editor](/docs/studio/sql/#enabling-it).
+- **Configuration**: the Postgres parameters worth tuning, `GET`/`PATCH /admin/database/config`, the same list as
+  `motherbase postgres-config`.
+
+## Migrations
+
+Studio-authored, reviewed migrations backed by the `SchemaMigration` table. Migrations can also
+arrive from a connected GitHub repository — see [Git Migrations](/docs/platform/git-migrations/).
+
+| Action | Endpoint |
+|---|---|
+| List | `GET /admin/migrations` |
+| Detail | `GET /admin/migrations/:id` |
+| Diff against live schema | `GET /admin/migrations/diff` |
+| Create | `POST /admin/migrations` with `{ name, upSql, downSql? }` |
+| Apply | `POST /admin/migrations/:id/apply` |
+| Roll back | `POST /admin/migrations/:id/rollback` |
+
+`NewMigrationModal` drafts the SQL, `MigrationDiffModal` shows drift, `MigrationDetailModal` shows the stored statements, `MigrationStatusBadge` renders `pending` / `applied` / `rolledback`. A checksum of `upSql` detects edits made after creation. See the [data model](/docs/architecture/data-model/).
+
+An empty `downSql` is sent as `undefined` rather than an empty string — a migration is either reversible or explicitly not.
+
+## Backups
+
+| Action | Endpoint |
+|---|---|
+| List | `GET /admin/backups/list` |
+| Read schedule config | `GET /admin/backups/config` |
+| Save schedule config | `PUT /admin/backups/config` |
+| Run now | `POST /admin/backups/run` |
+| Download | `GET /admin/backups/download?file=` (a local dump) or `?key=` (an offsite object, fetched locally first) |
+| Upload a backup file back | `POST /admin/backups/upload` (multipart `file`) — every restore reads the server's backup directory, so a downloaded backup is restorable again only this way |
+| Unpack a full-project archive | `POST /admin/backups/extract` `{ file }` → its database dump and storage files |
+| Full export | `POST /admin/backups/export-full`: the database dump plus every storage object, as one tar |
+| Restore | `POST /admin/backups/restore` |
+
+Restore takes either a local file (`{ file }`) or an offsite object (`{ key }`), **plus** `confirm: 'RESTORE'`. `RestoreModal` is what collects that confirmation.
+
+<Warning>
+Restoring replaces the project's database contents. The confirmation string is required by the API itself, not just the UI, so an accidental API call cannot trigger it.
+</Warning>
+
+Schedule, retention and offsite settings live in the `backup.schedule` settings group; see [backups and restore](/docs/self-hosting/backups-and-restore/).
+
+## Webhooks
+
+`webhooks.api.ts` manages `Webhook` rows and their `events[]`, and can send a test delivery returning `{ ok, status, ms }`. `WebhookDrawer` shows recent `WebhookDelivery` rows.
+
+| Action | Endpoint |
+|---|---|
+| List / create | `GET` / `POST /admin/webhooks` |
+| The events a webhook can subscribe to | `GET /admin/webhooks/events` |
+| Update / delete | `PATCH` / `DELETE /admin/webhooks/:id` |
+| Recent deliveries | `GET /admin/webhooks/:id/deliveries` |
+| Test delivery | `POST /admin/webhooks/:id/test` |
+ Matching rules and payloads: [Events & webhooks](/docs/platform/events-and-webhooks/).
+
+## Cron
+
+Two kinds of recurring work on one screen:
+
+| Kind | Endpoints |
+|---|---|
+| `pg_cron` jobs | `GET /admin/cron/pg/jobs`, `POST /admin/cron/pg/jobs`, `PATCH /admin/cron/pg/jobs/:jobid` (`active`), `DELETE /admin/cron/pg/jobs/:jobid`, `GET /admin/cron/pg/jobs/:jobid/runs` |
+| Application jobs | `GET /admin/cron/app/jobs` |
+
+The `pg_cron` listing returns `extensionMissing`, and the screen offers to install the extension (`POST /admin/schema/extensions/pg_cron`) instead of failing. `CronRunDrawer` shows run history with `JobStatusIcon`. See [cron jobs](/docs/platform/cron-jobs/).
+
+## Realtime
+
+`/p/:id/realtime` (the screen lives in `features/database`), backed by `realtime.api.ts`. Three tabs:
+
+- **Inspector**: live channels (`GET /admin/realtime/channels`), the message log (`GET /admin/realtime/events`), a
+  channel's presence (`GET /admin/realtime/channels/:channel/presence`), and the health of the durable delivery queue
+  behind realtime (`platform.realtime_outbox`). `RealtimeConfigPanel` edits which tables broadcast
+  (`GET`/`PATCH /admin/realtime/config`, plus `PATCH /admin/realtime/config/respect-rls`).
+- **Policies**: the RLS policies on `realtime.messages` that authorize [private channels](/docs/platform/realtime/#private-channels)
+  (`GET`/`POST /admin/realtime/policies`, `DELETE /admin/realtime/policies/:name`), with templates to start from.
+- **Settings**: `realtime.limits` (checked when a client subscribes, **Private channels only** included) and
+  `realtime.retention` (prunes delivered and failed outbox events; pending ones are never removed).
+
+See [Realtime](/docs/platform/realtime/).
+
+## RLS access matrix
+
+The Studio screen is **Authentication → Role Access** (`/p/:id/auth/access`). It
+shows, per table, what `anon` and `authenticated` can read, insert, update and
+delete according to the real PostgreSQL policies and grants. It is a read-only
+view (`GET /admin/rls/access`); it does not execute arbitrary SQL and does not change policies. The **Policies** screen
+next to it turns RLS on or off per table (`POST /admin/rls/tables/:table/rls`) from the per-table state and policies of `GET /admin/rls/tables`, applies a preset
+(`POST /admin/rls/tables/:table/preset`) and edits policies (`/admin/rls/policies`).
+
+The query simulator still exists as an operator/automation capability, but is not a
+Studio page. The CLI and MCP expose it through the admin API:
+
+```text
+POST /admin/rls/simulate       { sql, ...caller, limit }
+POST /admin/rls/simulate/diff  { sql, left, right }
+```
+
+It runs a query as a chosen caller and always rolls the transaction back. See the
+[RLS guide](/docs/platform/rls/) and [MCP Server](/docs/platform/mcp/) for the
+CLI/MCP workflow.

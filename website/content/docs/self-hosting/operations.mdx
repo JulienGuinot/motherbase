@@ -1,0 +1,155 @@
+---
+title: Operations
+description: Operate local and VPS Motherbase stacks with the scripts under deploy.
+order: 5
+---
+
+The scripts in `deploy/` determine local versus VPS mode from `BASE_HOST` in the repository `.env`. Empty or `localhost[:port]` means local; any other value means VPS. Their shared behavior is implemented in `deploy/lib.sh`.
+
+For installation and normal platform redeployment, use `./setup.sh`. Use these helpers for targeted operations and maintenance.
+
+## Command summary
+
+| Script | Flags or arguments | What it actually does |
+|--------|--------------------|-----------------------|
+| `deploy/start.sh` | `--build`, `--seed`, `-h`/`--help` | Starts Traefik first in VPS mode, then starts the selected stack; optionally builds and seeds. |
+| `deploy/stop.sh` | `--with-proxy`, `-h`/`--help` | Stops every VPS project, then the Console; optionally stops production Traefik. Local mode stops the root Compose stack. |
+| `deploy/restart.sh` | `--build`, `--seed`, `-h`/`--help` | Runs `stop.sh`, then forwards the selected flags to `start.sh`. |
+| `deploy/status.sh` | none | Runs `docker compose ps` for the selected stack. |
+| `deploy/logs.sh` | optional service, then Compose log options | Follows Console logs in VPS mode or API logs locally unless a service is supplied. |
+| `deploy/reset.sh` | `--yes`/`-y`, `--keep-images`, `-h`/`--help` | Destructively removes project, Console, Traefik, and legacy stack state, then removes generated environment files. It does not restart. |
+| `deploy/docker-cleanup.sh` | none | Sourced function library for removing Compose containers and volumes by Docker labels or volume attachment. |
+| `deploy/new-project.sh` | none | Prints a deprecation error and exits with status 1. Projects must be created from the Console. |
+| `deploy/build-images.sh` | none | Builds dependency, API, Console, orchestrator, and PostgreSQL images in sequence. |
+| `deploy/dev-up.sh` | none | Starts dev Traefik, then runs the Console on the host with `CONSOLE_MODE=dev npm run console:dev`. |
+
+Unknown options cause `start.sh`, `stop.sh`, `restart.sh`, and `reset.sh` to exit with an error.
+
+## Start
+
+```bash
+./deploy/start.sh
+./deploy/start.sh --build
+./deploy/start.sh --seed
+./deploy/start.sh --build --seed
+```
+
+In local mode, `deploy/lib.sh` selects the root `docker-compose.yml`. In VPS mode it selects `deploy/console/docker-compose.yml` with `deploy/console/.env`, and `start_proxy_if_needed` starts `deploy/traefik/docker-compose.yml` first.
+
+`--build` adds `--build` to Compose `up -d`. `--seed` repeatedly runs `node apps/server/dist/prisma/seed.js` inside the local API, up to 30 times at two-second intervals. Seed is explicitly skipped in VPS Console mode because projects are seeded on creation.
+
+Use `start.sh` to resume a stopped platform with its existing images and volumes. Use `./setup.sh` when the shared images or generated configuration must also be reconciled.
+
+## Stop
+
+```bash
+./deploy/stop.sh
+./deploy/stop.sh --with-proxy
+```
+
+In VPS mode, `stop.sh` iterates every `/srv/projects/<name>/.env.prod` and runs the production project Compose file with `down --remove-orphans`. It then brings down the Console. It does not pass `-v`, so named project volumes remain.
+
+`--with-proxy` also brings down production Traefik. It has no extra effect in local mode.
+
+<Note>
+Stopping the VPS platform stops every discovered project, not just the Console. Starting it again starts the Console, but `deploy/start.sh` does not iterate and restart the project stacks.
+</Note>
+
+## Restart
+
+```bash
+./deploy/restart.sh
+./deploy/restart.sh --build --seed
+```
+
+`restart.sh` is exactly a full `stop.sh` followed by `start.sh`. Because its stop call does not include `--with-proxy`, Traefik stays running. The VPS project-start caveat from the previous section also applies.
+
+## Status
+
+```bash
+./deploy/status.sh
+```
+
+The command reports the root stack in local mode and the Console Compose project in VPS mode. It does not enumerate the independent per-project Compose projects.
+
+For a production project, use its generated environment explicitly:
+
+```bash
+docker compose -f deploy/docker-compose.prod.yml \
+  --env-file /srv/projects/<name>/.env.prod -p <name> ps
+```
+
+## Logs
+
+```bash
+./deploy/logs.sh --help
+./deploy/logs.sh
+./deploy/logs.sh orchestrator --tail 100
+./deploy/logs.sh console --since 10m
+```
+
+The default service is `api` locally and `console` in VPS mode. If the first argument does not start with `-`, it becomes the service name. Remaining arguments are passed after the service to `docker compose logs -f`.
+
+This helper follows the selected root or Console stack. It does not automatically target a project stack. Project runtime logs are available through the Console, `motherbase projects logs <name>`, or an explicit production Compose command.
+
+## Reset
+
+```bash
+./deploy/reset.sh
+./deploy/reset.sh --yes
+./deploy/reset.sh --yes --keep-images
+```
+
+Without `--yes`, the script asks for destructive confirmation. It then:
+
+1. In VPS mode, runs each project down with `-v` and removes its project directory.
+2. Brings down both production and dev Console and Traefik definitions with `-v` when their environment files allow it.
+3. Uses label-based cleanup for Compose projects named `console` and `traefik`.
+4. Brings down the legacy/root stack with `-v` and removes leftover volumes ending in `_db_data`, `_minio_data`, or `_console_projects`.
+5. Unless `--keep-images` is set, removes exactly `motherbase-api:1.0.0` and `motherbase-console:1.0.0`.
+6. Removes the `traefik_proxy` network.
+7. Removes `.env`, `deploy/console/.env`, `deploy/traefik/.env`, `.dev-projects`, and the contents of `/srv/projects`.
+
+The script does not remove the locally built dependency, orchestrator, or PostgreSQL images, and it does not delete the bind-mounted `deploy/traefik/acme` directory.
+
+<Warning>
+`deploy/reset.sh` returns the generated runtime state to a fresh-checkout condition and does not restart anything. Run `./setup.sh` only after confirming the data loss is intended.
+</Warning>
+
+## Docker cleanup library
+
+`deploy/docker-cleanup.sh` exposes four helpers used by setup and reset:
+
+- `remove_containers_by_project` removes containers carrying a matching `com.docker.compose.project` label.
+- `remove_volumes_by_project` removes volumes with the same project label.
+- `remove_compose_project_data` calls both.
+- `remove_volume_stack_data` resolves a volume's Compose project label; without one, it removes containers attached to that volume and then the volume.
+
+It has no command-line parser and performs nothing when executed without calling one of its functions.
+
+## Build images
+
+```bash
+./deploy/build-images.sh
+```
+
+The script enables BuildKit and builds:
+
+1. `motherbase-deps:1.0.0` from `deploy/deps.Dockerfile`;
+2. `API_IMAGE`, default `motherbase-api:1.0.0`, from the root `Dockerfile`;
+3. `CONSOLE_IMAGE`, default `motherbase-console:1.0.0`;
+4. `ORCHESTRATION_IMAGE`, default `motherbase-orchestrator:1.0.0`, using `DOCKER_CLI_IMAGE`, default `docker:27-cli`;
+5. `motherbase-postgres:1.0.0` from `deploy/postgres.Dockerfile`.
+
+Unlike the build function inside `setup.sh`, this helper does not accept `MOTHERBASE_IMAGE_TAG`, does not pin external images, and does not build API and Console in parallel.
+
+## Local host development
+
+`deploy/dev-up.sh` creates `traefik_proxy`, starts the HTTP-only dev Traefik, and then runs the Console directly on the host with npm. It therefore requires the repository dependencies and a compatible host Node.js, unlike `./setup.sh`.
+
+Use it for interactive source development, not for a container-only installation.
+
+## Related
+
+- [Platform Console projects](/docs/console/projects/) — the same lifecycle actions from the UI and API.
+- [Troubleshooting](/docs/self-hosting/troubleshooting/) — failure modes and their diagnosis commands.

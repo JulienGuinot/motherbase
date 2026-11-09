@@ -1,0 +1,322 @@
+# Production compose for ONE project (one isolated stack).
+#
+# The Platform Console runs this file with a per-project .env.prod file.
+# Postgres, MinIO, and API containers are isolated per COMPOSE_PROJECT_NAME.
+
+services:
+  db:
+    image: ${POSTGRES_IMAGE:-motherbase-postgres:1.0.0}
+    build:
+      context: ..
+      dockerfile: deploy/postgres.Dockerfile
+    command: ['postgres', '-c', 'shared_preload_libraries=pg_cron,pg_stat_statements', '-c', 'cron.database_name=app']
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: app
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    deploy:
+      resources:
+        limits:
+          cpus: "${DB_CPUS:-0.5}"
+          memory: ${DB_MEM:-512M}
+    networks:
+      - internal
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /var/run/postgresql
+    # The official entrypoint needs ownership capabilities to initialize a fresh
+    # named volume, so db intentionally does not use cap_drop: ALL.
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  minio:
+    image: ${MINIO_IMAGE:?MINIO_IMAGE must be pinned by digest in production}
+    restart: unless-stopped
+    # The upstream-source image does not chown a fresh /data volume. It needs
+    # UID 0 for volume writes; all Linux capabilities are dropped below.
+    user: "0:0"
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?MINIO_ROOT_USER is required}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD is required}
+      MINIO_BROWSER_REDIRECT_URL: https://${MINIO_CONSOLE_DOMAIN:-minio.localhost}
+      MINIO_SERVER_URL: https://${STORAGE_DOMAIN:?STORAGE_DOMAIN is required}
+    volumes:
+      - minio_data:/data
+    deploy:
+      resources:
+        limits:
+          cpus: "${MINIO_CPUS:-0.25}"
+          memory: ${MINIO_MEM:-256M}
+    networks:
+      - internal
+      - traefik_proxy
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -qO- http://localhost:9000/minio/health/live >/dev/null']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=traefik_proxy
+      - traefik.http.routers.${COMPOSE_PROJECT_NAME}-storage.rule=Host(`${STORAGE_DOMAIN}`)
+      - traefik.http.routers.${COMPOSE_PROJECT_NAME}-storage.entrypoints=websecure
+      - traefik.http.routers.${COMPOSE_PROJECT_NAME}-storage.tls.certresolver=${CERT_RESOLVER:-letsencrypt}
+      - traefik.http.routers.${COMPOSE_PROJECT_NAME}-storage.service=${COMPOSE_PROJECT_NAME}-storage
+      - traefik.http.services.${COMPOSE_PROJECT_NAME}-storage.loadbalancer.server.port=9000
+      - traefik.http.routers.${COMPOSE_PROJECT_NAME}-minio.rule=Host(`${MINIO_CONSOLE_DOMAIN:-minio.invalid}`)
+      - traefik.http.routers.${COMPOSE_PROJECT_NAME}-minio.entrypoints=websecure
+      - traefik.http.routers.${COMPOSE_PROJECT_NAME}-minio.tls.certresolver=${CERT_RESOLVER:-letsencrypt}
+      - traefik.http.routers.${COMPOSE_PROJECT_NAME}-minio.service=${COMPOSE_PROJECT_NAME}-minio
+      - traefik.http.services.${COMPOSE_PROJECT_NAME}-minio.loadbalancer.server.port=9001
+
+  minio-init:
+    image: ${MINIO_MC_IMAGE:?MINIO_MC_IMAGE must be pinned by digest in production}
+    depends_on:
+      minio:
+        condition: service_healthy
+    networks:
+      - internal
+    entrypoint: >
+      /bin/sh -c "
+      set -e;
+      mc alias set local http://minio:9000 $${MINIO_ROOT_USER} $${MINIO_ROOT_PASSWORD};
+      mc mb --ignore-existing local/$${S3_BUCKET};
+      mc anonymous set none local/$${S3_BUCKET} || true;
+      mc mb --ignore-existing local/$${S3_PUBLIC_BUCKET:-public};
+      mc anonymous set download local/$${S3_PUBLIC_BUCKET:-public} || true;
+      mc quota set local/$${S3_BUCKET} --size $${DISK_GB}GiB;
+      mc quota set local/$${S3_PUBLIC_BUCKET:-public} --size $${DISK_GB}GiB;
+      echo 'MinIO buckets ready: '$${S3_BUCKET}' (private) '$${S3_PUBLIC_BUCKET:-public}' (public)';
+      "
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      S3_BUCKET: ${S3_BUCKET:-uploads}
+      S3_PUBLIC_BUCKET: ${S3_PUBLIC_BUCKET:-public}
+      # The project's disk quota (console Resource quotas), enforced here as a
+      # hard MinIO bucket quota: uploads past it are refused. ponytail: each
+      # bucket gets the whole quota, so files can reach 2x in the worst case;
+      # the console meters every volume against the quota and flags the excess.
+      DISK_GB: ${DISK_GB:-10}
+      # mc keeps its config under $HOME; the root filesystem is read-only.
+      HOME: /tmp
+    restart: 'no'
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+  # Runs edge functions: one Deno process per function, memory-capped and
+  # killed at its timeout. It sits on the `edge` network with the API and
+  # nothing else, so operator code has no route to Postgres or MinIO.
+  edge-runtime:
+    image: ${EDGE_RUNTIME_IMAGE:-motherbase-edge-runtime:1.0.0}
+    build:
+      context: ..
+      dockerfile: deploy/edge-runtime.Dockerfile
+    restart: unless-stopped
+    environment:
+      EDGE_RUNTIME_PORT: 9000
+      DENO_DIR: /tmp/deno-dir
+      EDGE_RUNTIME_TOKEN: ${EDGE_RUNTIME_TOKEN:?EDGE_RUNTIME_TOKEN is required}
+      # Functions may call this project's own API, and only that private address.
+      EDGE_ALLOWED_INTERNAL_ORIGINS: http://api:5001
+    deploy:
+      resources:
+        limits:
+          cpus: "${EDGE_RUNTIME_CPUS:-0.5}"
+          memory: ${EDGE_RUNTIME_MEM:-768M}
+    networks:
+      - edge
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ['CMD', 'deno', 'eval', "const r = await fetch('http://127.0.0.1:9000/health'); if (!r.ok) Deno.exit(1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    image: ${API_IMAGE:-motherbase-api:1.0.0}
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      # Started, not healthy: the API serves everything else without it.
+      edge-runtime:
+        condition: service_started
+    environment:
+      NODE_ENV: production
+      PORT: 5001
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@db:5432/app?schema=public
+      # Reported by Studio on the Connect page so an operator can build an
+      # external connection string. Empty when the port was never allocated.
+      DB_PORT: ${DB_PORT:-}
+      DB_BIND: ${DB_BIND:-127.0.0.1}
+      # This stack's database is the API's alone, so Project Settings may
+      # rewrite its pg_hba.conf and TLS setup (network restrictions, SSL
+      # enforcement). Anywhere this is unset those settings are stored only.
+      DATABASE_ACCESS_MANAGED: "true"
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+      CONFIG_ENCRYPTION_KEY: ${CONFIG_ENCRYPTION_KEY:?CONFIG_ENCRYPTION_KEY is required}
+      PLATFORM_SERVICE_TOKEN: ${PLATFORM_SERVICE_TOKEN:?PLATFORM_SERVICE_TOKEN is required}
+      ACCESS_TOKEN_EXP_MIN: ${ACCESS_TOKEN_EXP_MIN:-15}
+      REFRESH_TOKEN_EXP_DAYS: ${REFRESH_TOKEN_EXP_DAYS:-30}
+      # Every request arrives from Traefik, so without this req.ip is the proxy's
+      # container address and the whole stack shares one rate-limit bucket: one
+      # noisy client 429s everyone. 1 = trust exactly the hop in front.
+      TRUST_PROXY: ${TRUST_PROXY:-1}
+      BASE_HOST: ${PROJECT_DOMAIN:?PROJECT_DOMAIN is required}
+      CORS_ORIGINS: ${CORS_ORIGINS:-https://${PROJECT_DOMAIN}}
+      STORAGE_DRIVER: s3
+      S3_ENDPOINT: http://minio:9000
+      S3_REGION: ${S3_REGION:-us-east-1}
+      S3_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+      S3_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+      S3_BUCKET: ${S3_BUCKET:-uploads}
+      S3_PUBLIC_BUCKET: ${S3_PUBLIC_BUCKET:-public}
+      S3_PUBLIC_URL: https://${STORAGE_DOMAIN}/${S3_PUBLIC_BUCKET:-public}
+      # Signed URLs are fetched by browsers, so they are signed for the storage
+      # domain Traefik routes to MinIO's S3 port, not for http://minio:9000.
+      S3_PRESIGN_ENDPOINT: https://${STORAGE_DOMAIN}
+      EMAIL_SMTP_HOST: ${EMAIL_SMTP_HOST:-}
+      EMAIL_SMTP_USERNAME: ${EMAIL_SMTP_USERNAME:-}
+      EMAIL_SMTP_PASSWORD: ${EMAIL_SMTP_PASSWORD:-}
+      FIREBASE_PROJECT_ID: ${FIREBASE_PROJECT_ID:-}
+      FIREBASE_CLIENT_EMAIL: ${FIREBASE_CLIENT_EMAIL:-}
+      FIREBASE_PRIVATE_KEY: ${FIREBASE_PRIVATE_KEY:-}
+      APNS_KEY: ${APNS_KEY:-}
+      APNS_KEY_ID: ${APNS_KEY_ID:-}
+      APNS_TEAM_ID: ${APNS_TEAM_ID:-}
+      APNS_BUNDLE_ID: ${APNS_BUNDLE_ID:-}
+      APNS_PRODUCTION: ${APNS_PRODUCTION:-true}
+      # Whether the SQL editor may write is a project setting
+      # (Database > Settings > SQL editor), not an env var.
+      CONSOLE_SQL_ENABLED: ${CONSOLE_SQL_ENABLED:-true}
+      CONSOLE_LOG_BUFFER_SIZE: ${CONSOLE_LOG_BUFFER_SIZE:-500}
+      LOG_PERSISTENCE_ENABLED: ${LOG_PERSISTENCE_ENABLED:-true}
+      LOG_RETENTION_DAYS: ${LOG_RETENTION_DAYS:-7}
+      LOG_MAX_ROWS: ${LOG_MAX_ROWS:-2000000}
+      EDGE_RUNTIME_URL: http://edge-runtime:9000
+      EDGE_RUNTIME_TOKEN: ${EDGE_RUNTIME_TOKEN:?EDGE_RUNTIME_TOKEN is required}
+      EDGE_RUNTIME_CALLBACK_URL: http://api:5001
+      # Read from the project's .env.prod like everything above. Left out, a
+      # Console project could never configure the server-to-server edge token
+      # or raise the upload ceiling, whatever its .env.prod said.
+      EDGE_INVOKE_TOKEN: ${EDGE_INVOKE_TOKEN:-}
+      EDGE_PUBLIC_INVOKE_ENABLED: ${EDGE_PUBLIC_INVOKE_ENABLED:-false}
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-25}
+    deploy:
+      resources:
+        limits:
+          cpus: "${API_CPUS:-0.5}"
+          memory: ${API_MEM:-512M}
+    networks:
+      internal:
+      edge:
+      traefik_proxy:
+        aliases:
+          - ${COMPOSE_PROJECT_NAME}-api
+    volumes:
+      - api_backups:/app/backups
+      # Assistant conversation history. The root filesystem is read-only, so
+      # without this mount the store falls back to memory and threads vanish on
+      # every restart (the API still boots, see openThreadStore).
+      - api_data:/app/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    # The three the entrypoint needs, and only for as long as it is root:
+    # CHOWN to make the two volumes above writable by `node`, SETUID/SETGID for
+    # the `setpriv` that drops to it. Capabilities are cleared by that uid
+    # change, so the server itself holds none -- which is the point of
+    # deploy/api-entrypoint.sh. Without them `setpriv` fails with EPERM and the
+    # container exits 127 before the server is ever reached.
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ['CMD', 'node', '-e', "fetch('http://127.0.0.1:5001/api/health-check').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=traefik_proxy
+      # API_HOST_RULE is written by the Console when a custom domain or vanity
+      # subdomain is activated: `Host(a) || Host(b)`. Every router below uses
+      # it, so the deny router covers the extra hostnames too, and the cert
+      # resolver requests a certificate for each of them.
+      - traefik.http.routers.${COMPOSE_PROJECT_NAME}-api.rule=${API_HOST_RULE:-Host(`${PROJECT_DOMAIN}`)}
+      - traefik.http.routers.${COMPOSE_PROJECT_NAME}-api.entrypoints=websecure
+      - traefik.http.routers.${COMPOSE_PROJECT_NAME}-api.tls.certresolver=${CERT_RESOLVER:-letsencrypt}
+      - traefik.http.routers.${COMPOSE_PROJECT_NAME}-api.priority=100
+      - traefik.http.routers.${COMPOSE_PROJECT_NAME}-api.service=${COMPOSE_PROJECT_NAME}-api
+      - traefik.http.services.${COMPOSE_PROJECT_NAME}-api.loadbalancer.server.port=5001
+      - traefik.http.routers.${COMPOSE_PROJECT_NAME}-ws.rule=(${API_HOST_RULE:-Host(`${PROJECT_DOMAIN}`)}) && PathPrefix(`/ws`)
+      - traefik.http.routers.${COMPOSE_PROJECT_NAME}-ws.entrypoints=websecure
+      - traefik.http.routers.${COMPOSE_PROJECT_NAME}-ws.tls.certresolver=${CERT_RESOLVER:-letsencrypt}
+      - traefik.http.routers.${COMPOSE_PROJECT_NAME}-ws.priority=150
+      - traefik.http.routers.${COMPOSE_PROJECT_NAME}-ws.service=${COMPOSE_PROJECT_NAME}-ws
+      - traefik.http.services.${COMPOSE_PROJECT_NAME}-ws.loadbalancer.server.port=5001
+      - traefik.http.routers.${COMPOSE_PROJECT_NAME}-deny.rule=(${API_HOST_RULE:-Host(`${PROJECT_DOMAIN}`)}) && (PathPrefix(`/api/admin`) || PathPrefix(`/console`) || PathPrefix(`/admin`) || PathPrefix(`/internal`))
+      - traefik.http.routers.${COMPOSE_PROJECT_NAME}-deny.entrypoints=websecure
+      - traefik.http.routers.${COMPOSE_PROJECT_NAME}-deny.tls.certresolver=${CERT_RESOLVER:-letsencrypt}
+      - traefik.http.routers.${COMPOSE_PROJECT_NAME}-deny.priority=200
+      - traefik.http.routers.${COMPOSE_PROJECT_NAME}-deny.service=${COMPOSE_PROJECT_NAME}-api
+      - traefik.http.routers.${COMPOSE_PROJECT_NAME}-deny.middlewares=${COMPOSE_PROJECT_NAME}-deny
+      - traefik.http.middlewares.${COMPOSE_PROJECT_NAME}-deny.ipAllowList.sourceRange=127.0.0.1/32
+
+volumes:
+  api_backups:
+  api_data:
+  db_data:
+  minio_data:
+
+networks:
+  internal:
+    driver: bridge
+  # Not internal: functions need the internet (npm/jsr imports, third-party APIs).
+  edge:
+    driver: bridge
+  traefik_proxy:
+    external: true
+    name: traefik_proxy

@@ -1,0 +1,11 @@
+{
+  /* What ships in the image.
+   *
+   * The base config deliberately covers `tests/` so the editor, eslint and
+   * `tsc --noEmit` all type-check them. The *build* must not: a test is not
+   * part of the runtime, and a broken test file must never be able to fail
+   * `docker build`.
+   */
+  "extends": "./tsconfig.json",
+  "exclude": ["node_modules", "dist", "tests", "scripts"]
+}

@@ -1,0 +1,73 @@
+---
+title: "Workspace Overview"
+description: "Every workspace in the monorepo, what it publishes, what depends on what, and how it is built and tested."
+order: 1
+---
+
+Root `package.json` declares `workspaces: ["apps/*", "packages/*"]`. Turborepo (`turbo.json`) drives `build`, `test` and `lint` across them.
+
+## The workspaces
+
+| Path | Package | Published | Purpose |
+|---|---|---|---|
+| `apps/server` | `@motherbase/server` | no | Project API **and** Platform Console |
+| `apps/studio` | `studio` | no | Next.js 15 + React 19 admin app |
+| `packages/client` | `@motherbase/client` | yes (npm) | Supabase-shaped SDK, with Better Auth's client as `auth` |
+| `packages/ssr` | `@motherbase/ssr` | yes (npm) | Cookie-based SSR helpers for the SDK |
+| `packages/ui` | `@motherbase/ui` | yes (npm) | Configurable React auth, account and upload components |
+| `packages/create-app` | `create-motherbase-app` | yes (npm) | Next.js and React app scaffolder |
+| `packages/cli` | `@motherbase/cli` | yes (npm) | Operator CLI (`motherbase`) |
+| `packages/ai` | `@motherbase/ai` | no | Provider-agnostic agent loop |
+| `packages/contracts` | `@motherbase/contracts` | yes (npm) | Shared route paths and types; a runtime dependency of the SDK |
+
+## Dependency direction
+
+```text
+apps/studio ───────────────┐
+                           ▼
+apps/server ──▶ @motherbase/ai
+      │
+      └──────▶ @motherbase/contracts ◀── @motherbase/client ◀── @motherbase/ssr
+                                                  ▲
+                                                  └──────────── @motherbase/ui
+```
+
+`@motherbase/contracts` is the only package both the server and the SDK depend on. It holds the route paths and payload shapes that must not drift between them — change a path there and both sides move together.
+
+## Commands
+
+```bash
+npm run install:all      # npm ci --legacy-peer-deps
+npm run build            # turbo run build
+npm run test             # turbo run test
+npm run lint             # turbo run lint
+
+npm run dev              # project API
+npm run console:dev      # Platform Console
+npm run studio:dev       # Studio against a live API
+npm run studio:mock      # Studio against mocks
+npm run sdk:build        # build @motherbase/client only
+npm run cli -- <args>    # run the CLI from source
+```
+
+Node `>=22.12.0` is enforced by a `preinstall` hook (`scripts/check-node-version.cjs`), matching `.nvmrc` / `.node-version`.
+
+## Module format
+
+`@motherbase/client`, `@motherbase/ssr` and `@motherbase/ai` are TypeScript compiled to `dist/`, with `main` → `dist/index.js` and `types` → `dist/index.d.ts`. Internal imports carry the `.js` extension (`./http.js`) because the output is consumed as real ES modules.
+
+## Publishing
+
+The SDK release process is documented in `docs/publishing-the-sdk.md` in the backend repo.
+
+## Per-package pages
+
+- [`@motherbase/client`](/docs/packages/client/) — SDK internals
+- [`@motherbase/ssr`](/docs/packages/ssr/) — SSR and Next.js
+- [`@motherbase/ui`](/docs/packages/ui/) — React authentication and account components
+- [`create-motherbase-app`](/docs/packages/create-app/) — frontend scaffolding
+- [`@motherbase/ai`](/docs/packages/ai/) — agent loop and providers
+- [`@motherbase/contracts`](/docs/packages/contracts/) — shared contracts
+- [`@motherbase/cli`](/docs/packages/cli/) — CLI internals
+
+For SDK **usage** (as opposed to internals) see the [SDK reference](/docs/reference/sdk/); for CLI usage, the [CLI docs](/docs/cli/overview/).

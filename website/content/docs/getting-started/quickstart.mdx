@@ -1,0 +1,367 @@
+---
+title: "Quickstart"
+description: "Install Motherbase locally, create a project, then sign a user up, query a table, stream changes, upload a file, and call a function from your app."
+order: 2
+---
+
+You need **Docker** for the backend and **Node.js 18+** for your app and the CLI. Postgres,
+object storage, the edge runtime and the API all run in containers.
+
+## 1. Install the Platform Console
+
+The Console is the control plane: it creates and runs projects, each with its own
+database, storage, auth and API, and it serves **Project Studio**, the admin UI you use
+to manage a project.
+
+```bash
+git clone https://github.com/JulienGuinot/motherbase.git
+cd motherbase
+./setup.sh
+```
+
+Pick `L` for local mode. The script writes the environment files, generates secrets,
+builds the images, starts Traefik and the Console, and prints the Console credentials:
+`admin@example.com` and a generated password, **shown once**, so copy it. The first run
+builds everything, so give it a few minutes.
+
+| What | Where |
+|---|---|
+| Platform Console and Project Studio | `http://localhost:5500` (the app lives under `/studio`) |
+| Your projects | `http://<name>.localhost` |
+
+Installing on a server instead is the same script in VPS mode; see
+[Install on a VPS](#install-on-a-vps) below.
+
+## 2. Create a project
+
+In the Console, choose **New project**:
+
+| Field | Value for this guide |
+|---|---|
+| **Project name** | `notes` |
+| **API domain** | leave empty: in local mode it fills itself as `notes.localhost` |
+| **Advanced → Storage domain** | leave empty: it defaults to `notes-storage.localhost` |
+| **Advanced → Extra CORS origins** | `http://localhost:3000`, the origin your app runs on |
+
+When it is running, open its **Project Studio** from the Console. The API answers at
+`http://notes.localhost`; `http://notes.localhost/api/health-check` returns `200` once it
+is ready.
+
+## 3. Create a table and lock it down
+
+In Project Studio, open **SQL Editor** and run:
+
+```sql
+CREATE TABLE notes (
+  id         uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  body       text NOT NULL,
+  owner_id   text NOT NULL DEFAULT auth.uid(),
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
+
+-- Signed-in users see, write, change and delete their own rows. Nothing else.
+CREATE POLICY "own notes" ON notes
+  FOR ALL TO authenticated
+  USING (owner_id = auth.uid())
+  WITH CHECK (owner_id = auth.uid());
+```
+
+That is the whole backend for this table. It is now served at `/rest/v1/notes`,
+and Postgres itself decides which rows each caller can touch:
+
+- `owner_id` defaults to `auth.uid()`, the id of the signed-in caller, so the
+  client never sends it and cannot forge it.
+- There is no policy for `anon`, so a signed-out request sees nothing and writes
+  nothing.
+- `WITH CHECK` stops a user from inserting a row for someone else, or moving one
+  of theirs to another owner.
+
+More patterns (public read, organization-scoped, admin-only) are in
+[Row Level Security](/docs/platform/rls/).
+
+## 4. Connect your app
+
+Open **Project Studio → Connect** and copy the API URL and the publishable key.
+
+```bash
+npm install @motherbase/client
+npm install socket.io-client   # only needed for realtime
+```
+
+```env
+# .env.local
+NEXT_PUBLIC_MOTHERBASE_URL=http://notes.localhost
+NEXT_PUBLIC_MOTHERBASE_KEY=mb_publishable_...
+```
+
+```ts
+// lib/motherbase.ts
+import { createClient, localStorageStorage } from '@motherbase/client'
+
+export const client = createClient(
+  process.env.NEXT_PUBLIC_MOTHERBASE_URL!,
+  process.env.NEXT_PUBLIC_MOTHERBASE_KEY,
+  { storage: localStorageStorage() },
+)
+```
+
+The publishable key is safe in a browser bundle: it identifies the project, and
+row level security does the authorizing. It is optional until the project turns on
+key enforcement. The **secret** key (`mb_secret_...`) bypasses RLS and belongs on a
+server only. See [API Keys](/docs/platform/api-keys/).
+
+Using Next.js, Nuxt, SvelteKit or Expo? The only difference is where the session is
+stored; [Framework Quickstarts](/docs/getting-started/frameworks/) has the wiring for
+each.
+
+## 5. Sign a user up
+
+```ts
+const { data, error } = await client.auth.signUp.email({
+  email: 'ada@example.com',
+  password: 'correct-horse-battery',
+  name: 'Ada',
+})
+
+// Later sessions
+await client.auth.signIn.email({ email: 'ada@example.com', password: 'correct-horse-battery' })
+```
+
+The session is stored through the adapter you passed to `createClient`, and every
+following call (`from()`, storage, functions, realtime) sends it. Every call
+resolves to `{ data, error }` instead of throwing, so check `error` rather than
+wrapping calls in `try`.
+
+To render signed-in and signed-out states:
+
+```ts
+const { data: { subscription } } = client.auth.onAuthStateChange((event, session) => {
+  // 'INITIAL_SESSION' fires once on load, even for a signed-out visitor
+  setUser(session?.user ?? null)
+})
+```
+
+`client.auth` is [Better Auth](https://www.better-auth.com/docs)'s client: magic
+links, OTP, social providers, passkeys and two-factor are all there once enabled in
+**Project Studio → Authentication**. See [Auth](/docs/platform/auth/).
+
+## 6. Read and write rows
+
+```ts
+type Note = { id: string; body: string; owner_id: string; created_at: string }
+
+// Insert. `.select()` returns the row as stored, with its defaults filled in.
+const { data: created, error } = await client
+  .from<Note>('notes')
+  .insert({ body: 'Buy milk' })
+  .select()
+  .single()
+
+// Read: newest first, ten at a time
+const { data: notes } = await client
+  .from<Note>('notes')
+  .select('id, body, created_at')
+  .order('created_at', { ascending: false })
+  .range(0, 9)
+
+// Update and delete always need a filter
+await client.from<Note>('notes').update({ body: 'Buy oat milk' }).eq('id', created!.id)
+await client.from<Note>('notes').delete().eq('id', created!.id)
+```
+
+The `Note` type is written by hand here; [step 10](#10-type-everything) generates it
+from the database instead.
+
+Sign in as a second user and the same `select` returns an empty list. Nothing in the
+client filters by user: the policy from step 3 does, and a signed-out client gets an
+empty list too.
+
+Two guard rails that differ from a bare PostgREST setup: an `update()` or `delete()`
+without a filter is refused with a `400`, and an unbounded `select()` returns at most
+1000 rows. The full filter and modifier list is in the [SDK reference](/docs/reference/sdk/#query-builder).
+
+Prefer Prisma-style calls? `client.db.notes.findMany({ where: { owner_id: userId } })` goes
+through the same REST API and RLS policies. See [Query your data](/docs/platform/database/#query-your-data).
+
+## 7. Get changes live
+
+```ts
+const channel = client
+  .channel('notes-feed')
+  .on('postgres_changes', { event: '*', schema: 'public', table: 'notes' }, (payload) => {
+    console.log(payload.eventType, payload.new, payload.old)
+  })
+  .subscribe()
+
+// When the component unmounts
+await client.removeChannel(channel)
+```
+
+The insert, update and delete from step 6 arrive here as `INSERT`, `UPDATE` and
+`DELETE`. Change events go through the same RLS check as a `select`, so each subscriber
+only receives the rows it is allowed to read. Broadcast and presence (cursors, typing
+indicators, who is online) use the same channel: see [Realtime](/docs/platform/realtime/).
+
+## 8. Upload a file
+
+Create a bucket named `attachments` in **Project Studio → Storage**, then:
+
+```ts
+const bucket = client.storage.from('attachments')
+
+const { data: uploaded, error } = await bucket.upload(`notes/${noteId}.png`, file)
+
+// Read it back, as the signed-in user, through the API
+const { data: blob } = await bucket.download(uploaded!.path)
+```
+
+Objects are addressed by their path in the bucket, as in supabase-js. A private
+object is read with `download()`, which checks the caller's session on every request, or
+handed out for a limited time with `createSignedUrl(path, seconds)`.
+
+Public
+buckets, signed uploads straight to S3, image transforms and per-bucket quotas are
+covered in [Storage](/docs/platform/storage/).
+
+## 9. Run code on the server
+
+Logic that is mostly SQL belongs in the database, as a Postgres function the
+client calls with `rpc()`. Run this in **SQL Editor**:
+
+```sql
+CREATE FUNCTION note_count() RETURNS integer
+LANGUAGE sql STABLE AS $$ SELECT count(*)::integer FROM notes $$;
+```
+
+```ts
+const { data: count } = await client.rpc('note_count')
+```
+
+It runs as the caller, inside their RLS, so it counts the caller's notes only.
+Arguments are passed by name (`rpc('search', { term: 'milk' })`); see
+[Database functions](/docs/reference/sdk/#database-functions).
+
+For logic that should not live in the browser at all (calling a paid API with a
+secret key, verifying a webhook, sending an email), write an **edge function** in
+**Project Studio → Edge Functions**, named `hello`:
+
+```ts
+export default async (req: Request) => {
+  const { name } = await req.json()
+  return Response.json({ message: `Hello, ${name}!` })
+}
+```
+
+```ts
+const { data, error } = await client.functions.invoke('hello', { body: { name: 'Ada' } })
+// data: { message: 'Hello, Ada!' }
+```
+
+Functions run in an isolated Deno process with a memory cap and a timeout, read
+secrets from `env`, and can import npm packages. A signed-in session can invoke
+them; a function anyone may call, such as a webhook receiver, is switched to **Public** on
+its own. See [Edge Functions](/docs/platform/edge-functions/).
+
+## 10. Type everything
+
+The CLI drives the same project from a terminal. Log in to the Console, link this
+directory to the project, and generate types from its database:
+
+```bash
+npx @motherbase/cli login --url http://localhost:5500
+npx @motherbase/cli link notes
+npx @motherbase/cli gen types typescript > database.types.ts
+```
+
+```ts
+import type { Database } from './database.types'
+
+export const client = createClient<Database>(url, publishableKey, { storage: localStorageStorage() })
+
+const { data } = await client.from('notes').select('id, body')
+// data: { id: string; body: string }[] | null
+```
+
+Table names, columns, inserts and `rpc()` arguments are now checked at compile time,
+and a table that does not exist is a type error. Re-run `gen types` after every schema
+change, or add `--check` in CI to fail when the committed file is stale.
+
+The same linked directory runs SQL, deploys functions kept in your repository, and
+manages migrations:
+
+```bash
+npx @motherbase/cli db sql -e "select count(*) from notes"
+npx @motherbase/cli functions new hello && npx @motherbase/cli functions deploy hello
+```
+
+See the [CLI guide](/docs/cli/getting-started/).
+
+## Where to go next
+
+| To | Read |
+|---|---|
+| Start from a working app with sign-in, sign-up, MFA and passkeys already built | [`create-motherbase-app`](/docs/packages/create-app/) |
+| Follow a complete app end to end | [Todo app](/docs/example/todo-app/) |
+| Port an existing Supabase app | [Migrate from Supabase](/docs/getting-started/migrate-from-supabase/) |
+| Put it on a server | [Deploy](/docs/getting-started/deploy/) |
+| Every client method | [SDK reference](/docs/reference/sdk/) |
+
+---
+
+## Install on a VPS
+
+Run the VPS installer from an interactive terminal:
+
+```bash
+curl -fsSL https://www.motherbase.site/install.sh | bash
+```
+
+It downloads the verified deploy bundle into `~/motherbase`, then asks for your domain and administrator details. For unattended installation, see [Deploy](/docs/getting-started/deploy/).
+
+Configure one wildcard DNS record before creating projects:
+
+```dns
+Type: A
+Name: *
+Value: <VPS_IP>
+```
+
+The Console is reachable at `https://console.example.com`, and projects route as
+`https://<name>.example.com`. `./setup.sh --yes` is the non-interactive local install.
+
+<Note>
+Credentials printed by `setup.sh` are Platform Console credentials. A project's own
+users are managed in its Studio, under **Authentication → Users**.
+</Note>
+
+## Without the Console: an API-only stack
+
+`motherbase init` scaffolds a single project (API, Postgres, object storage and the edge
+runtime) in a directory of its own, without the Console. It runs the published images, so it
+needs Docker and nothing else. It has **no Project Studio**, which is served by the Console.
+
+```bash
+npx @motherbase/cli init my-backend --cors-origins http://localhost:3000
+cd my-backend
+npx @motherbase/cli start
+docker compose exec api node apps/server/dist/prisma/seed.js   # once: creates the operator
+```
+
+The API answers at `http://localhost:5001`. `init` prints the operator's email and generated
+password (they are also in `.env`). Sign that account in to get a session token, and pass it
+to the CLI with the stack's URL:
+
+```bash
+export MOTHERBASE_URL=http://localhost:5001
+export MOTHERBASE_ADMIN_TOKEN=$(curl -s -X POST $MOTHERBASE_URL/api/auth/sign-in/email \
+  -H 'content-type: application/json' -H 'origin: http://localhost:3000' \
+  -d '{"email":"admin@example.com","password":"<from .env>"}' | jq -r .token)
+
+npx @motherbase/cli db sql -e "select now()"
+npx @motherbase/cli functions new hello && npx @motherbase/cli functions deploy hello
+```
+
+`MOTHERBASE_TAG` in `.env` picks the image version (`latest` by default); pin it to a
+`sha-<commit>` tag to keep `docker compose pull` from moving it.

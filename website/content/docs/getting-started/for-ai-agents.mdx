@@ -1,0 +1,216 @@
+---
+title: "For AI Agents"
+description: "Machine-readable entry points, and the handful of Motherbase behaviours a model trained on Supabase will get wrong."
+order: 7
+---
+
+Motherbase is deliberately shaped like Supabase: the REST dialect is PostgREST-compatible,
+`@motherbase/client` mirrors `supabase-js`, and authorization is real PostgreSQL row-level
+security. That similarity is the point — most Supabase knowledge transfers unchanged.
+
+It also means a model will confidently produce code that is *almost* right. This page is
+the list of places where "almost" is wrong, plus the machine-readable entry points.
+
+## Entry points
+
+| URL | What it is |
+|---|---|
+| `/llms.txt` | Every documentation page as `- [Title](url): description`, grouped as in the sidebar |
+| `/llms-full.txt` | The entire documentation set as one plain-text fetch (~900 KB) |
+| `/docs/contributing/known-issues/` | What the last audit found, and the one deliberate constraint. Read before asserting that something works |
+| `/api/docs` | Swagger UI on a running project — core endpoints only, not the REST table routes |
+| `/docs/sdk.md` | The SDK reference as raw Markdown, served by a running project |
+| `motherbase mcp` | The project itself over MCP: schema, policies, the advisor lint, the RLS simulator, and DDL with `--write`. See [MCP Server](/docs/platform/mcp/) |
+
+`llms-full.txt` keeps the `<Note>` and `<Warning>` tags inline. They are not decoration:
+`<Warning>` marks a constraint that will bite, and an open defect, when there is one, is flagged
+with one in place and listed in [Known issues](/docs/contributing/known-issues/). Do not strip
+them when summarizing.
+
+## Generate types first
+
+Nearly every mistake below disappears if you generate the schema types and pass them to the
+client, because the compiler then rejects the wrong version:
+
+```bash
+motherbase gen types typescript > database.types.ts
+```
+
+```ts
+import { createClient } from '@motherbase/client'
+import type { Database } from './database.types'
+
+const client = createClient<Database>(url, anonKey)
+```
+
+Relation names, row shapes, insert payloads, update payloads and RPC argument/return types
+are all checked from that point on. Do this before writing data-access code, not after.
+
+## What a Supabase-trained model gets wrong
+
+### The secret key is narrower than `service_role`
+
+There is a secret key, and it does bypass RLS: pass `mb_secret_...` to `createClient` and
+requests run as the `service_role` Postgres role. There are three data-plane roles, `anon`,
+`authenticated` and `service_role`.
+
+What does **not** carry over is the scope. A secret key opens the data plane, private
+edge functions, and `client.auth.admin.*` (create, update, delete users, end their sessions). It does **not**
+open SQL, DDL, backups or settings — those stay behind operator authentication on
+`/api/admin/*` with an `ADMIN` session or the `X-Platform-Token`. Code that used Supabase's
+service key to run arbitrary SQL has to move to a migration, the CLI, or the admin API.
+
+**Consequence:** "just use the service key on the server" fixes a data-access problem, not a
+schema one, and it is still the wrong answer to a policy problem in client code. Write the
+policy. See [RLS](/docs/platform/rls/) and [API Keys](/docs/platform/api-keys/).
+
+Key enforcement is also off by default: a project accepts callers that send no key at all
+until an operator turns it on. Do not assume a missing key is why a request failed.
+
+### RLS is the authorization layer, and a missing policy means zero rows
+
+A table created through Studio (SQL Editor or Table editor) gets RLS enabled automatically,
+and `/rest/v1` refuses any table that has it off. With RLS on and no matching
+policy, `anon` and `authenticated` see nothing and every write fails — the API returns
+`403` with "Row level security or table privileges blocked this operation" (SQLSTATE
+`42501`), not an empty success.
+
+If you create a table, create its policies in the same change. A table with RLS on and no
+policy is not "secure by default", it is broken by default.
+
+### `PATCH` and `DELETE` require a filter
+
+An unfiltered bulk mutation is rejected for non-admin callers. `.update({...})` with no
+`.eq()` is a rejected request, not a table-wide update.
+
+### A write returns no rows unless you ask
+
+A table write defaults to `Prefer: return=minimal`, as PostgREST does: `insert(row)` resolves
+to `{ data: null }`. Chain `.select()` when you need the written representation — and the
+caller needs SELECT access to receive it. `/rpc/` and `/batch` are the exception: they default
+to `representation`, because there the result is the call's whole purpose.
+
+### `upsert` is real, and so is nearly everything else
+
+`.rpc()`, relational embedding, broadcast/presence channels and `storage.list()` are all
+supported. Before assuming a supabase-js feature is missing, check the
+[SDK compatibility matrix](/docs/reference/sdk/) rather than assuming a gap.
+
+### Filter values are untyped
+
+Values are sent to Postgres untyped and coerced from the operand's type, exactly as in
+PostgREST. `eq.42` matches a text column containing `"42"`, and `eq.null` matches the
+literal string `null` — the only way to reach SQL `NULL` is `is.null`.
+
+### `postgres_changes` only sees REST writes
+
+Supabase Realtime reads the WAL, so every write shows up. Motherbase emits a change event only
+for writes made through `/rest/v1` (`client.from(...)`). A row written by an `rpc()` function,
+a trigger, a `pg_cron` job, the SQL editor or a direct connection is silent. Do not design a
+feature around a trigger-written row appearing in a subscription; write through REST or
+broadcast explicitly. See [Realtime → Delivery](/docs/platform/realtime/#delivery).
+
+### Storage objects are addressed by path
+
+`upload` returns `{ path, id, fullPath }`. Pass `path` to `download`, `remove`,
+`getPublicUrl` and `createSignedUrl`. A bare UUID is also accepted and resolves by file id.
+`createSignedUrl(path, expiresIn)` takes seconds (1 to 604800) and resolves to
+`{ signedUrl, expiresAt }`. `expiresAt` is `null` when nothing expires — a public object, or
+a private one under the `local` driver. Check it rather than assuming.
+
+### Auth is Better Auth, not GoTrue
+
+`client.auth` **is** Better Auth's client (since `@motherbase/client` 2.0), typed with every
+plugin the server can mount. Do not write supabase-js auth calls: `signInWithPassword`,
+`signUp({ email, password })`, `getUser()`, `signInWithOAuth`, `auth.mfa.*`, `setSession`
+and `refreshSession` do not exist. Use Better Auth's names, from its documentation:
+
+| supabase-js | Motherbase |
+|---|---|
+| `signUp({ email, password })` | `signUp.email({ email, password, name })` |
+| `signInWithPassword(...)` | `signIn.email({ email, password })` |
+| `signInWithOAuth({ provider })` | `signIn.social({ provider, callbackURL })` |
+| `signInWithOtp` / `verifyOtp` | `emailOtp.sendVerificationOtp({ email, type: 'sign-in' })` / `signIn.emailOtp({ email, otp })` |
+| `resetPasswordForEmail` | `emailOtp.requestPasswordReset({ email })` then `emailOtp.resetPassword({ email, otp, password })` |
+| `getUser()` | `getSession()`, which asks the server and returns `{ session, user }` |
+| `getSession()` (local) | `client.hydrate()`, no network call, display only |
+| `auth.mfa.*` | `twoFactor.*` |
+| `signInWithSSO` | `signIn.sso({ email, callbackURL })` |
+| `signInWithIdToken` | `signIn.social({ provider, idToken: { token } })` |
+| `getUserIdentities` / `linkIdentity` | `listAccounts()` / `linkSocial({ provider, callbackURL })` |
+
+Passkeys (`passkey.*`), organizations and teams (`organization.*`), SSO providers
+(`sso.*`), user API keys (`apiKey.*`), magic links (`signIn.magicLink`), phone OTP
+(`phoneNumber.*`) and anonymous sign-in (`signIn.anonymous()`, when
+`auth.methods.anonymous` is on) are all there. Motherbase adds `onAuthStateChange`,
+`getSessionFromUrl`, `exchangeCodeForSession` (with `flowType: 'pkce'`),
+`reauthenticate`, `updateUserCredentials` and `admin.*` (secret key required). Every call
+resolves `{ data, error }` with Better Auth's error shape. `motherbase migrate codemod` lists
+the supabase-js auth calls left in a codebase.
+
+When the account has two-factor, `signIn.email` answers `{ twoFactorRedirect: true }` and no
+session is stored until `twoFactor.verifyTotp` (or `verifyOtp`, `verifyBackupCode`) succeeds.
+
+Better Auth bearer sessions have no refresh token: code that stores and rotates a
+`refresh_token` has nothing to rotate. The SDK revalidates on a `401` by itself.
+
+### The stored session loads itself
+
+With a persistent storage adapter the session is read asynchronously, but every request and
+every channel subscribe awaits it first, so there is no `anon` request after a reload. Call
+`await client.hydrate()` only to read the stored session yourself (to choose a first
+screen); it makes no network call and is not proof of anything, authorize on `getSession()`.
+
+## A correct minimal setup
+
+```sql
+-- Run in Studio → SQL Editor
+create table todo (
+  id         uuid primary key default gen_random_uuid(),
+  -- text, not uuid: auth.uid() returns text. Defaulting it means the client
+  -- never sends user_id at all, so it cannot send someone else's.
+  user_id    text not null default auth.uid(),
+  title      text not null,
+  done       boolean not null default false,
+  created_at timestamptz not null default now()
+);
+
+alter table todo enable row level security;
+
+-- FOR ALL covers select, insert, update and delete.
+create policy "todo owner" on todo for all to authenticated
+  using (auth.uid() = user_id)
+  with check (auth.uid() = user_id);
+
+-- RLS filters rows; it does not make the scan fast.
+create index todo_user_id_idx on todo (user_id);
+```
+
+```ts
+const { data, error } = await client
+  .from('todo')
+  .select('id,title,done')
+  .eq('done', false)
+  .order('created_at', { ascending: false })
+  .limit(20)
+
+if (error) console.error(error.code, error.status, error.message)
+```
+
+Nothing in the client filters by `user_id` — the policy does. That is the whole model: the
+query says what you want, the policy says what you may have.
+
+## Verifying instead of assuming
+
+- `motherbase rls simulate --sql "select * from todo" --as anon` — run a query as a given
+  caller and see what RLS actually lets through.
+- `motherbase rls lint` — the security and performance advisor: tables open over REST, RLS
+  on with no policy, `SECURITY DEFINER` functions callable by anon, unindexed policy filters.
+- `.explain({ analyze: true })` on any query — admin sessions only.
+
+<Note>
+If you are writing an `AGENTS.md` or `CLAUDE.md` for a project built on Motherbase, the
+useful contents are: the generated `database.types.ts` path, "authorization is RLS, never
+add application-layer owner checks", and a link to `/llms-full.txt`. Everything else is
+discoverable from those.
+</Note>

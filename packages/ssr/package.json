@@ -1,0 +1,71 @@
+{
+  "name": "@motherbase/ssr",
+  "version": "0.2.1",
+  "description": "Next.js SSR support for @motherbase/client, createBrowserClient, createServerClient, and a middleware session-refresh helper.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "publishConfig": {
+    "access": "public"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./browser": {
+      "types": "./dist/browser.d.ts",
+      "import": "./dist/browser.js"
+    },
+    "./server": {
+      "types": "./dist/server.d.ts",
+      "import": "./dist/server.js"
+    },
+    "./middleware": {
+      "types": "./dist/middleware.d.ts",
+      "import": "./dist/middleware.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "clean": "rm -rf dist",
+    "test": "vitest run --typecheck",
+    "lint": "eslint ."
+  },
+  "keywords": [
+    "sdk",
+    "ssr",
+    "nextjs",
+    "auth",
+    "backend",
+    "motherbase",
+    "self-hosted"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/JulienGuinot/motherbase.git",
+    "directory": "packages/ssr"
+  },
+  "homepage": "https://github.com/JulienGuinot/motherbase#readme",
+  "bugs": {
+    "url": "https://github.com/JulienGuinot/motherbase/issues"
+  },
+  "dependencies": {
+    "@motherbase/client": "^2.2.0"
+  },
+  "peerDependencies": {
+    "next": ">=14"
+  },
+  "devDependencies": {
+    "next": "^15.5.19",
+    "typescript": "^5.4.2",
+    "vitest": "^5.0.0"
+  }
+}

@@ -1,0 +1,107 @@
+---
+title: "Data Model"
+description: "Every Prisma model in a project database, the schema it lives in, and the feature that owns it."
+order: 4
+---
+
+A project database is one PostgreSQL instance with **four schemas**, declared in `apps/server/prisma/schema.prisma`:
+
+```prisma
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+  schemas  = ["auth", "storage", "platform", "public"]
+}
+```
+
+| Schema | Contents |
+|---|---|
+| `auth` | Users, sessions, and every Better Auth table |
+| `storage` | Buckets, objects, tokens, CORS, bucket webhooks, deletion jobs |
+| `platform` | Settings, webhooks, edge functions, realtime outbox, devices, project API keys, the Git repo link, schema migrations |
+| `public` | **Your** tables — the ones you create in the SQL editor and expose over REST |
+
+<Note>
+Platform tables are deliberately kept out of `public` so the auto-generated REST API and RLS policies operate on your application tables only.
+</Note>
+
+## Enums
+
+| Enum | Schema | Values |
+|---|---|---|
+| `UserStatus` | auth | `active`, `deleted` |
+| `UserRole` | auth | `USER`, `ADMIN` |
+| `DevicePlatform` | platform | `ios`, `android`, `web` |
+| `FileVisibility` | storage | `public`, `private` |
+| `FileStatus` | storage | `pending`, `finalizing`, `deleting`, `ready` |
+| `BucketDeletionJobStatus` | storage | `queued`, `running`, `completed`, `failed` |
+
+## auth schema
+
+| Model | Table | Purpose |
+|---|---|---|
+| `User` | `users` | Identity. Own columns (`role`, `status`, `username`, `firstName`, `imageUrl`, provider ids) plus Better Auth core columns (`name`, `image`, `emailVerified`, `twoFactorEnabled`, `phoneNumber`, `phoneNumberVerified`). `username` is unique and assigned by the create hook when a sign-up supplies none |
+| `Session` | `session` | Active sessions: `token`, `expiresAt`, `ipAddress`, `userAgent`, `activeOrganizationId` |
+| `Account` | `account` | Credential and OAuth links. **Passwords live here** (`password`), not on `User` |
+| `Verification` | `verification` | Email/OTP verification values with `expiresAt` |
+| `PkceCode` | `pkce_code` | One row per exchanged PKCE code, keyed by the code's hash, so a code is single use: the claim is the insert itself, and a racing second exchange loses on the primary key. Swept once expired |
+| `AuthAuditLogEntry` | `audit_log_entries` | Supabase's `auth.audit_log_entries`, column for column (`instance_id`, `id`, `payload`, `created_at`, `ip_address`): one row per auth event, written by `AuthAuditService`, pruned by data retention |
+| `Jwks` | `jwks` | Signing key pairs backing the published JWKS |
+| `TwoFactor` | `twoFactor` | TOTP `secret`, `backupCodes`, `failedVerificationCount`, `lockedUntil` |
+| `Organization` | `organization` | Orgs (`slug` unique, `metadata`) |
+| `Member` | `member` | Org membership with `role` (default `member`) |
+| `Invitation` | `invitation` | Pending org invites, `status`, `expiresAt`, `inviterId`, optional `teamId` |
+| `Team` / `TeamMember` | `team` / `teamMember` | Teams inside an org |
+| `Passkey` | `passkey` | WebAuthn credentials (`credentialID`, `counter`, `deviceType`, `backedUp`, `transports`, `aaguid`) |
+| `ApiKey` | `apikey` | Machine keys: `prefix`, `key`, `permissions`, `expiresAt`, plus refill and per-key rate-limit columns (`rateLimitMax`, `rateLimitTimeWindow`, `remaining`, `requestCount`) |
+| `SsoProvider` | `ssoProvider` | Per-issuer SSO config (`oidcConfig`, `samlConfig`, `domain`, optional `organizationId`) |
+
+Deletes cascade from `User` to sessions, accounts, two-factor rows, memberships, passkeys, SSO providers and team memberships.
+
+## storage schema
+
+| Model | Table | Purpose |
+|---|---|---|
+| `File` | `files` | One object. `bucket` + `key` unique, `mime`, `size`, `visibility`, `status`, `uploadExpiresAt`, `url`. `ownerId` is `SetNull` on user delete |
+| `Bucket` | `buckets` | Logical bucket: `slug` unique, `visibility`, optional `quotaBytes` |
+| `BucketToken` | `bucket_tokens` | Scoped bearer tokens with `permissions[]` and optional `expiresAt` |
+| `BucketCors` | `bucket_cors` | Per-bucket allowlists (`allowedOrigins/Methods/Headers`, `maxAgeSec`) |
+| `BucketWebhook` | `bucket_webhooks` | Per-bucket event delivery targets |
+| `S3AccessKey` | `s3_access_keys` | Credentials for the S3 protocol endpoint. The secret is **encrypted, not hashed**: SigV4 needs it to recompute the signature |
+| `S3MultipartUpload` / `S3MultipartPart` | `s3_multipart_uploads` / `s3_multipart_parts` | S3-protocol multipart uploads in progress: bucket, key and content type, then each part's number, size and ETag |
+| `BucketDeletionJob` | `bucket_deletion_jobs` | Resumable force-delete: `totalObjects`, `deletedObjects`, `attempts`, `leaseToken`, `leaseExpiresAt`. `bucketId` is intentionally **not** a foreign key so a finished job survives its bucket |
+
+## platform schema
+
+| Model | Table | Purpose |
+|---|---|---|
+| `AppSetting` | `app_settings` | One row per settings group; `key` is the group name, `value` the JSON payload, `updatedById` a nullable FK to `User` |
+| `Webhook` | `webhooks` | Project webhooks: `url`, `events[]`, `enabled` |
+| `WebhookDelivery` | `webhook_deliveries` | Delivery attempts: `status`, `ok`, `durationMs`, `test`, `errorMessage` |
+| `EdgeFunction` | `edge_functions` | `name`/`route` unique, `code`, `enabled`, optional `schedule` cron, per-function `memoryLimitMb` / `timeoutMs` (clamped by global ceilings) |
+| `EdgeFunctionLog` | `edge_function_logs` | Per-invocation `status`, `durationMs`, `stdout`, `errorMessage` |
+| `EdgeFunctionSecret` | `edge_function_secrets` | Name/value secrets injected into the sandbox |
+| `RealtimeOutbox` | `realtime_outbox` | Transactional realtime events written by the mutation itself: `model`, `action`, `payloads`, `deleteAudience`, `status`, `attempts`, lease columns |
+| `Device` | `devices` | Push tokens per user with `platform` |
+| `ProjectApiKey` | `project_api_keys` | Publishable and secret project keys: `type`, `prefix`, `tokenHash` (unique, sha256 of the full token), `token` (clear text for publishable keys only, `NULL` for secret keys by CHECK constraint), `revokedAt` |
+| `GitRepoLink` | `git_repo_links` | Single-row (`id` defaults to `"default"`) GitHub link: encrypted `accessToken` and `webhookSecret`, `owner`/`repo`/`branch`, `migrationsPath`, and the last sync's status, message and SHA |
+| `RequestLog` | `request_logs` | Durable copy of the log buffer, written in batches by `LogPersistenceService` when `logs.retention` is on: level, source, service, message and the request fields (`method`, `path`, `status`, `durationMs`, `ip`, `userAgent`, `requestId`, `userId`). Pruned by data retention |
+| `LogDrain` | `log_drains` | A [log drain](/docs/platform/observability/#log-drains): `name`, `type`, `config` (secrets included; masked by the admin API), `enabled`, and the delivered/failed/dropped counters with the last success and error |
+| `RestWriteRequest` / `RestWriteChange` | `rest_write_requests` / `rest_write_changes` | Private, transaction-scoped capture of a REST write and the rows it changed, which keeps realtime and webhooks transactional without the caller's read access. Never exposed through REST |
+| `StudioContent` | `content` | Supabase's `content` API: SQL snippets (`sql`), saved Logs Explorer queries (`log_sql`) and custom reports (`report`). A `user` item is its owner's alone; a `project` item is readable by every operator of the project and editable only by its owner |
+| `StudioContentFolder` | `content_folders` | A folder of one operator's private SQL snippets |
+| `SchemaMigration` | `schema_migrations` | Studio-authored migrations: `upSql`, `downSql`, `checksum`, `snapshot`, `snapshotChecksum`, `status` (`pending` → `applied` → `rolledback`) |
+
+### Why an outbox
+
+Realtime events are written **inside the same transaction as the data change**, then drained by `RealtimeOutboxSchedulerService`. A crash between commit and broadcast therefore loses no event: the row is still `pending` and gets leased again. The lease columns (`leaseToken`, `leaseExpiresAt`) keep two workers from double-sending.
+
+### Job leases, twice
+
+Both `BucketDeletionJob` and `RealtimeOutbox` use the same pattern — `status` + `attempts` + `nextAttemptAt`/`availableAt` + a lease. Long-running deletions and event drains resume after a restart instead of starting over or dropping work.
+
+## Migrations
+
+- Prisma migrations for the platform schemas live in `apps/server/prisma/migrations` and are applied with `npm run prisma:deploy` (`prisma:migrate` in development).
+- Migrations you author for **your** tables are a different mechanism: the `SchemaMigration` model above, reviewed and applied from Studio, with `checksum` drift detection against the reviewed SQL and a stored snapshot of the live schema at apply time.
+- `apps/server/prisma/seed.ts` seeds a development database (`npm run db:seed`).

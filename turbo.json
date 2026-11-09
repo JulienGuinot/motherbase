@@ -1,0 +1,58 @@
+{
+  "$schema": "https://turbo.build/schema.json",
+  "tasks": {
+    "build": {
+      "dependsOn": ["^build"],
+      "outputs": ["dist/**", ".next/**", "!.next/cache/**"],
+      // The studio bakes NEXT_PUBLIC_* into the bundle, so they belong in `env`
+      // (hashed): a build with a different value is a different build.
+      "env": ["NEXT_PUBLIC_*"]
+    },
+    "test": {
+      "dependsOn": ["build"],
+      // Turbo 2 runs tasks in strict env mode, so a task sees ONLY what is
+      // declared here. Without this list the integration suites never received
+      // DATABASE_URL and fell back to the `localhost:55432` default in
+      // vitest.setup.ts: green on a developer machine, where that default is
+      // the real local Postgres, and "Can't reach database server" in CI, where
+      // the service listens on 5432. The workflow set the variable correctly
+      // the whole time; it was filtered out one layer below.
+      //
+      // passThroughEnv, not env: these select WHICH database and secrets a run
+      // talks to, not what the code under test is, so they must not become part
+      // of the cache key.
+      "passThroughEnv": [
+        "CI",
+        "DATABASE_URL",
+        "JWT_SECRET",
+        "ACCESS_TOKEN_EXP_MIN",
+        "CONFIG_ENCRYPTION_KEY",
+        "CONSOLE_ADMIN_EMAIL",
+        "CONSOLE_ADMIN_PASSWORD_HASH",
+        "CONSOLE_JWT_SECRET",
+        "CONSOLE_MODE",
+        "PLATFORM_SERVICE_TOKEN",
+        "PROJECTS_DIR",
+        "BACKUP_ENABLED",
+        "DATA_RETENTION_ENABLED",
+        "EDGE_SECRETS_ENABLED",
+        "EMAIL_SMTP_HOST",
+        "EMAIL_SMTP_USERNAME",
+        "EMAIL_SMTP_PASSWORD",
+        "GOOGLE_CLIENT_ID",
+        "REST_RPC_SECURITY_DEFINER",
+        "TRUST_PROXY",
+        "NEXT_PUBLIC_MOTHERBASE_URL",
+        "MOTHERBASE_UPDATE_GOLDEN",
+        "RUN_IMPORT_VERIFICATION_DB_TESTS",
+        "PG_BIN_DIR",
+        "NO_COLOR"
+      ]
+    },
+    "lint": {},
+    "dev": {
+      "cache": false,
+      "persistent": true
+    }
+  }
+}

@@ -1,0 +1,1301 @@
+---
+title: "SDK Reference"
+description: "Query with client.from() or client.db, and use auth, storage, realtime, and functions."
+order: 1
+---
+
+`@motherbase/client` is the official TypeScript SDK for Motherbase. Query tables with the Supabase-style `client.from(table)` builder or Prisma-style `client.db.table` methods. The same client also provides auth, storage, realtime, and edge functions.
+
+Use **Project Studio → Connect** for the exact API URL, WebSocket URL, package name, and project ID for a project.
+
+## Install
+
+```bash
+npm install @motherbase/client
+# Optional, only when you use realtime:
+npm install socket.io-client
+```
+
+## Initialize
+
+```ts
+import { createClient, localStorageStorage } from '@motherbase/client'
+
+export const client = createClient(
+  process.env.NEXT_PUBLIC_MOTHERBASE_URL!,
+  process.env.NEXT_PUBLIC_MOTHERBASE_KEY,
+  { storage: localStorageStorage() },
+)
+```
+
+The stored session is loaded before the first request and the first channel subscribe, so there is nothing to await at startup. `await client.hydrate()` returns it if you want it yourself, with no network call.
+
+The second argument is the project's **publishable key**, sent as an `apikey`
+header. Find it on **Project Studio → Connect**. It is optional unless the project
+has key enforcement turned on.
+
+Passing a **secret** key instead (`mb_secret_...`) runs every request as
+`service_role`, which bypasses row level security, and unlocks the
+`client.auth.admin` namespace below. Server side only — see
+[API Keys](/docs/platform/api-keys/). The SDK logs a console warning if a secret
+key is used where `window` exists.
+
+Client options — native shape:
+
+```ts
+createClient(url, key, {
+  storage,            // session storage adapter, defaults to memoryStorage()
+  autoRefresh: true,  // revalidate once on 401, defaults to true
+  fetch,              // custom fetch implementation
+  headers,            // extra headers for every request
+  compat: 'supabase', // optional, see below
+  realtimeIoFactory,  // test/custom socket.io factory
+})
+```
+
+The `supabase-js` option shape is accepted too, so a ported config compiles as-is:
+
+```ts
+createClient(url, key, {
+  auth: { persistSession: true, storage, storageKey, autoRefreshToken: true, detectSessionInUrl: true, flowType: 'pkce' },
+  global: { headers, fetch },
+  db: { schema: 'public' },
+})
+```
+
+Storage precedence is `storage` → `auth.storage` → `auth.persistSession`
+(`true` means localStorage, `false` means memory). `auth.flowType` is `'implicit'`
+(the default) or `'pkce'`, see [Auth](#auth); `auth.debug` is accepted for signature
+parity and ignored. `compat: 'supabase'` aligns the behaviours that share a supabase-js
+spelling but differ (an `update()` / `delete()` matching nothing answers an empty array
+instead of a `404`). `db.schema` throws for anything but `'public'`, which is the only
+schema the REST layer serves tables from; call functions in another exposed schema with
+`client.schema(name).rpc()`.
+
+## Result shape
+
+Expected API failures resolve to `{ data, error }` instead of throwing.
+
+```ts
+const { data, error } = await client.from('products').select('*').limit(20)
+
+if (error) {
+  console.error(error.message, error.status, error.code)
+}
+```
+
+`error` is `null` on success. Programmer errors can still throw, for example calling unsupported realtime channel event types.
+
+## Query builder
+
+`client.from(table)` returns a chainable, awaitable PostgREST-style builder mapped to `/rest/v1/:model`.
+
+```ts
+const { data: products, error } = await client
+  .from('products')
+  .select('id,name,price')
+  .eq('status', 'active')
+  .in('id', ['p1', 'p2'])
+  .lt('price', 50)
+  .order('name', { ascending: false })
+  .range(0, 9)
+```
+
+Single-row helpers:
+
+```ts
+const { data: product } = await client
+  .from('products')
+  .select('*')
+  .eq('id', 'p1')
+  .single()
+
+const { data: maybeProduct } = await client
+  .from('products')
+  .select('*')
+  .eq('id', 'p1')
+  .maybeSingle()
+```
+
+Mutations:
+
+```ts
+await client.from('products').insert({ name: 'Tea', price: 12 })
+await client.from('products').update({ price: 9 }).eq('id', 'p1')
+await client.from('products').delete().eq('id', 'p1')
+
+// INSERT .. ON CONFLICT DO UPDATE. The target defaults to the primary key.
+await client.from('products').upsert({ id: 'p1', name: 'Tea' })
+await client.from('products').upsert({ sku: 'T1', name: 'Tea' }, { onConflict: 'sku' })
+await client.from('products').upsert(rows, { ignoreDuplicates: true })
+```
+
+Writes return no rows by default. Chain `.select()` when you need the inserted or
+updated representation; the caller must also have SELECT access to receive it. Raw
+REST writes default to `Prefer: return=minimal`, while `Prefer: return=representation`
+requests rows explicitly. A bulk `insert`/`upsert` sends an explicit column set, so a
+key missing from one row is still written as `NULL` (or as the column default under
+`{ defaultToNull: false }`) rather than being inferred from the first row alone.
+
+Two server-side rules apply to every query and will bite if you assume `supabase-js`
+behaviour: an unbounded `select()` is capped at **1000 rows** by default (the operator can
+lower `api.rest.maxRows`; paginate with `.range()` or pass
+an explicit `.limit()`), and an unfiltered `delete()` or `update()` is refused with a `400` for
+non-admin callers — deliberately, since `supabase-js` would have rewritten every visible row.
+
+### Filters
+
+| Group | Methods |
+|---|---|
+| Comparison | `eq`, `neq`, `gt`, `gte`, `lt`, `lte` |
+| Pattern | `like`, `ilike`, `likeAllOf`, `likeAnyOf`, `ilikeAllOf`, `ilikeAnyOf` |
+| Set / null | `in`, `is`, `match` |
+| Logic | `or`, `not`, `filter` |
+| Full-text | `textSearch(column, query, { type: 'plain' \| 'phrase' \| 'websearch', config })` |
+| Array / range containment | `contains`, `containedBy`, `overlaps` |
+| Range position | `rangeGt`, `rangeGte`, `rangeLt`, `rangeLte`, `rangeAdjacent` |
+
+```ts
+await client
+  .from('posts')
+  .select('*')
+  .or('status.eq.live,and(price.gt.10,price.lt.20)')
+  .textSearch('body', 'cat & dog', { type: 'websearch', config: 'english' })
+  .contains('tags', ['news'])
+  .not('archived', 'is', null)
+```
+
+### Modifiers
+
+| Modifier | Effect |
+|---|---|
+| `select`, `order`, `limit`, `range` | The usual shaping. `order`, `limit` and `range` accept `{ referencedTable }` so they apply to an embedded relation rather than the parent |
+| `single()`, `maybeSingle()` | One row instead of an array |
+| `returns<T>()` / `overrideTypes<T>()` | Compile-time cast only |
+| `abortSignal(signal)` | Cancel in flight |
+| `throwOnError()` | Reject instead of resolving `{ data: null, error }` |
+| `maxAffected(n)` | Refuse a write that would touch more than `n` rows (`Prefer: handling=strict, max-affected=n`) |
+| `rollback()` | Run the query, then roll the transaction back (`Prefer: tx=rollback`) |
+| `csv()` | `text/csv`; `data` is a string |
+| `geojson()` | `application/geo+json`; `data` is the parsed object |
+| `explain(options)` | The query plan. Admin session only |
+
+```ts
+// Row count without fetching rows
+const { count } = await client.from('products').select('*', { count: 'exact', head: true })
+
+// CSV instead of JSON — data is a string
+const { data: csv } = await client.from('products').select('*').csv()
+
+// Query plan. Admin session only; anyone else gets 403 PGRST103.
+const { data: plan } = await client.from('products').select('*').explain({ analyze: true })
+
+// Cancel in flight
+const controller = new AbortController()
+await client.from('products').select('*').abortSignal(controller.signal)
+
+// Validate a write without persisting it
+await client.from('products').update({ price: 9 }).eq('id', 'p1').rollback()
+
+// Refuse to touch more than one row, in case the filter is wrong
+await client.from('products').update({ price: 9 }).eq('id', 'p1').maxAffected(1)
+```
+
+`maxAffected` sends a `Prefer` header; a server that does not implement the
+preference ignores it. It is a safety net, not a guarantee — keep the filter right.
+
+### Prisma-style queries
+
+`client.db.<table>` offers familiar Prisma-style methods over the **same REST API** as
+`client.from()`. It does not install Prisma or connect directly to PostgreSQL.
+Both styles obey the caller's RLS policies.
+
+```ts
+const products = await client.db.products.findMany({
+  where: { status: 'active', price: { lt: 50 } },
+  select: { id: true, name: true, price: true },
+  orderBy: { name: 'asc' },
+  take: 10,
+})
+
+const product = await client.db.products.create({ data: { name: 'Tea', price: 12 } })
+await client.db.products.update({ where: { id: product.id }, data: { price: 9 } })
+```
+
+Unlike `from()`, these methods return rows directly and **throw on error**. Reads:
+`findMany`, `findFirst`, `findFirstOrThrow`, `findUnique`, `findUniqueOrThrow`,
+and `count`. Writes: `create`, `createMany`, `createManyAndReturn`, `update`,
+`updateMany`, `delete`, `deleteMany`, and `upsert`. `createMany` returns
+`{ count }`; `updateMany` and `deleteMany` return the affected rows.
+
+`where` supports equality, `in`, `gt`, `gte`, `lt`, `lte`, `contains`,
+`startsWith`, and `endsWith`. Conditions are combined with AND. `skip` needs
+`take`. Writes require a `where` that matches at least one column, so an
+accidental `{ id: undefined }` cannot update or delete the whole table.
+Use `from()` for embedded relations, `or()` and other advanced filters. Views
+are readable through either style, but cannot be written through the typed SDK.
+
+### Embedding
+
+Foreign keys are resolved in both directions, so the PostgREST embedding syntax works:
+
+```ts
+await client.from('posts').select('id,title,author(id,name)')
+await client.from('posts').select('*,comments!inner(body)')
+```
+
+An embedded relation passes the same exposure and RLS checks as a top-level one.
+
+### Database functions
+
+`client.rpc(fn, args)` calls a Postgres function in the `public` schema and maps
+to `POST /rest/v1/rpc/:fn` (or `GET`, see below). Arguments are bound by **name**,
+the same way PostgREST does it, so the function is resolved from the catalog by
+matching the keys of `args` against the function's parameter names — not by
+position and not by arity.
+
+```ts
+const { data } = await client.rpc('search_products', { term: 'tea' })
+```
+
+What comes back depends on what the function returns, exactly as in PostgREST:
+a scalar or a single composite row resolves to one value (`data` is that value,
+not an array); a `setof` / `returns table` function resolves to an array, one
+entry per output row.
+
+```ts
+// scalar / single row -> data is the value itself
+const { data: count } = await client.rpc('count_active_products')
+
+// setof / table -> data is an array
+const { data: rows } = await client.rpc('list_products_by_tag', { tag: 'sale' })
+```
+
+#### Read-only calls (GET)
+
+```ts
+// Arguments become query parameters instead of a JSON body
+await client.rpc('search_products', { term: 'tea' }, { get: true })
+```
+
+`{ head: true }` and `{ count }` are accepted for supabase-js parity, but the `/rpc/`
+route does not compute a total today: `count` comes back `null`. To count a function's
+result, return the count from the function itself, or call a table query with
+`select('*', { count: 'exact', head: true })`.
+
+`{ get: true }` is only valid for a function marked `STABLE` or `IMMUTABLE`.
+Calling a `VOLATILE` function with `get: true` is refused with a `405` (`PGRST101`,
+"Use POST") rather than silently falling back to `POST` — a `GET` is meant to be
+safe to retry, cache and prefetch, and a volatile function is, by definition,
+not.
+
+#### Overloads and defaults
+
+Postgres function overloading works by argument *names*, not arity: an overload
+is selected when every key in `args` matches one of its named parameters and
+every parameter without a default is present in `args`. A call that matches no
+overload (an unknown function name, or a name/argument combination nothing
+declares) answers `404` (`PGRST202`) rather than guessing the closest match.
+`VARIADIC` parameters cannot be targeted through named arguments and are never
+selectable over REST.
+
+```ts
+// defined as search_products(term text, in_stock boolean default true)
+await client.rpc('search_products', { term: 'tea' })              // in_stock defaults
+await client.rpc('search_products', { term: 'tea', in_stock: false })
+```
+
+#### Whole body as one argument
+
+The REST layer also understands `Prefer: params=single-object`, PostgREST's
+header for sending the entire body as one JSON value rather than binding each
+key to a named parameter. It only works against a function declared with a
+single `json`/`jsonb` parameter. `client.rpc()` does not set this header today —
+reach for it only when calling the REST endpoint directly.
+
+#### Calling functions in another schema
+
+`public` is the default and the only schema `from()` reads tables from, but a
+function in another **exposed** schema is reachable with `client.schema(name)`:
+
+```ts
+// pgmq_public is exposed when the Queues feature is enabled
+await client.schema('pgmq_public').rpc('pop', { queue_name: 'emails' })
+```
+
+Requesting a schema that isn't on the exposed list answers `406` (`PGRST106`)
+naming the schemas that are, instead of silently serving `public` under a
+different name.
+
+#### Security: `SECURITY DEFINER` functions are refused by default
+
+A `SECURITY DEFINER` function runs as its *owner*, not as the caller, and row
+level security does not apply to a table's owner unless that table is
+`FORCE ROW LEVEL SECURITY`. Exposing one over REST by default would hand every
+caller — including `anon` — a path around every RLS policy in the database. So
+the server refuses to call a `SECURITY DEFINER` function (`403`, `PGRST203`)
+until an operator explicitly allowlists it by name in the **API · REST** settings
+group, field **Exposed SECURITY DEFINER functions** (`api.rest.rpcSecurityDefiner`,
+seeded from `REST_RPC_SECURITY_DEFINER`; see the [settings reference](/docs/reference/settings/#api--rest)).
+Function names are matched verbatim against
+`pg_proc.proname`, so an unquoted `CREATE FUNCTION` (lower-cased by Postgres) and
+a quoted, case-sensitive one are allowlisted differently.
+
+<Warning>
+Allowlisting a `SECURITY DEFINER` function means every caller who can reach
+`/rest/v1/rpc/<name>` — including an anonymous one, unless you gate it another
+way — runs it with the owner's privileges. Treat the allowlist the same way
+you'd treat a new admin-only route, not a toggle.
+</Warning>
+
+#### Typed functions
+
+With a generated `Database` type, `.rpc()` reads the function's argument and
+return types from `Functions`, so both the call and `data` are checked at
+compile time:
+
+```ts
+import type { Database } from './database.types'
+
+const client = createClient<Database>(url, anonKey)
+const { data } = await client.rpc('search_products', { term: 'tea' })
+// data is typed from Functions['search_products']['Returns']
+```
+
+| Error | HTTP | Meaning |
+|---|---|---|
+| `PGRST202` | 404 | No function with that name and those argument names exists in the schema cache |
+| `PGRST203` | 403 | A `SECURITY DEFINER` function exists but isn't allowlisted |
+| `PGRST101` | 405 | A `VOLATILE` function was called with `{ get: true }` |
+| `PGRST106` | 406 | The requested schema isn't `public` or an exposed optional schema |
+
+### Transactions
+
+```ts
+const { data, error } = await client.transaction(tx => {
+  tx.from('orders').insert({ id, total })
+  tx.from('stock').update({ count: 4 }).eq('sku', sku)
+})
+```
+
+All or nothing: one Postgres transaction for the whole callback. supabase-js has no
+equivalent — the usual workaround is a sequence of awaited writes inside a `try`, which is
+not a rollback, because whatever already committed stays committed.
+
+The callback **awaits nothing**. It describes the writes; they are sent together and applied
+together. `data` is one result array per operation, in declaration order.
+
+- Writes only (`insert`, `upsert`, `update`, `delete`). A read throws before anything is sent.
+- An empty callback throws.
+- 100 operations maximum, enforced server side.
+- The whole batch runs as one caller, so two operations can never run as different users.
+
+Wire format: [`POST /rest/v1/batch`](/docs/reference/rest-api/).
+
+### Typed clients
+
+Pass the type generated by `motherbase gen types typescript` to type both
+`from()` and `db`: table names, columns, rows, and writes get autocomplete and
+type checks. `.rpc()` reads its argument and return types from `Functions`:
+
+```ts
+import type { Database } from './database.types'
+
+const client = createClient<Database>(url, anonKey)
+const { data } = await client.from('products').select('id,name')  // data: { id: string; name: string }[]
+const products = await client.db.products.findMany({ select: { id: true, name: true } })
+```
+
+Without a `Database` type the client behaves exactly as it does untyped. See the
+[CLI reference](/docs/cli/commands/).
+
+<Note>
+REST queries are enforced by PostgreSQL RLS. A signed-out request runs as `anon`; a signed-in request runs as `authenticated` with `auth.uid()` and `auth.jwt()` claims.
+</Note>
+
+## Auth
+
+`client.auth` **is** [Better Auth](https://www.better-auth.com/docs)'s own client,
+typed with every plugin the server mounts (anonymous, email OTP, magic link, phone
+number, two-factor, organization, generic OAuth, JWT, passkey, SSO, API keys) and
+shipped as a dependency of `@motherbase/client`: you do not install `better-auth`
+yourself. Every method in Better Auth's documentation is there under its own name and
+parameters, and resolves to Better Auth's `{ data, error }`.
+
+This is a deliberate break with supabase-js (since `@motherbase/client` 2.0): the
+`signInWithPassword` / `mfa` names are gone. Porting is a rename, and the
+[compatibility matrix](#compatibility-matrix) names the Better Auth call for every
+supabase-js one. `motherbase migrate codemod` lists them in your code.
+
+```ts
+await client.auth.signUp.email({ email: 'user@example.com', password: 'secret123', name: 'Alice' })
+
+const { data, error } = await client.auth.signIn.email({
+  email: 'user@example.com',
+  password: 'your-password',
+})
+
+// Asks the server: the verified read. { session, user }, or null.
+const { data: current } = await client.auth.getSession()
+
+// The stored session, no network call. Display only, never authorize on it.
+const stored = await client.hydrate()
+
+await client.auth.signOut()
+```
+
+`signUp.email` answers `{ token, user }`, with a `null` token while the project requires
+email verification first. A plugin turned off in the project settings keeps its methods
+on the client, typed, and the server answers them with a `404`.
+
+Email OTP and password reset:
+
+```ts
+await client.auth.emailOtp.sendVerificationOtp({ email, type: 'sign-in' })
+await client.auth.signIn.emailOtp({ email, otp: '123456' })
+
+// The reset is completed with a one-time code, not a redirect link
+await client.auth.emailOtp.requestPasswordReset({ email })
+await client.auth.emailOtp.resetPassword({ email, otp: '123456', password: 'new-secret' })
+
+// Magic link and SMS, when those plugins are on
+await client.auth.signIn.magicLink({ email, callbackURL: 'https://app.example.com/' })
+await client.auth.phoneNumber.sendOtp({ phoneNumber: '+33600000000' })
+await client.auth.phoneNumber.verify({ phoneNumber: '+33600000000', code: '123456' })
+```
+
+Social sign-in (OAuth):
+
+```ts
+// Navigates the browser to the server's start route, which redirects on to the provider
+await client.auth.signIn.social({
+  provider: 'google',
+  callbackURL: 'https://app.example.com/auth/callback',
+})
+
+// On the callback page. createClient already does this on load
+// unless auth.detectSessionInUrl is false.
+const { data, error } = await client.auth.getSessionFromUrl()
+```
+
+In a browser, `signIn.social` is a full-page navigation rather than a fetch: the server
+sets its OAuth state cookie there, and a cookie set on a cross-site fetch response is
+dropped by Safari, Firefox and Chrome incognito. Pass `disableRedirect: true` to get the
+URL back instead. `callbackURL` must be a trusted origin. `getSessionFromUrl()` resolves
+`{ data: null, error: null }` when the URL carries no token, so it is safe on every page.
+
+With `createClient(url, key, { auth: { flowType: 'pkce' } })` the redirect comes back with
+`?code=` instead of a `#access_token=` fragment, and the client exchanges it on load
+(or through `client.auth.exchangeCodeForSession(code)`) against the verifier this browser
+kept, so a leaked redirect URL is worth nothing on its own.
+
+Native apps hand over the provider's id token directly (Sign in with Apple, Google One Tap):
+
+```ts
+await client.auth.signIn.social({ provider: 'apple', idToken: { token, nonce } })
+```
+
+Account management:
+
+```ts
+// Profile fields are flat, not under `data`
+await client.auth.updateUser({ name: 'Ada', image: url })
+
+await client.auth.changePassword({ currentPassword: 'old-secret', newPassword: 'new-secret' })
+
+// Where Better Auth's changeEmail / changePassword cannot: an anonymous user's first
+// email (which makes it permanent, keeping its id), a first password, or a password
+// replaced with the one-time nonce reauthenticate() emails.
+await client.auth.reauthenticate()
+await client.auth.updateUserCredentials({ password: 'new-secret', nonce: '123456' })
+
+// Sessions per device
+await client.auth.listSessions()
+await client.auth.revokeSession({ token })
+await client.auth.revokeOtherSessions()
+
+// Self-service account deletion: the password, or a fresh session
+await client.auth.deleteUser({ password })
+```
+
+Auth state listener:
+
+```ts
+const { data: { subscription } } = client.auth.onAuthStateChange((event, session) => {
+  // event: 'INITIAL_SESSION' | 'SIGNED_IN' | 'USER_UPDATED'
+  //      | 'MFA_CHALLENGE_VERIFIED' | 'SIGNED_OUT'
+})
+```
+
+`INITIAL_SESSION` fires once, as soon as the stored session has been read and before any
+other event — asynchronously, so unsubscribing synchronously suppresses it, exactly as in
+supabase-js. It is what the standard bootstrap
+(`if (event === 'INITIAL_SESSION') setLoading(false)`) depends on: a signed-out visitor
+produces no other event, so without it the app renders its loading state forever. There is
+no `TOKEN_REFRESHED`: Better Auth sessions are not rotated.
+
+Every `client.auth` call that creates, replaces or ends the session writes it back to the
+SDK's session store, so `from()`, storage, functions and realtime send the same bearer.
+Calls that change the user without returning it (`updateUser`, `changeEmail`,
+`updateUserCredentials`, `twoFactor.disable`) are followed by a session read, so the stored
+user and `USER_UPDATED` follow. On a `401` the SDK revalidates once against
+`/api/auth/get-session` (concurrent requests share one revalidation); if the session is gone
+it clears local state and emits `SIGNED_OUT`. There is no refresh token to rotate.
+
+The supabase-js spellings stay on the session the SDK stores (`client.hydrate()`,
+`onAuthStateChange`): `access_token`, `refresh_token` (always `null`), `token_type`, and on
+the user `user_metadata`, `email_confirmed_at`, `identities` and the rest. Better Auth's own
+responses keep its native shape.
+
+### Two-factor
+
+```ts
+// Returns the otpauth URI (render it as a QR code) and the backup codes. Shown once.
+const { data } = await client.auth.twoFactor.enable({ password })
+await client.auth.twoFactor.verifyTotp({ code: '123456' })   // confirms enrolment
+
+await client.auth.twoFactor.getTotpUri({ password })
+await client.auth.twoFactor.generateBackupCodes({ password })
+await client.auth.twoFactor.disable({ password })
+```
+
+When the account has a second factor, password sign-in answers
+`{ twoFactorRedirect: true, twoFactorMethods }` and stores no session until a code is
+verified:
+
+```ts
+const { data } = await client.auth.signIn.email({ email, password })
+
+if (data && 'twoFactorRedirect' in data) {
+  await client.auth.twoFactor.verifyTotp({ code, trustDevice: true })
+
+  // Or a code by email / SMS:
+  await client.auth.twoFactor.sendOtp()
+  await client.auth.twoFactor.verifyOtp({ code })
+
+  // Or a recovery code:
+  await client.auth.twoFactor.verifyBackupCode({ code })
+}
+// The verified session is stored; onAuthStateChange reports MFA_CHALLENGE_VERIFIED.
+```
+
+The SDK sends the pending-challenge cookie on these calls, so the project's CORS settings
+must allow the app's origin when app and API are on different sites. Enabling two-factor
+requires the password: Better Auth treats it as a credential change. There is one TOTP
+factor per user, not a factor list.
+
+### Passkeys
+
+```ts
+await client.auth.passkey.addPasskey({ name: 'MacBook' })
+await client.auth.passkey.listUserPasskeys()
+await client.auth.passkey.updatePasskey({ id, name: 'Work laptop' })
+await client.auth.passkey.deletePasskey({ id })
+
+await client.auth.signIn.passkey()
+```
+
+The project needs **Auth · Passkey** on, with the relying party set to the app's domain.
+
+### Enterprise SSO
+
+```ts
+await client.auth.signIn.sso({ email, callbackURL })
+await client.auth.signIn.sso({ domain: 'acme.com', callbackURL })
+await client.auth.signIn.sso({ providerId: 'acme-okta', callbackURL })
+await client.auth.signIn.sso({ organizationSlug: 'acme', callbackURL })
+```
+
+Resolves the identity provider and redirects to it. The project needs the SSO plugin
+enabled and at least one provider registered (Studio → Authentication → Organizations,
+with the project-wide **Auth · SSO** switch enabled).
+
+### Organizations, invitations and teams
+
+```ts
+const { data: organization, error } = await client.auth.organization.create({
+  name: 'Acme',
+  slug: 'acme',
+})
+
+await client.auth.organization.inviteMember({
+  organizationId: organization!.id,
+  email: 'person@acme.example',
+  role: 'member',
+})
+
+const { data: full } = await client.auth.organization.getFullOrganization({
+  query: { organizationId: organization!.id },
+})
+```
+
+The namespace is Better Auth's organization client:
+
+| Capability | Methods |
+|---|---|
+| Organization lifecycle | `create`, `update`, `delete`, `list`, `getFullOrganization`, `setActive`, `checkSlug`, `leave` |
+| Members and permissions | `listMembers`, `getActiveMember`, `getActiveMemberRole`, `removeMember`, `updateMemberRole`, `hasPermission` |
+| Invitations | `inviteMember`, `acceptInvitation`, `rejectInvitation`, `cancelInvitation`, `getInvitation`, `listInvitations`, `listUserInvitations` |
+| Teams | `createTeam`, `updateTeam`, `removeTeam`, `listTeams`, `setActiveTeam`, `listUserTeams`, `listTeamMembers`, `addTeamMember`, `removeTeamMember` |
+
+`organizationId` is optional on methods that target an organization and defaults
+to the active organization in the session. `create` activates the new
+organization unless `keepCurrentActiveOrganization` is true. Teams require
+`auth.organization.teamsEnabled`; the available roles are `owner`, `admin` and
+`member`. `auth.organization.maxMembers` is `0` for unlimited seats and applies
+to direct member adds, invitation acceptance and SSO auto-provisioning.
+
+Invitations are email-based. The invitation email contains the invitation id;
+the recipient can inspect it with `getInvitation({ query: { id } })`, then call
+`acceptInvitation({ invitationId })` or `rejectInvitation({ invitationId })`.
+An organization admin can withdraw an outgoing invitation with
+`cancelInvitation({ invitationId })`.
+
+For authorization checks, use `hasPermission({ permissions })` or handle the
+structured error returned by a refused operation. Do not infer permissions from
+the fact that a caller is an organization member.
+
+### Runtime SSO provider management
+
+Organization SSO providers are tenant data. The project must have **Auth · SSO**
+enabled, and an organization provider must include that organization's
+`organizationId`:
+
+```ts
+const { data, error } = await client.auth.sso.register({
+  providerId: 'acme-okta',
+  issuer: 'https://acme.okta.com',
+  domain: 'acme.example',
+  organizationId: organization.id,
+  oidcConfig: {
+    clientId: '…',
+    clientSecret: '…',
+    discoveryEndpoint: 'https://acme.okta.com/.well-known/openid-configuration',
+    scopes: ['openid', 'email', 'profile'],
+  },
+})
+```
+
+Use `samlConfig` instead of `oidcConfig` for SAML. The returned `redirectURI` is
+the callback URL to register at the IdP. `sso.providers()` and `sso.getProvider()`
+mask or omit secrets; `sso.updateProvider()` merges the supplied config fields and
+`sso.deleteProvider()` removes one. Only an organization owner or admin may manage a
+provider scoped to that organization. A provider without `organizationId` is
+project-wide.
+
+### User administration
+
+`client.auth.admin` is Motherbase's API, shaped like `supabase.auth.admin` — not Better
+Auth's admin plugin, which the server does not mount. It requires a **secret** key, so it
+belongs on a server. A publishable key gets a 401 from these routes.
+
+```ts
+const admin = createClient(API_URL, process.env.MOTHERBASE_SECRET_KEY!)
+
+await admin.auth.admin.listUsers({ page: 1, perPage: 50 })
+await admin.auth.admin.getUserById(id)
+await admin.auth.admin.createUser({ email, password, role: 'USER' })
+await admin.auth.admin.updateUserById(id, { role: 'ADMIN', password })
+await admin.auth.admin.signOut(id)              // ends every session they hold
+await admin.auth.admin.deleteUser(id)
+await admin.auth.admin.inviteUserByEmail(email)
+await admin.auth.admin.mfa.listFactors({ userId: id })
+await admin.auth.admin.mfa.deleteFactor({ userId: id, id: factorId })
+```
+
+`generateLink({ type, email })` covers `signup`, `invite`, `magiclink` and `recovery`.
+Recovery is code-based, so it returns `email_otp` and no `action_link`; the
+`email_change_*` types are refused.
+
+### Linked accounts
+
+```ts
+const { data: accounts } = await client.auth.listAccounts()
+await client.auth.linkSocial({ provider: 'github', callbackURL })
+await client.auth.unlinkAccount({ providerId: 'github' })
+```
+
+A password account lists its `credential` account: it is a real linked credential.
+`linkSocial` only *starts* the flow, with a redirect to the provider.
+
+### Session JWT
+
+```ts
+// A JWT for the current session, minted by the server's JWT plugin
+const { data } = await client.auth.token()   // { token }
+```
+
+A Better Auth session token is an opaque bearer, which is why there is no `getClaims()`.
+Verify the JWT server side against `/api/auth/jwks`.
+
+## Session storage
+
+For a ready-made wiring per framework — Next.js, React, Vue, Nuxt, SvelteKit, Expo, Node — see [Framework Quickstarts](/docs/getting-started/frameworks/).
+
+Exports:
+
+```ts
+import {
+  memoryStorage,
+  localStorageStorage,
+  cookieStorage,
+  serverCookieStorage,
+} from '@motherbase/client'
+```
+
+Browser local storage:
+
+```ts
+const client = createClient(API_URL, PUBLISHABLE_KEY, {
+  storage: localStorageStorage(),
+})
+```
+
+Browser cookies:
+
+```ts
+const client = createClient(API_URL, PUBLISHABLE_KEY, {
+  storage: cookieStorage({ secure: true, sameSite: 'lax' }),
+})
+```
+
+Next.js server cookie storage. `serverCookieStorage(cookies, key?, { secure? })`
+takes the batch `getAll` / `setAll` shape that `next/headers`, `NextRequest.cookies`
+and `NextResponse.cookies` already expose, so the store can be passed through:
+
+```ts
+import { cookies } from 'next/headers'
+import { createClient, serverCookieStorage } from '@motherbase/client'
+
+export async function createServerClient() {
+  const store = await cookies()
+
+  return createClient(API_URL, PUBLISHABLE_KEY, {
+    storage: serverCookieStorage({
+      getAll: () => store.getAll(),
+      setAll: (list) => list.forEach(({ name, value, options }) => store.set(name, value, options)),
+    }),
+  })
+}
+```
+
+In a Next.js app, prefer `createBrowserClient` / `createServerClient` from
+[`@motherbase/ssr`](/docs/packages/ssr/), which wire this up for you.
+
+Expo / React Native:
+
+```ts
+import AsyncStorage from '@react-native-async-storage/async-storage'
+import { createClient } from '@motherbase/client'
+
+const client = createClient(API_URL, PUBLISHABLE_KEY, {
+  storage: {
+    async get() {
+      const raw = await AsyncStorage.getItem('session')
+      return raw ? JSON.parse(raw) : null
+    },
+    async set(session) {
+      if (session) await AsyncStorage.setItem('session', JSON.stringify(session))
+      else await AsyncStorage.removeItem('session')
+    },
+  },
+})
+```
+
+## Storage
+
+```ts
+const bucket = client.storage.from('avatars')
+
+const { data: uploaded, error } = await bucket.upload('me.png', file, {
+  visibility: 'public',
+})
+
+if (!error && uploaded) {
+  const { data: blob } = await bucket.download(uploaded.path)
+  const { data: signed } = await bucket.createSignedUrl(uploaded.path, 3600)
+  const { data: pub } = bucket.getPublicUrl(uploaded.path)
+
+  await bucket.remove([uploaded.path])
+}
+```
+
+Objects are addressed by **path within the bucket**, the same way supabase-js does.
+`upload` resolves to `{ path, id, fullPath }`; `download`, `remove`, `createSignedUrl`
+and `getPublicUrl` all take that `path`. A bare UUID is also accepted anywhere a path is,
+and routes to the object by its server-issued file id instead — useful when you stored the
+id rather than the key.
+
+Listing:
+
+```ts
+const { data: objects } = await bucket.list('avatars/', {
+  limit: 50,
+  offset: 0,
+  search: 'me',
+  sortBy: { column: 'name', order: 'asc' },
+})
+```
+
+Many files at once:
+
+```ts
+const { data: results } = await bucket.uploadMany(
+  files.map(file => ({ path: `avatars/${file.name}`, file })),
+  {
+    concurrency: 4,
+    onProgress: ({ completed, total, path, error }) => setProgress(completed / total),
+  },
+)
+```
+
+`uploadMany` never rejects: each entry comes back as `{ path, data, error }`, in input order,
+so one bad file does not lose the other nineteen results. `concurrency` defaults to 4, and the
+workers share one cursor rather than fixed slices, so a slow file does not stall the rest.
+
+`storage.from(bucket).upload(...)` sends the bucket slug to Motherbase. Quota, CORS, access tokens, and webhooks are still managed from Project Studio, the admin API, or the CLI; buckets themselves can also be administered from the SDK (below).
+
+### Bucket administration
+
+```ts
+const { data: buckets } = await client.storage.listBuckets()
+const { data: bucket }  = await client.storage.getBucket('avatars')
+
+await client.storage.createBucket('avatars', { public: true, name: 'Avatars' })
+await client.storage.updateBucket('avatars', { public: false })
+
+await client.storage.emptyBucket('avatars')             // objects go, bucket stays
+await client.storage.deleteBucket('avatars', { force: true })
+```
+
+Every one of these needs a **secret** project API key — the same rule Supabase
+applies, where bucket administration is a service-role operation. With a
+publishable key they resolve with a `401` error, so keep them in server code and
+setup scripts, never in a browser bundle. `deleteBucket` refuses a bucket that
+still holds objects unless `force` is passed, so one unqualified call cannot
+destroy the files in it.
+
+`getPublicUrl(path)` is synchronous and returns `<url>/api/storage/<bucket>/files/<path>`.
+Use it only for public bucket objects — it signs nothing and checks nothing. Private
+objects should be read with `download()` or `createSignedUrl()` from an authenticated
+session.
+
+Copy, move, replace, and metadata:
+
+```ts
+await bucket.update('me.png', file)          // upload with upsert forced on
+await bucket.copy('me.png', 'archive/me.png', { upsert: true })
+await bucket.move('me.png', 'archive/me.png')
+
+const { data: meta } = await bucket.info('me.png')   // no download
+const { data: there } = await bucket.exists('me.png')
+```
+
+`exists()` reads a `404` as `false`. Anything else — a `403`, a network failure —
+comes back as an error rather than as "no", because treating an authorization
+failure as absence is how a UI offers to create something that already exists.
+
+Signed URLs, for handing an object to someone without a session (an `<img src>`, an email link). They are signed for the project's storage domain and expire on their own:
+
+```ts
+const { data } = await bucket.createSignedUrl('me.png', 900)   // 15 minutes
+// data.signedUrl, data.expiresAt
+
+// Several at once. Each entry reports on its own; one missing object does not
+// fail the batch.
+const { data: many } = await bucket.createSignedUrls(['a.png', 'b.png'], 900)
+// [{ path, signedUrl, error }, …]
+```
+
+`expiresIn` is in seconds, defaults to `3600`, and must be between `1` and `604800` (7 days,
+the AWS SigV4 ceiling). Anything outside that is a `400` rather than a silent clamp — a
+caller asking for 30 days wants a 30-day URL, and quietly returning a 7-day one is the same
+bug as ignoring the argument.
+
+Direct-to-storage uploads (S3 driver only):
+
+```ts
+const { data: slot } = await bucket.createSignedUploadUrl('me.png', {
+  size: file.size,
+  contentType: file.type,
+})
+
+await bucket.uploadToSignedUrl('me.png', slot.token, file)
+```
+
+Unlike supabase-js this needs the byte `size` up front: the upload is reserved
+against the bucket quota and the signature is bound to that exact length, which is
+what stops a signed URL from becoming an unbounded write. `uploadToSignedUrl` PUTs
+the bytes and then finalises server-side; the object only becomes readable after
+the finalise, so a PUT that lands with a failed finalise leaves a reservation to
+expire rather than a half-visible object. The `local` driver has no presigned
+uploads.
+
+<Note>
+`expiresAt` is `null` when nothing actually expires: a **public** object's URL is permanent,
+and a **private** object under the `local` storage driver resolves to the authenticated
+streaming endpoint, which is bound to the session rather than to a clock and so cannot be
+handed to a third party at all. Check `expiresAt` rather than assuming `expiresIn` applied.
+</Note>
+
+## Realtime
+
+```ts
+const channel = client
+  .channel('room-products')
+  .on('postgres_changes', { event: '*', schema: 'public', table: 'products' }, (payload) => {
+    console.log(payload.eventType, payload.new, payload.old)
+  })
+  .subscribe((status, error) => {
+    console.log(status, error)
+  })
+
+client.getChannels()                 // every channel this client holds
+await client.removeChannel(channel)
+await client.removeAllChannels()
+```
+
+Realtime uses Socket.IO at `/ws`. `socket.io-client` is imported lazily when `connect()` runs, so apps that never use realtime do not need the optional dependency.
+
+Supported channel event types: `postgres_changes`, `broadcast`, `presence`. Any other type
+throws immediately rather than silently never firing.
+
+`postgres_changes` event filters: `INSERT`, `UPDATE`, `DELETE`, `*`.
+
+Broadcast:
+
+```ts
+const room = client.channel('room-1', { config: { broadcast: { self: true, ack: true } } })
+
+room.on('broadcast', { event: 'cursor' }, ({ payload }) => console.log(payload))
+room.subscribe()
+
+await room.send({ type: 'broadcast', event: 'cursor', payload: { x: 12, y: 40 } })
+```
+
+The sender receives its own message only with `config.broadcast.self`. With
+`config.broadcast.ack`, `send()` resolves on the server ack (`'ok' | 'timed out' | 'error'`)
+instead of resolving immediately.
+
+Presence:
+
+```ts
+const room = client.channel('room-1', { config: { presence: { key: userId } } })
+
+room.on('presence', { event: 'sync' }, () => console.log(room.presenceState()))
+// Each event's callback is typed with its own payload (since 2.2.2)
+room.on('presence', { event: 'join' }, ({ key, newPresences }) => console.log(key, newPresences))
+room.on('presence', { event: 'leave' }, ({ key, leftPresences }) => console.log(key, leftPresences))
+
+room.subscribe(status => {
+  if (status === 'SUBSCRIBED') void room.track({ name: 'Ada', typing: false })
+})
+
+await room.untrack()
+```
+
+The server sends the full presence state; the client diffs it into `sync` / `join` / `leave`.
+
+`subscribe()` returns the channel, not a promise — `track()` and `send()` before the join ack
+are rejected server-side, so issue the first one from the `SUBSCRIBED` callback. See
+[Realtime](/docs/platform/realtime) for presence keys, typing indicators, and reconnection.
+
+Channel status, reported to the `subscribe()` callback: `SUBSCRIBED`, `TIMED_OUT`,
+`CHANNEL_ERROR`, `CLOSED`.
+
+Payload shape:
+
+```ts
+interface PostgresChangePayload<T> {
+  schema: string
+  table: string
+  eventType: 'INSERT' | 'UPDATE' | 'DELETE'
+  new: T | Record<string, never>
+  old: T | Record<string, never>
+  commit_timestamp: string
+}
+```
+
+Realtime table events respect the same RLS visibility model as REST for rows that still exist. Delete events carry the deleted row in `old`.
+
+The low-level `client.realtime` module is exported for direct table watchers and status listeners, but app code should prefer `client.channel()`.
+
+## Edge functions
+
+```ts
+const { data, error } = await client.functions.invoke('hello', {
+  body: { name: 'Ada' },
+  method: 'POST',        // GET and DELETE send no body
+  headers: { 'x-trace': '1' },
+})
+```
+
+`invoke` always resolves `{ data, error }` — it never throws — but `error` is an
+instance of the supabase-js error classes, so ported code that branches on them
+keeps working:
+
+```ts
+import { FunctionsHttpError, FunctionsFetchError } from '@motherbase/client'
+
+if (error instanceof FunctionsHttpError) console.error(error.status)
+```
+
+`FunctionsHttpError` means the function ran and answered non-2xx;
+`FunctionsFetchError` means the request never reached it. `FunctionsRelayError` and
+the `FunctionsError` base are exported for parity.
+
+Invocation is private by default: a signed-in session is enough, anonymous callers reach
+only a function marked **Public** in Studio (see
+[Who can call a function](/docs/platform/edge-functions/#who-can-call-a-function)). From a
+trusted server with no user, create the client with a **secret** project key: it is sent
+with every request, function calls included.
+
+```ts
+const server = createClient(process.env.MOTHERBASE_URL!, process.env.MOTHERBASE_SECRET_KEY!)
+await server.functions.invoke('hello', { body: {} })
+```
+
+A project that uses `EDGE_INVOKE_TOKEN` instead passes it per call:
+
+```ts
+await client.functions.invoke('hello', {
+  body: {},
+  auth: { type: 'edge-token', token: process.env.EDGE_INVOKE_TOKEN! },
+})
+```
+
+## Subpath exports
+
+Two extra entry points ship in the same package. Neither is loaded by `@motherbase/client` itself.
+
+### `@motherbase/client/query`
+
+Cache keys and fetchers for React Query or SWR. No dependency on either: the returned object
+is a plain `{ queryKey, queryFn }`, which is what `useQuery` takes, and SWR uses the same two
+fields as key and fetcher.
+
+```ts
+import { keys, listQuery, rowQuery, allRowsQuery } from '@motherbase/client/query'
+
+useQuery(listQuery(client, 'posts', {
+  filters: { author },
+  build: q => q.select('*').eq('author', author).order('created_at'),
+}))
+
+useQuery(rowQuery(client, 'posts', id))            // resolves null when absent, does not throw
+useQuery(allRowsQuery(client, 'tags'))             // walks stream(), ignores api.rest.maxRows
+```
+
+The fetchers **throw** on `{ error }` instead of returning it. That is the whole point: a fetcher
+that resolves with `{ data: null, error }` looks successful to React Query, so the error gets
+cached, `isError` stays false, and the UI renders an empty list forever.
+
+Keys are hierarchical — `keys.table('posts')` is a prefix of every list and row key below it, so
+one `invalidateQueries` after a write reaches all of them. Pass `filters` for any filtered list, or
+two different filters on the same table share one cache entry.
+
+### `@motherbase/client/testing`
+
+Run a query as a specific user, or as nobody, so an RLS policy can actually be asserted.
+
+```ts
+import { createTestClient } from '@motherbase/client/testing'
+
+const asAlice = createTestClient(url, secretKey, { as: alice.id })
+const asBob   = createTestClient(url, secretKey, { as: bob.id })
+const asAnon  = createTestClient(url, secretKey, { as: 'anon' })
+
+expect((await asAlice.from('notes').select('*')).data).toHaveLength(1)
+expect((await asBob.from('notes').select('*')).data).toHaveLength(0)
+```
+
+`as` takes a user id, `'anon'` for a signed-out visitor, or `'service_role'` to keep the secret
+key's own bypass-everything identity. Each client gets its own in-memory session, so two of them
+in one file cannot clobber each other.
+
+<Warning>
+Server side only. It needs the project **secret** key, which bypasses RLS and must never reach a
+browser. `createTestClient` throws if the key is not an `mb_secret_…` one, and the server refuses
+the `x-motherbase-impersonate` header with a 403 for any other key — so the worst case is a failed
+request, not a privilege escalation. Impersonation can only ever lower the privilege of a caller
+who already had everything.
+</Warning>
+
+## Compatibility matrix
+
+Every row below is produced by a contract test that runs the real
+`@motherbase/client` against a real Motherbase server backed by a real Postgres,
+in the backend repository
+(`apps/server/tests/sdk-contract.integration.test.ts`). The test writes
+`packages/client/COMPATIBILITY.md`; `npm run docs:sync` splices that file in
+here. The table cannot claim more or less than the code does, and a row marked
+**Not supported** asserts the current failure behaviour — implementing the
+feature breaks the test and forces the table to be regenerated.
+
+- **Supported**: behaves as supabase-js does.
+- **Partial**: works, with the difference stated in the note.
+- **Not supported**: not implemented today. The note says what happens if you call it.
+
+{/* BEGIN GENERATED COMPATIBILITY */}
+
+### Client
+
+| Surface | Status | Notes |
+| --- | --- | --- |
+| `createClient(url, key, options)` | Supported | The key is sent as an apikey header. Options cover session storage, a fetch override and extra headers. |
+| `client.getChannels()` | Supported | Returns the channels this client has created, as supabase-js does. |
+| `createClient(url, key, { auth, db, global })` | Supported | supabase-js nests its options under auth, db, global and realtime, and ported code passes them that way. Both spellings are read, the flat one winning where they collide, so &#123; auth: &#123; persistSession &#125; &#125; and &#123; global: &#123; headers, fetch &#125; &#125; take effect instead of being silently dropped. auth.storage accepts either adapter shape, including a React Native AsyncStorage. |
+| `client.rpc(fn, args)` | Supported | POST and GET /rest/v1/rpc/:fn resolve a public function from the catalog and call it with named arguments inside the caller RLS transaction. SECURITY DEFINER functions are refused unless an operator allowlists them, and an unknown function is a 404. |
+| `client.schema('other') / createClient(url, key, { db: { schema } })` | Partial | schema('public') is the client. schema(name).rpc() calls functions in another schema through the Content-Profile/Accept-Profile headers, for the schemas a feature exposes (Queues' pgmq_public); any other is refused with PGRST106. Tables are served from public only, so schema(name).from() and the db.schema constructor option throw with the reason rather than reading public under another name. |
+| `createClient<Database>(url, key)` | Supported | motherbase gen types typescript emits the supabase-js Database shape (Row, Insert, Update, Relationships, Enums, Functions) from the Postgres catalog, and createClient&lt;Database&gt; types from() and rpc() from it. Unknown columns are still rejected at runtime as well. |
+
+### Data · verbs
+
+| Surface | Status | Notes |
+| --- | --- | --- |
+| `from(t).delete().eq(col, v)` | Supported | Deleted rows are returned when .select() is requested. The delete is bound to the row versions whose realtime audience was captured. |
+| `from(t).delete()` | Partial | An unfiltered delete is refused with 400 for non-admin callers, on purpose. supabase-js would delete every visible row. |
+| `from(t).insert([rowA, rowB])` | Supported | An array body is compiled into one multi-row INSERT. Rows may declare different key subsets; a key a row omits is written as DEFAULT so the column default applies. |
+| `from(t).insert(row)` | Supported | One row per call; .select() returns it with server defaults applied. Without .select(), data is null. |
+| `from(t).select('*')` | Supported | Awaitable, resolves to &#123; data, error &#125; and never throws for an API error. |
+| `from(t).update(values).eq(col, v)` | Supported | Returns the updated rows when .select() is requested. A filter that matches nothing is a 404 rather than an empty array. |
+| `from(t).upsert(rows, { onConflict })` | Supported | A real INSERT ... ON CONFLICT DO UPDATE. The conflict target is ?on_conflict= or the catalog primary key, and a row that actually conflicted emits an updated realtime event rather than a created one. |
+| `from(t).insert(row).select()` | Supported | Writes return no rows by default. Add .select() to opt into a representation, subject to the caller’s SELECT policy. |
+
+### Data · filters
+
+| Surface | Status | Notes |
+| --- | --- | --- |
+| `from(t).containedBy(col, v) / .overlaps(col, v)` | Supported | Compiled to the contained-by and overlap operators, on array and range columns. |
+| `from(t).contains(col, value)` | Supported | Compiled to the containment operator. It applies to array, range and jsonb columns; used on a scalar column it is a 400 rather than a silently empty result. |
+| `from(t).eq(col, v)` | Supported | Compiled to a parameterised equality. |
+| `from(t).filter(col, op, value)` | Supported | The escape hatch reaches any operator in the dialect, including ones with no dedicated builder method. |
+| `from(t).gt/gte/lt/lte(col, v)` | Supported | All four compile to the matching SQL comparison. |
+| `from(t).ilike(col, pattern)` | Supported | Case-insensitive ILIKE with PostgREST anchoring, so %ETA means "ends with eta" rather than a substring match. |
+| `from(t).in(col, [..])` | Supported | Compiled to an IN list. The client quotes any value that needs it, so a value containing a comma stays one value instead of splitting into two. |
+| `from(t).is(col, null \| true \| false)` | Supported | is null becomes IS NULL. Boolean forms become an equality. |
+| `from(t).eq('col->>key', v)` | Supported | A jsonb path operand is parsed and compiled. The text arrow compares as text, the object arrow compares as jsonb, and every path segment is bound as a parameter rather than interpolated. |
+| `from(t).like(col, pattern)` | Supported | Case-sensitive LIKE with PostgREST anchoring. * is translated to %, and an unanchored pattern is an exact match. |
+| `from(t).match({ col: v })` | Supported | Expanded into one equality filter per key, all ANDed together. |
+| `from(t).neq(col, v)` | Supported | Compiled to !=, so NULL values are excluded exactly as in PostgREST. |
+| `from(t).not(col, op, value)` | Supported | Emitted as a not. prefix and honoured on every operator, including not.is.null. |
+| `from(t).or('a.eq.1,b.eq.2')` | Supported | Emitted as an or group and compiled recursively, so a nested and() inside it works too. |
+| `from(t).rangeGt/rangeGte/rangeLt/rangeLte/rangeAdjacent` | Supported | Emitted as the strictly-left, strictly-right, not-extending and adjacent operators. The compat fixture has no range column, so this pins the emitted encoding rather than a result set. |
+| `from(t).textSearch(col, query)` | Supported | Maps to the four text-search operators, with an optional configuration rendered in parentheses. |
+
+### Data · modifiers
+
+| Surface | Status | Notes |
+| --- | --- | --- |
+| `from(t).select().abortSignal(signal)` | Supported | The signal is handed to fetch, so an aborted query settles as an error instead of resolving rows. |
+| `from(t).select().csv() / .explain()` | Partial | csv() returns RFC 4180 text. explain() is admin-only: the server answers 403 for a normal caller, so an application cannot rely on it. |
+| `from(t).limit(n)` | Supported | Sent as ?limit=n. The server caps it at the console-tunable api.rest.maxRows (1000 by default). |
+| `from(t).limit(n, { foreignTable })` | Supported | Emitted as &lt;relation&gt;.limit and applied to the embedded subquery, so a parent keeps all its rows while its children are capped. |
+| `from(t).update(v).maxAffected(n) / .rollback()` | Supported | maxAffected rejects and rolls back writes above the limit; rollback performs a dry run. Both preserve transaction atomicity even when no rows are requested. |
+| `from(t).select().maybeSingle()` | Supported | Resolves the first row or null. Applied client side. |
+| `from(t).order(col, { ascending })` | Supported | Multiple order() calls are concatenated into one ?order= list, as PostgREST does. |
+| `from(t).order(col, { nullsFirst, referencedTable })` | Supported | nullsFirst emits the nullsfirst and nullslast qualifiers, and referencedTable scopes the ordering to an embedded relation. |
+| `from(t).range(from, to)` | Supported | Translated to limit and offset. The server also reads a Range request header and always answers with Content-Range and Range-Unit. |
+| `from(t).select().returns<T>()` | Supported | A compile-time cast helper. It changes no request, matching supabase-js. |
+| `from(t).select().setHeader(name, value)` | Supported | Sends the header with that request only. It is how a CAPTCHA token reaches a table guarded under Attack Protection. |
+| `from(t).select().single()` | Supported | Resolves one row, or a PGRST116 error when the result is not exactly one row. Applied client side. |
+| `from(t).select().throwOnError()` | Supported | Rejects instead of resolving &#123; data: null, error &#125;, so ported code using try/catch works. Without it the envelope is still the default, in both SDKs. |
+
+### Data · response
+
+| Surface | Status | Notes |
+| --- | --- | --- |
+| `from(t).select('*', { count: 'exact' })` | Supported | Prefer count=exact, planned or estimated is honoured, and the total comes back with a Content-Range header computed in the same transaction as the rows. |
+| `from(t).select() with no limit` | Supported | An unbounded select returns up to api.rest.maxRows (1000 by default), which is what PostgREST does with db-max-rows and what a Supabase app was built against. One number governs both the default and the ceiling, so lowering it is how you cap an unbounded read. |
+| `from(t).select('*, author(*)')` | Supported | Embedded resources compile to correlated LATERAL subqueries inside the same RLS transaction, so embedded rows are policy-filtered too. Aliases, !inner, FK hints, nested filter/order/limit and the count aggregate all work. |
+| `{ data, error } result envelope` | Supported | Expected API failures resolve rather than throw. error is &#123; message, status, code &#125;. |
+| `from(t).select('alias:col, col::text')` | Supported | Renamed columns and casts both compile. A cast target must be a bare lowercase type name with an optional array marker, so it cannot smuggle SQL. |
+| `from(t).select('id,label')` | Supported | Column lists are validated against the table and compiled into the SELECT list. |
+
+### Auth
+
+| Surface | Status | Notes |
+| --- | --- | --- |
+| `auth.admin.*` | Partial | User administration, MFA factor administration (admin.mfa.listFactors / deleteFactor) and generateLink, only with a secret project API key. This is Motherbase's API, shaped like supabase-js, not Better Auth's admin plugin. Narrower than the supabase service role, which also opens SQL and DDL. generateLink covers signup, invite, magiclink and recovery; recovery is code-based here, so it returns email_otp and no action_link, and email_change_* is refused. |
+| `auth.<any Better Auth client method>` | Supported | client.auth is Better Auth's client, typed with every plugin the server mounts (anonymous, email OTP, magic link, phone number, two-factor, organization, generic OAuth, JWT, passkey, SSO, API keys). Method names, parameters and the &#123; data, error &#125; results are Better Auth's, so its documentation applies as written; the SDK stores the session it returns, which is what from(), storage and realtime then send. |
+| `auth.deleteUser()` | Partial | Better Auth's deleteUser: self-service, which supabase-js only offers to an admin. It takes the password (or a fresh session), and clears the local session once the account is gone. |
+| `auth.exchangeCodeForSession(code) / getSessionFromUrl(href?)` | Supported | With flowType 'pkce' the S256 challenge rides on the callback URL and the redirect returns ?code=, exchanged once against the verifier this browser kept (automatically on load, as detectSessionInUrl does). The implicit flow remains the default: the token comes back in the fragment and getSessionFromUrl reads it and strips it from the URL. |
+| `auth.getClaims()` | Not supported | Use auth.token(): a Better Auth session token is an opaque bearer, so the jwt plugin mints a JWT for the session. Verify it server side against /api/auth/jwks. |
+| `auth.getSession()` | Partial | Better Auth's getSession: it asks the server, so it is the verified read, and returns &#123; session, user &#125; with Better Auth's session row rather than a token pair. A session the server no longer knows is cleared locally. The stored session without a network call is client.hydrate(). |
+| `auth.getUser()` | Not supported | Use auth.getSession(), which asks the server and returns the user with the session. |
+| `auth.getUserIdentities() / linkIdentity() / unlinkIdentity()` | Not supported | Use auth.listAccounts(), auth.linkSocial(&#123; provider, callbackURL &#125;) and auth.unlinkAccount(&#123; providerId &#125;). A password account lists its credential account. |
+| `auth.mfa.*` | Not supported | Use auth.twoFactor: enable(&#123; password &#125;) returns the TOTP URI and backup codes, verifyTotp / verifyOtp / verifyBackupCode finish a sign-in that answered twoFactorRedirect, disable(&#123; password &#125;) turns it off. The aal the server stamps on a session is on auth.getSession(). |
+| `auth.onAuthStateChange(cb)` | Supported | Fires INITIAL_SESSION once on subscribe, as supabase-js does, so an app that clears its loading flag on that event also clears it for a signed-out visitor. Then SIGNED_IN, USER_UPDATED, MFA_CHALLENGE_VERIFIED and SIGNED_OUT as the Better Auth calls change the session. There is no TOKEN_REFRESHED: Better Auth sessions are not rotated. Returns &#123; data: &#123; subscription &#125; &#125;. |
+| `auth.refreshSession() / startAutoRefresh()` | Not supported | Better Auth sessions have no refresh token to rotate. auth.getSession() revalidates, and the client already does so on a 401. |
+| `auth.resetPasswordForEmail(email)` | Not supported | Use auth.emailOtp.requestPasswordReset(&#123; email &#125;), then auth.emailOtp.resetPassword(&#123; email, otp, password &#125;): the reset is completed with a one time code rather than a redirect link. |
+| `session.access_token / user.user_metadata` | Partial | The session the SDK stores (client.hydrate(), onAuthStateChange) carries the supabase-js spellings alongside the native ones: access_token, refresh_token (always null), token_type, and on the user aud, role, created_at, email_confirmed_at, phone, identities and user_metadata holding the profile fields. app_metadata is &#123;&#125; rather than a guessed provider, and expires_at is absent. Better Auth's own responses keep its native shape. |
+| `auth.setSession({ access_token, refresh_token })` | Not supported | A session token from elsewhere is adopted through the storage adapter the client is created with, or through auth.getSessionFromUrl() on an OAuth return. |
+| `auth.signInWithIdToken({ provider, token })` | Not supported | Use auth.signIn.social(&#123; provider, idToken: &#123; token &#125; &#125;), for Sign in with Apple and Google One Tap from a native app. The provider must be configured on the backend. |
+| `auth.signInWithOAuth({ provider, options })` | Not supported | Use auth.signIn.social(&#123; provider, callbackURL &#125;). In a browser it navigates to the server's start route, which keeps the OAuth state cookie first-party; disableRedirect: true returns the URL instead. The redirect back is completed by getSessionFromUrl(), on load by default. |
+| `auth.signInWithOtp({ email \| phone }) then auth.verifyOtp({ token })` | Not supported | Use auth.emailOtp.sendVerificationOtp(&#123; email, type: 'sign-in' &#125;) then auth.signIn.emailOtp(&#123; email, otp &#125;); by SMS, auth.phoneNumber.sendOtp and auth.phoneNumber.verify, when the phone-number plugin is on with a sender configured. Magic links are auth.signIn.magicLink. |
+| `auth.signInWithPassword({ email, password })` | Not supported | Use auth.signIn.email(&#123; email, password &#125;). The session is stored through the configured storage adapter and SIGNED_IN fires; with two-factor on, the answer is &#123; twoFactorRedirect: true &#125; and no session until auth.twoFactor verifies a code. |
+| `auth.signInWithSSO({ domain })` | Not supported | Use auth.signIn.sso(&#123; email, callbackURL &#125;), or name the provider by domain, providerId or organizationSlug instead of email. The project needs the SSO plugin on and a provider registered; providers are managed with auth.sso.*. |
+| `auth.signOut()` | Supported | Better Auth's signOut: revokes the server session and clears the local one. Other devices are auth.revokeOtherSessions(), every device auth.revokeSessions(). |
+| `auth.signUp({ email, password })` | Not supported | Use auth.signUp.email(&#123; email, password, name &#125;). It answers &#123; token, user &#125;, with a null token while the project requires email verification first. |
+| `auth.updateUser({ data, email, password })` | Partial | Better Auth's updateUser takes the profile fields flat (&#123; name, image, ...additional fields &#125;), not under data. A password is auth.changePassword(&#123; currentPassword, newPassword &#125;); an anonymous user's first email, a first password, or a password replaced with the nonce from auth.reauthenticate() is auth.updateUserCredentials(). |
+
+### Storage
+
+| Surface | Status | Notes |
+| --- | --- | --- |
+| `storage.createBucket/getBucket/listBuckets/updateBucket/emptyBucket/deleteBucket` | Partial | All six are on the client and every one needs a secret project API key, which is the same rule Supabase applies to bucket administration. With a publishable key they resolve with a 401 rather than a partial answer. deleteBucket refuses a bucket that still holds objects unless force is passed, so one unqualified call cannot destroy the files in it. |
+| `storage.from(b).createSignedUrl(path, expiresIn)` | Partial | expiresIn is read, in seconds, and validated from 1 second to 7 days (the AWS SigV4 ceiling); a longer lifetime is refused rather than quietly clamped. It resolves to &#123; signedUrl, expiresAt &#125;, and expiresAt is null when nothing actually expires: a public object URL is permanent, and a private object on the local driver resolves to the authenticated streaming endpoint, which is bound to the session rather than to a clock. |
+| `storage.from(b).createSignedUrls(paths, expiresIn)` | Supported | Signs each key and reports per entry, so a missing object yields one entry carrying an error instead of failing the batch. There is no batch endpoint behind it: it is one request per key. |
+| `storage.from(b).download(path)` | Supported | Resolves a Blob, addressed by the key the object was uploaded under. A file id is still accepted. |
+| `storage.from(b).getPublicUrl(path)` | Supported | Synchronous, returns &#123; data: &#123; publicUrl &#125; &#125; built from the client base URL. |
+| `storage.from(b).info(path) / .exists(path)` | Supported | info returns the object's metadata without its body, in the supabase-js shape. exists reports false only for a 404: an authorization failure is reported as an error, because treating one as absence is how a UI offers to create something that is already there. |
+| `storage.from(b).list(prefix, options)` | Supported | Lists objects under a prefix in the Supabase response shape (name, id, created_at, updated_at, metadata), with limit, offset, search and sortBy. Keys come back relative to the bucket. |
+| `storage.from(b).move(from, to) / .copy(from, to)` | Supported | Both work within one bucket. The bytes stream through the upload path, so bucket quota, the size guard and the mime allowlist apply to a copy exactly as to a fresh upload. move deletes the source only once the copy has landed. |
+| `storage.from(b).remove([path])` | Supported | Addressed by the key the object was uploaded under, as in supabase-js, and reported per entry. A bare file id still resolves, exactly as it does for download. |
+| `storage.from(b).createSignedUploadUrl(path) / .uploadToSignedUrl(path, token, file)` | Partial | Both exist and land the object at the key you asked for, but createSignedUploadUrl needs the byte size and content type up front: the upload is reserved against the bucket quota and the signature is bound to that exact length, which is what stops a signed URL becoming an unbounded write. Requires the S3 driver; the local driver has no presigned uploads. |
+| `storage.from(b).download(path, { transform })` | Supported | Also getPublicUrl and createSignedUrl with &#123; transform &#125;, served by /storage/v1/render/image with Supabase limits. Without format, WebP is negotiated from Accept. |
+| `storage.from(b).update(path, file)` | Supported | upload with upsert forced on, exactly as in supabase-js. |
+| `storage.from(b).upload(path, file, options)` | Supported | The key is the one you passed. avatars/&#123;uid&#125;/pic.png style paths round trip through upload, download, remove and the signed URL. The file id keeps working everywhere a path does. |
+| `storage.from(b).upload(path, file, { upsert, contentType })` | Partial | upsert works: without it a second write to the same key is a 409, with it the object is replaced. contentType overrides what the file itself declares. supabase-js' cacheControl is not part of UploadOptions, so a ported call naming it is a type error rather than a silently dropped option: cache headers are decided by the driver and, for a transform, by the render endpoint. |
+
+### Realtime
+
+| Surface | Status | Notes |
+| --- | --- | --- |
+| `channel(n).on('broadcast', { event }, cb) and channel.send(...)` | Supported | Routed by topic. config.broadcast.self and config.broadcast.ack are both honoured. |
+| `channel(n, { config: { private: true } })` | Supported | The flag is sent in the join payload; the server then checks the RLS policies on realtime.messages (SELECT to receive, INSERT to send or track). |
+| `channel(n).on('system', ...)` | Not supported | Only broadcast, presence and postgres_changes are accepted. Anything else throws immediately. |
+| `channel(n).on('postgres_changes', { event, schema, table, filter }, cb).subscribe()` | Supported | INSERT, UPDATE, DELETE and * are delivered with the supabase payload shape. Server side the stream is RLS filtered. |
+| `channel(n).on('presence', ...) with track/untrack/presenceState` | Supported | The server sends full state and the client diffs it into sync, join and leave, keyed by config.presence.key. |
+| `client.removeChannel(channel) / client.removeAllChannels()` | Supported | Unsubscribes and drops the channel, resolving to "ok". |
+| `channel.subscribe(status => {})` | Supported | Reports SUBSCRIBED, TIMED_OUT, CLOSED and CHANNEL_ERROR, as supabase-js does. |
+
+### Edge functions
+
+| Surface | Status | Notes |
+| --- | --- | --- |
+| `functions.invoke(name, { body })` | Supported | POSTs the JSON body to /api/edge/:name with the current session bearer attached. |
+| `functions.invoke error handling` | Partial | invoke resolves &#123; data: null, error &#125; rather than throwing, but error is a real FunctionsHttpError (or FunctionsFetchError when the request never reached the server), so an instanceof check ported from supabase-js still works. |
+| `functions.invoke(name, { headers, method, region })` | Partial | method and headers are honoured: the invoke route answers every verb and forwards the request headers to the function, so a function reading req.method sees the one you asked for. region is accepted and ignored, because a self-hosted Motherbase runs its functions in one place. |
+
+{/* END GENERATED COMPATIBILITY */}
+
+### Beyond the contract test
+
+These surfaces exist on the client but are not rows in the generated matrix
+above, either because they have no supabase-js equivalent to be compatible with
+or because they are covered by their own tests rather than the compat suite.
+Stated here rather than left out, so the two tables together are the whole
+client.
+
+| Surface | Status | Notes |
+|---------|--------|-------|
+| `client.transaction(tx => …)` | Motherbase only | Several writes, one Postgres transaction, all or nothing. No supabase-js equivalent |
+| `bucket.uploadMany(files, { concurrency, onProgress })` | Motherbase only | Per-file `{ path, data, error }`, never rejects |
+| `@motherbase/client/query` | Motherbase only | React Query / SWR keys and fetchers; the fetchers throw on error so a failure is not cached as data |
+| `@motherbase/client/testing` | Motherbase only | `createTestClient(url, secretKey, { as })` to assert RLS policies. Secret key only, server side only |
+| `client.auth.onAuthStateChange()`, `getSessionFromUrl()`, `exchangeCodeForSession()` | Motherbase addition | Session sync and the OAuth return, added to Better Auth's client as one client plugin |
+| `client.auth.reauthenticate()` / `updateUserCredentials()` | Motherbase addition | Emails a one-time nonce, then sets a first email, a first password, or a password replaced with that nonce |
+| `client.hydrate()` | Motherbase only | The stored session without a network call. Display only: authorize on `auth.getSession()` |
+| `client.on('request', listener)` | Motherbase only | One event per HTTP round trip with method, path, status, duration and the `x-request-id` the server logged it under. Returns the unsubscribe function |
+| `session.refresh_token` | Not applicable | Better Auth bearer sessions have no refresh token; it is always `null` and `auth.getSession()` revalidates instead |

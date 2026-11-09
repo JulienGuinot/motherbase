@@ -1,0 +1,210 @@
+---
+title: Troubleshooting
+description: Diagnose setup, Docker, routing, certificate, migration, storage, and backup failures using the commands the repository exposes.
+order: 9
+---
+
+Start with the mode-aware helpers:
+
+```bash
+./deploy/status.sh
+./deploy/logs.sh
+```
+
+On a VPS these target the Console stack. For Traefik or a specific project, use the explicit Compose files shown below.
+
+## Docker is missing or unavailable
+
+Typical setup errors are `Docker still not on PATH`, `Docker daemon not running`, or `Docker Compose not found`.
+
+Diagnose:
+
+```bash
+docker --version
+docker info
+docker compose version
+```
+
+On Linux, `setup.sh` attempts installation through `get.docker.com`, starts Docker through `systemctl` or `service`, and adds `USER` to the Docker group when sudo is available. If group membership was just changed, open a new shell as the script instructs. On macOS or another unsupported auto-install platform, install Docker manually and rerun setup.
+
+## Docker socket is missing
+
+Both local and VPS startup stop with `Docker socket not found; the internal orchestration daemon cannot start.` when `/var/run/docker.sock` is not a Unix socket.
+
+Diagnose:
+
+```bash
+docker info
+ls -l /var/run/docker.sock
+```
+
+Start the Docker daemon and verify the deploying account can reach it. The Console container must not receive the socket; only the `orchestrator` service mounts it, as defined in `deploy/console/docker-compose.yml`.
+
+## Ports 80 or 443 are occupied
+
+Before production Traefik starts, `setup.sh` checks listeners through `ss`, `lsof`, or `netstat`. It automatically stops an active Nginx, Apache, httpd, Caddy, HAProxy, or lighttpd systemd service. Any other remaining listener aborts setup.
+
+Diagnose with the same preferred command:
+
+```bash
+ss -ltnp
+```
+
+Stop or reconfigure the process owning port `80` or `443`, then rerun `./setup.sh`. If the existing Docker container is named exactly `traefik`, setup allows it because Compose can replace it.
+
+## DNS does not propagate
+
+Setup polls a random host below `DOMAIN` for six minutes. A timeout is only a warning; Traefik continues retrying ACME.
+
+Diagnose using one resolver supported by `setup.sh`:
+
+```bash
+dig +short motherbase-check.example.com
+nslookup motherbase-check.example.com
+```
+
+Ensure the wildcard A record points to the IPv4 reported by the VPS. If `CONSOLE_DOMAIN` is outside the wildcard, create its explicit record too. Rerun normally, or use `--skip-dns-check` only when DNS has been verified separately.
+
+## TLS fails on deep subdomains
+
+For a base such as `test.example.com`, setup detects at least two dots and offers DNS-01. If it was declined, the script warns that project certificates may be self-signed.
+
+Diagnose Traefik:
+
+```bash
+docker compose -f deploy/traefik/docker-compose.yml \
+  --env-file deploy/traefik/.env logs -f
+```
+
+Check `DNS_CHALLENGE_PROVIDER`, `GODADDY_API_KEY`, `GODADDY_API_SECRET`, and project `CERT_RESOLVER=letsencrypt-dns`. Rerun interactive setup to collect the GoDaddy credentials. The shipped Compose file does not pass credentials for other DNS providers.
+
+## External image pinning fails
+
+Production setup aborts when it cannot pull an external image, when a supplied digest is malformed, or when Docker reports no valid `RepoDigest`.
+
+Diagnose the exact reference printed by setup:
+
+```bash
+docker pull <image-reference>
+docker image inspect <image-reference> --format '{{index .RepoDigests 0}}'
+```
+
+Fix registry access or provide a full `repository@sha256:<64 hexadecimal characters>` reference through the matching image variable, then rerun setup. First-party Motherbase images are built locally and are not expected to have registry digests.
+
+## An image build fails
+
+Setup emits a file-specific error for dependency, PostgreSQL, API, Console, or orchestrator builds. API and Console build output is buffered to temporary files and printed when that build fails.
+
+Reproduce the targeted build with `deploy/build-images.sh` or the exact command from `setup.sh`. For example:
+
+```bash
+docker build -t motherbase-deps:1.0.0 -f deploy/deps.Dockerfile .
+docker build -t motherbase-postgres:1.0.0 -f deploy/postgres.Dockerfile .
+```
+
+If setup reports `docker compose plugin not found in orchestration daemon image`, the verification command that failed is:
+
+```bash
+docker run --rm --entrypoint docker motherbase-orchestrator:1.0.0 compose version
+```
+
+Rebuild after correcting the configured `DOCKER_CLI_IMAGE`.
+
+## Console does not become healthy
+
+Setup waits 120 seconds for an internal request to `http://127.0.0.1:5500/console`. On failure it already prints the last 80 Console lines.
+
+Continue diagnosis with:
+
+```bash
+docker compose -f deploy/console/docker-compose.yml \
+  --env-file deploy/console/.env ps
+docker compose -f deploy/console/docker-compose.yml \
+  --env-file deploy/console/.env logs --tail=80 console orchestrator
+```
+
+Common source-enforced causes are a missing/short `CONSOLE_JWT_SECRET`, absent required admin hash, absent `ORCHESTRATION_SECRET`, or an unhealthy orchestrator. Rerun `./setup.sh`; its repair path fills missing secrets and normalizes legacy or doubled-dollar password hashes. An unattended hash repair requires `ADMIN_PASSWORD`.
+
+## A project API does not become healthy
+
+During a VPS setup rerun, each running API must return `200` from `/api/health-check` within 120 seconds.
+
+Diagnose one project:
+
+```bash
+docker compose -f deploy/docker-compose.prod.yml \
+  --env-file /srv/projects/<name>/.env.prod -p <name> ps
+docker compose -f deploy/docker-compose.prod.yml \
+  --env-file /srv/projects/<name>/.env.prod -p <name> logs --tail=80 api db minio minio-init
+```
+
+Check the database and MinIO health states first. The API waits for `DATABASE_URL`, runs migrations, then starts. Fix the failing dependency or configuration and use the Console **Restart** action, which reapplies the current configuration with `up -d --force-recreate --remove-orphans`.
+
+## Database password no longer matches an existing volume
+
+When generating a new VPS environment while volumes ending in `_db_data` already exist, setup warns that a new `POSTGRES_PASSWORD` will not match the initialized database.
+
+Diagnose volume ownership:
+
+```bash
+docker volume ls
+docker volume inspect <volume>
+```
+
+Keep the original project `.env.prod` password with that volume. If the data is intentionally disposable, use the destructive reset offered by setup or `./deploy/reset.sh --yes`. Do not reset a volume whose data must be retained.
+
+## Migration startup fails
+
+The API container exits when `apps/server/scripts/run-migrations.js` cannot complete Prisma `migrate deploy`.
+
+Diagnose from the project API logs:
+
+```bash
+docker compose -f deploy/docker-compose.prod.yml \
+  --env-file /srv/projects/<name>/.env.prod -p <name> logs --tail=200 api
+```
+
+The script automatically repairs only the known unfinished `20260720030000_data_retention` migration by marking it rolled back before redeploying. Any other failed migration is left for explicit operator investigation; the deploy scripts do not mark arbitrary failures resolved.
+
+## MinIO bucket initialization fails
+
+Both project Compose files wait for MinIO health before running `minio-init`. That one-shot service creates `S3_BUCKET` privately and `S3_PUBLIC_BUCKET` with anonymous download.
+
+Diagnose:
+
+```bash
+docker compose -f deploy/docker-compose.prod.yml \
+  --env-file /srv/projects/<name>/.env.prod -p <name> logs minio minio-init
+```
+
+Verify `MINIO_ROOT_USER`, `MINIO_ROOT_PASSWORD`, `STORAGE_DOMAIN`, and the required digest-pinned MinIO images. The production API waits for healthy MinIO but does not declare a dependency on successful `minio-init`; missing buckets can therefore surface after API startup.
+
+## Backup commands fail
+
+The Dockerfile comment identifies two expected native failures: `spawn pg_dump ENOENT` when PostgreSQL client tools are missing, and a server-version mismatch when the client is older than the database. The production API image installs PostgreSQL client 17.
+
+Diagnose inside the project API:
+
+```bash
+docker compose -f deploy/docker-compose.prod.yml \
+  --env-file /srv/projects/<name>/.env.prod -p <name> exec api pg_dump --version
+```
+
+On a native host, set `PG_BIN_DIR` to the directory containing `pg_dump` and `psql`. For offsite failures, verify that `STORAGE_DRIVER=s3`, the private `BACKUP_BUCKET` exists, it differs from `S3_PUBLIC_BUCKET`, and the effective credentials can access it.
+
+## Project admin paths return access denied
+
+The production project Compose installs a higher-priority Traefik router for `/api/admin`, `/console`, and `/admin` with an allowlist containing only `127.0.0.1/32`. This is intentional.
+
+Use the Platform Console and its authenticated project proxy for normal administration. Changing the allowlist requires changing the relevant Traefik labels in `deploy/docker-compose.prod.yml`; there is no setup flag for it.
+
+## Projects stay stopped after deploy/restart.sh
+
+In VPS mode, `deploy/stop.sh` stops every project with Compose `down`, while `deploy/start.sh` starts Traefik and the Console only. Therefore `deploy/restart.sh` does not bring those project stacks back by itself.
+
+Confirm with the explicit project `ps` command above, then start each project from the Platform Console. For a normal code upgrade, use `./setup.sh --yes --prod`, whose reconciliation loop recreates APIs that were running when setup began.
+
+## Related
+
+- [Observability](/docs/platform/observability/) — logs, metrics and advisor findings inside a project.
+- [Backups and restore](/docs/self-hosting/backups-and-restore/) — recovering after a failed migration or restore.

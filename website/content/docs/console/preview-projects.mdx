@@ -1,0 +1,117 @@
+---
+title: "Preview Projects"
+description: "Preview branches of a project, and one isolated stack per pull request, provisioned from a GitHub webhook and destroyed when the PR closes."
+order: 3
+---
+
+One isolated stack per pull request: its own PostgreSQL, its own storage, its own
+Studio, on a subdomain of the wildcard record you already have. Destroyed when the
+pull request closes.
+
+This is the cheapest feature on the roadmap because the hard part was already
+built. Provisioning an isolated project from a Compose file is what the Console
+does; this is the glue between a GitHub webhook and the orchestrator.
+
+## Setup
+
+On the Console host:
+
+```bash
+PREVIEW_ENABLED=true
+PREVIEW_GITHUB_SECRET=$(openssl rand -hex 32)
+PREVIEW_REPO_ALLOWLIST=acme/app,acme/dashboard
+PREVIEW_GITHUB_TOKEN=ghp_...     # optional, only to post the PR comment
+PREVIEW_TTL_HOURS=72             # 0 disables the sweeper
+```
+
+Then in the repository, **Settings → Webhooks → Add webhook**:
+
+| Field | Value |
+|-------|-------|
+| Payload URL | `https://console.example.com/api/preview/github` |
+| Content type | `application/json` |
+| Secret | the `PREVIEW_GITHUB_SECRET` value |
+| Events | *Let me select individual events* → **Pull requests** |
+
+Previews stay off unless a secret is configured. A receiver with no secret
+verifies nothing, so `PREVIEW_ENABLED=true` on its own does nothing.
+
+## What happens
+
+| Pull request event | Effect |
+|--------------------|--------|
+| opened, reopened, ready for review | Provisions `pr-<number>-<repo>` and comments the URLs on the PR |
+| synchronize (a new push) | **Restarts** the existing stack. It is not recreated: that would drop the database and any state a reviewer had set up |
+| closed or merged | Destroys the stack and its volumes |
+| draft opened | Ignored until marked ready. A database per work-in-progress push is how this becomes a surprise bill |
+
+The project name is derived from the repository name and the pull request number,
+both immutable for the life of the PR. Deliberately not the branch name, which can
+be renamed mid-review and would orphan the first stack.
+
+## The allowlist is not optional
+
+<Warning>
+`PREVIEW_REPO_ALLOWLIST` empty means **no repository may provision**. The receiver
+fails closed on purpose: a webhook URL is not a secret — it sits in a repository
+setting several people can read — and an open receiver lets anyone who learns it
+spend this host's disk and CPU.
+</Warning>
+
+Authentication is the HMAC signature over the raw request bytes, verified in
+constant time. The raw bytes matter: re-serialising the parsed JSON does not
+reproduce what GitHub signed, so a naive implementation both rejects valid
+payloads and, worse, accepts some altered ones.
+
+The webhook is answered immediately and provisioning continues in the background.
+A stack takes minutes to come up and the delivery would time out long before that,
+which would make GitHub retry and start a second one.
+
+## The sweeper
+
+A teardown can be missed: a webhook delivery fails, a repository is deleted, a PR
+is closed while the Console is down. Every hour the Console destroys preview
+projects older than `PREVIEW_TTL_HOURS`.
+
+Two rules it will not break:
+
+- **Only preview projects.** A name has to match `pr-<digits>-<slug>` to be a
+  candidate. A real customer project is never swept, however old it is.
+- **Never on a date it cannot read.** A project with a missing or unparseable
+  `createdAt` is left alone. Leaving a stack up costs disk; destroying someone's
+  database on a bad date string has no equivalent undo.
+
+## Cost
+
+A preview is a full stack: Postgres, MinIO and an API container. On the default
+"small" tier that is roughly 1.25 CPU and 1.3 GB of RAM per open pull request.
+Budget for your busiest day, keep `PREVIEW_TTL_HOURS` short, and keep the
+allowlist to the repositories that genuinely need it.
+
+## Branches
+
+A **branch** is the on-demand version of the same idea: a copy of one project, with its own stack, database, storage
+and URL, created from Studio (**Branches**, `/p/:id/branches`), the CLI (`motherbase branches …`) or the Console API.
+It is a project of its own, linked back to its parent through its manifest's `branch` record
+(`apps/server/console/services/branch.service.ts`), and its slug is `<parent>-<branch>`.
+
+Schema travels as migration history, as on Supabase: creating a branch replays the parent's applied migrations onto
+it. **With data** copies the whole database instead, through the parent's own backup. Creating and resetting take
+minutes, so they run in the background and the branch's status says where they are; a branch left `creating` or
+`seeding` by a Console that restarted mid-job is reported as failed.
+
+| Action | Endpoint | Capability | What it does |
+|---|---|---|---|
+| List | `GET /api/platform/projects/:id/branches` | `project.read` | The parent first, then its branches oldest first |
+| Create | `POST /api/platform/projects/:id/branches` with `{ name, gitBranch?, withData }` | `project.create` | `gitBranch` is only for reference |
+| Get | `GET /api/platform/projects/:id/branches/:branch` | `project.read` | With the migrations it is ahead and behind |
+| Update | `PATCH /api/platform/projects/:id/branches/:branch` | `settings.write` | |
+| Merge | `POST …/branches/:branch/merge` | `content.write` | Applies the branch's new migrations to the parent. Refused while the parent has migrations the branch lacks: rebase first |
+| Rebase | `POST …/branches/:branch/rebase` | `content.write` | Applies the parent's newer migrations to the branch |
+| Reset | `POST …/branches/:branch/reset` | `runtime.manage` | Recreates the branch from the parent as it is now |
+| Pause / unpause | `POST …/branches/:branch/pause`, `/unpause` | `runtime.manage` | Stops the stack and keeps its data, or starts it again |
+| Delete | `DELETE /api/platform/projects/:id/branches/:branch` | `project.delete` | |
+
+Ahead and behind compare the two migration histories by name and checksum. Each replayed migration is its own
+transaction on the target, so a failure stops the replay with everything before it applied and nothing of the failed
+one. Branches are managed by the Console: a project opened outside it shows **Branches live on the Platform Console**.

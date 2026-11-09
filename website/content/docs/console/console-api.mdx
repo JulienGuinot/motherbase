@@ -1,0 +1,140 @@
+---
+title: "Console API Reference"
+description: "Every Platform Console HTTP route with its required role or capability."
+order: 9
+---
+
+Base: the Console host (`console.<domain>`). Auth is a Better Auth session cookie or bearer token; see [Console overview](/docs/console/overview/).
+
+Responses use `{ success, data }` / `{ success, message }`. Guards are cumulative: `requireSession` runs on everything below except the auth routes and login.
+
+## Authentication
+
+| Method | Path | Guard | Purpose |
+|---|---|---|---|
+| `ALL` | `/api/auth/*` | rate-limited, `enforcePasswordRotation` | Better Auth (sign-in, sign-out, 2FA verify, session) |
+| `POST` | `/api/platform/login` | rate-limited | Login adapter: relays Better Auth cookies, reports `twoFactor` and `mustChangePassword` |
+| `POST` | `/api/preview/github` | HMAC signature, no session | GitHub pull-request webhook for [preview projects](/docs/console/preview-projects/); off unless `PREVIEW_GITHUB_SECRET` is set |
+
+## Platform
+
+Source: `apps/server/console/routes/platform.routes.ts`.
+
+| Method | Path | Guard | Purpose |
+|---|---|---|---|
+| `GET` | `/api/platform/me` | session | Current identity, role, capabilities, projects |
+| `GET` | `/api/platform/info` | session | Platform info (mode, domain suffix, features) |
+| `GET` | `/api/platform/version` | session | Running version |
+| `GET` | `/api/platform/audit` | `audit.read` | Audit events |
+| `GET` | `/api/platform/logs` | role `owner`/`admin` | Console log buffer |
+| `GET` | `/api/platform/dns` | role `owner`/`admin` | Console + wildcard DNS diagnostics |
+| `GET` | `/api/platform/update/plan` | role `owner`/`admin` | Available update and its plan |
+| `GET` | `/api/platform/metrics` | session | Per-project resource usage |
+| `GET` | `/api/platform/disk` | session | Host filesystem and per-project volume sizes, with disk quotas; a caller below `admin` sees only their projects and no host figures |
+| `GET` | `/api/platform/settings` | role `owner` | Console settings |
+| `PUT` | `/api/platform/settings` | role `owner` | Update Console settings |
+| `GET` | `/api/platform/project-defaults` | role `owner` | Defaults for new projects |
+| `PUT` | `/api/platform/project-defaults` | role `owner` | Update those defaults |
+| `GET` | `/api/platform/proxy-metrics` | session | Per-project proxy request counts |
+| `POST` | `/api/platform/account/password` | session | Change own password (allowed while `mustChangePassword`) |
+
+## Projects
+
+| Method | Path | Guard | Purpose |
+|---|---|---|---|
+| `GET` | `/api/platform/projects` | session (scoped) | List projects visible to the caller |
+| `POST` | `/api/platform/projects` | `project.create` | Create; `409` when the name exists |
+| `DELETE` | `/api/platform/projects/:id` | `project.delete` | Destroy the stack and its directory |
+| `POST` | `/api/platform/projects/:id/start` | `runtime.manage` | |
+| `POST` | `/api/platform/projects/:id/stop` | `runtime.manage` | |
+| `POST` | `/api/platform/projects/:id/restart` | `runtime.manage` | |
+| `POST` | `/api/platform/projects/:id/update` | `runtime.manage` | `pull` + `up` |
+| `POST` | `/api/platform/projects/:id/rebuild` | `runtime.manage` | |
+| `GET` | `/api/platform/projects/:id/ready` | `project.read` | Whether the stack answers its health probe yet |
+| `GET` | `/api/platform/projects/:id/logs` | `project.read` | Compose logs |
+| `GET` | `/api/platform/projects/:id/dns` | `project.read` | Domain + storage DNS and TCP checks |
+| `GET` | `/api/platform/projects/:id/shell` | `runtime.manage` | The `docker compose exec` command to run |
+| `GET` | `/api/platform/projects/:id/config` | `project.read` | Domains, CORS, image, cert resolver |
+| `PATCH` | `/api/platform/projects/:id/config` | `settings.write` | Patch the above |
+| `GET` | `/api/platform/projects/:id/limits` | `project.read` | CPU/memory quotas |
+| `PATCH` | `/api/platform/projects/:id/limits` | `settings.write` | Patch the quotas |
+
+Unknown project ids return `404 project not found`.
+
+## Branches and domains
+
+Source: `console/routes/project-hosting.routes.ts`. Each route checks a capability; the second name in the code
+(`project.branch.merge`, `project.domain.create`…) is the audit action it records.
+
+| Method | Path | Guard | Purpose |
+|---|---|---|---|
+| `GET` | `/api/platform/projects/:id/branches` | `project.read` | The project and its branches. See [Branches](/docs/console/preview-projects/#branches) |
+| `POST` | `/api/platform/projects/:id/branches` | `project.create` | Create, with `{ name, gitBranch?, withData }` |
+| `GET` | `/api/platform/projects/:id/branches/:branch` | `project.read` | One branch, with the migrations it is ahead and behind |
+| `PATCH` | `/api/platform/projects/:id/branches/:branch` | `settings.write` | Update |
+| `DELETE` | `/api/platform/projects/:id/branches/:branch` | `project.delete` | Delete |
+| `POST` | `/api/platform/projects/:id/branches/:branch/merge` | `content.write` | Apply the branch's new migrations to the parent |
+| `POST` | `/api/platform/projects/:id/branches/:branch/rebase` | `content.write` | Apply the parent's newer migrations to the branch |
+| `POST` | `/api/platform/projects/:id/branches/:branch/reset` | `runtime.manage` | Recreate from the parent |
+| `POST` | `/api/platform/projects/:id/branches/:branch/pause` | `runtime.manage` | Stop the stack, keep its data |
+| `POST` | `/api/platform/projects/:id/branches/:branch/unpause` | `runtime.manage` | Start it again |
+| `GET` | `/api/platform/projects/:id/custom-hostname` | `project.read` | The custom hostname and its status |
+| `POST` | `/api/platform/projects/:id/custom-hostname` | `settings.write` | Start one: `{ hostname }`, answered with the DNS records to publish (`pending_verification`) |
+| `POST` | `/api/platform/projects/:id/custom-hostname/reverify` | `settings.write` | Check the records again (`verified` once they resolve) |
+| `POST` | `/api/platform/projects/:id/custom-hostname/activate` | `settings.write` | Serve the API on it. `409` until verified |
+| `DELETE` | `/api/platform/projects/:id/custom-hostname` | `settings.write` | Remove it |
+| `GET` | `/api/platform/projects/:id/vanity-subdomain` | `project.read` | The active vanity subdomain |
+| `POST` | `/api/platform/projects/:id/vanity-subdomain/check-availability` | `project.read` | Whether `<name>.<platform domain>` is free |
+| `POST` | `/api/platform/projects/:id/vanity-subdomain` | `settings.write` | Serve the API on it as well |
+| `DELETE` | `/api/platform/projects/:id/vanity-subdomain` | `settings.write` | Remove it |
+
+Domain state lives next to the project's manifest in `custom-domains.json`. What reaches Traefik is one variable,
+`API_HOST_RULE` in the project's `.env.prod`, rewritten only on activate and delete, the calls that recreate the API
+container; Traefik requests a certificate for every `Host()` in the rule. A hostname another project on the host
+already answers on is refused, and so are the reserved subdomains (`console`, `traefik`, `api`, `www`, `admin`,
+`app`, `studio`, `minio`, `storage`, `mail`, `status`). An active hostname whose records later disappear stays active
+until it is deleted.
+
+## Users
+
+Source: `console/routes/users.routes.ts`. Managing users requires the `users.manage` capability — `owner` only.
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/platform/users` | List operators |
+| `POST` | `/api/platform/users` | Create one |
+| `PATCH` | `/api/platform/users/:id` | Update role, projects, disabled, password |
+| `DELETE` | `/api/platform/users/:id/sessions` | Revoke all sessions |
+| `DELETE` | `/api/platform/users/:id` | Delete |
+
+## Organizations
+
+Source: `console/routes/orgs.routes.ts`. Routes on a specific org require membership (`requireOrgMember`).
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/platform/orgs` | Orgs the caller belongs to, with role and project count |
+| `POST` | `/api/platform/orgs` | Create an org |
+| `GET` | `/api/platform/orgs/:id` | Read one |
+| `PATCH` | `/api/platform/orgs/:id` | Rename |
+| `DELETE` | `/api/platform/orgs/:id` | Delete |
+| `GET` | `/api/platform/orgs/:id/members` | List members |
+| `POST` | `/api/platform/orgs/:id/members` | Add a member |
+| `DELETE` | `/api/platform/orgs/:id/members/:userId` | Remove a member |
+| `GET` | `/api/platform/orgs/:id/ai` | The organization's default AI assistant configuration, which projects without their own inherit |
+| `PUT` | `/api/platform/orgs/:id/ai` | Set it (org admin) |
+| `DELETE` | `/api/platform/orgs/:id/ai` | Clear it (org admin) |
+
+## Project proxy
+
+Source: `console/routes/proxy.routes.ts`. See [Project proxy](/docs/console/proxy/) for capability mapping and upstream behaviour.
+
+| Method | Path | Forwards to |
+|---|---|---|
+| `ALL` | `/api/projects/:id/admin/*` | `/api/admin/*` |
+| `ALL` | `/api/projects/:id/rest/*` | `/rest/*` |
+| `ALL` | `/api/projects/:id/edge/*` | `/api/edge/*` |
+
+## Orchestration daemon
+
+Not reachable from the browser — it is an internal service with its own bearer secret. See [Orchestration daemon](/docs/console/orchestration/).

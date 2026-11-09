@@ -1,0 +1,50 @@
+# Every path below is anchored with a leading `/`: an unanchored pattern such as
+# `logs` matches a directory at ANY depth and can swallow a source directory.
+
+# Dependencies and build output (all workspaces)
+/node_modules
+/apps/*/node_modules
+/apps/*/dist
+/apps/*/.next
+/apps/*/.next-dev
+/apps/*/next-env.d.ts
+/apps/*/tsconfig.tsbuildinfo
+/packages/*/node_modules
+/packages/*/dist
+/.turbo
+/apps/*/.turbo
+/packages/*/.turbo
+
+# Runtime data written by the server
+/apps/server/uploads
+/uploads
+/apps/server/data
+/data
+/backups
+
+# In an npm workspace only the root lockfile is honoured; a per-package one is
+# ignored at install and diverges in silence.
+/packages/*/package-lock.json
+
+# Local environment. Project and deploy credentials also use names such as
+# `.env.prod` and `service.env`; the examples and mock config stay tracked.
+/**/.env.*
+!/**/.env*.example
+!/**/.env.mock
+/**/*.env
+.env
+.env.local
+# Credentials for scripts/supabase-live-check.ts (a service_role key and a PAT).
+/.supabase-live.env
+supabase-live.env
+.DS_Store
+
+# `motherbase link` writes the linked console URL and project here, wherever
+# the CLI runs from.
+/**/.motherbase/
+
+# Agent and editor scratch
+/.claude/
+
+# Logs
+*.log

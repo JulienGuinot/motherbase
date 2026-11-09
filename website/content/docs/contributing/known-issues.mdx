@@ -1,0 +1,233 @@
+---
+title: "Known Issues"
+description: "What the last audit found, what was fixed, and the constraints that are deliberate rather than defects."
+order: 90
+---
+
+This page exists so the places where Motherbase is *not* what a careful reader would expect
+are written down rather than discovered. Everything here was verified against the source,
+not inferred.
+
+The page has three parts. **Fixed** lists what the audits found, each with the check that now
+keeps it fixed, because a fix with nothing holding it in place is a fix with a half-life.
+**Open** lists what is wrong today, with a workaround for each; there is nothing in it right
+now. One **deliberate** constraint closes the page.
+
+## Open
+
+Nothing. When an audit finds something, it is listed here with its workaround until it is
+fixed.
+
+---
+
+## Fixed
+
+### `rpcSecurityDefiner` could not be set from Settings
+
+`RestApiService` read an `rpcSecurityDefiner` field from the `api.rest` settings group, but
+the group declared only `maxRows` and its Zod schema stripped unknown keys on write — so
+the field could never be stored and `REST_RPC_SECURITY_DEFINER` was the only working way to
+allowlist a `SECURITY DEFINER` function. The read path looked operator-configurable and was
+not.
+
+The root cause was more general than one field: `SettingsService.get()` consulted a group's
+env fallback only when the **whole row** was missing, so *any* field added to an
+already-saved group read as unset and silently ignored its environment variable. Absent
+keys are now seeded from the fallback individually, while anything the row does carry still
+wins — which is what keeps "clear it in Studio" meaning cleared.
+
+The field is declared, validated and rendered in Studio. See
+[settings reference](/docs/reference/settings/) and
+[environment](/docs/reference/environment/).
+
+*Held by:* `settings-service.unit.test.ts` (round-trip, the added-field migration, and that a
+stored empty value overrides the env rather than falling back to it) and
+`rest-api-rpc.integration.test.ts` (the settings path actually gates the call).
+
+### `GET /` returned `Thanks for post`
+
+A leftover placeholder, and the first thing anyone probing the host saw. It now answers with
+a small service descriptor naming `/api/docs` and `/api/health-check` — deliberately without
+a version, which is an infoleak with no caller who needs it.
+
+### The admin route table was hand-maintained while claiming to be generated
+
+It had drifted: the four controllers that mount on a `HTTP_ROUTES` constant were documented
+with their **unresolved** paths — `/:model` instead of `/rest/v1/:model`, `/` instead of
+`/realtime/v1/api/broadcast` — so every path copied out of the docs 404'd.
+`HEAD /rest/v1/:model` was missing entirely, and several guard chains were truncated
+mid-token (`streamUpload.single('file'`), the fingerprint of a throwaway script.
+
+There is now a real extractor (`apps/server/lib/route-manifest.ts`) that parses the
+decorators and resolves the constant base paths, `npm run docs:routes` writes
+`docs/admin-routes.md`, and the docs site splices that file in. See
+[Admin & HTTP API reference](/docs/reference/admin-api/).
+
+*Held by:* `route-manifest.unit.test.ts` — it asserts the resolved paths, rejects any
+unresolved one, checks guard chains are balanced, and fails with "run `npm run docs:routes`"
+whenever the committed table no longer matches the code.
+
+### `createSignedUrl(path, expiresIn)` ignored `expiresIn`
+
+The parameter was literally named `_expiresIn` and never read. It is now threaded through
+`/api/files/:id/url` to the driver, validated (1 second to 7 days, the AWS SigV4 ceiling)
+and **rejected rather than clamped** — a caller asking for 30 days wants a 30-day URL, and
+quietly returning a 7-day one is the same class of bug as ignoring the argument.
+
+The response also carries `expiresAt`, which is `null` when nothing expires: a public
+object's URL is permanent, and a private object on the `local` driver resolves to the
+authenticated streaming endpoint, which is bound to the session rather than to a clock.
+Callers can now tell the difference instead of assuming.
+
+*Held by:* `storage-signed-url-expiry.unit.test.ts`.
+
+### The rate-limit window needed a restart
+
+`express-rate-limit` reads `windowMs` once at construction, so five of the six knobs in
+`security.rateLimit` applied live and the sixth silently did not. `windowMin` is now a field
+on the group, and the limiters rebuild when it changes — eagerly, on save, never inside a
+request handler.
+
+Rebuilding resets the counters, which is the honest behaviour: a count of 40 means nothing
+once the period it was counted over has changed underneath it. A save that does **not**
+change the window does not rebuild, or an operator could hand every throttled caller a fresh
+allowance just by pressing Save.
+
+*Held by:* `rate-limit.unit.test.ts`, including a live express app proving the new window is
+really in force and that a no-op save does not reset anyone.
+
+### Development error responses were reachable from the network
+
+Outside production an unrecognised error answers with `error.stack`. That is deliberate and
+useful locally, and it is exactly what must not be reachable from a network.
+
+The server now binds to `127.0.0.1` unless `NODE_ENV=production` — every containerised path
+already sets that, so this only affects a developer's own machine. `BIND_HOST` widens it
+explicitly, and doing so outside production prints a warning naming the consequence. The
+leak is prevented by the bind rather than by a note nobody reads.
+
+### The `motherbase init` stack did not start on a clean machine
+
+`init` built every image from a git context, and the API image derives from a base image
+(`motherbase-deps`) that only the repository's own build script produces. Past that, the
+bucket job pulled `quay.io/minio/mc`, which now needs a registry login; the API refused to
+boot without `CORS_ORIGINS`; there was no edge runtime; the SQL endpoint was off; and the
+command printed a Studio URL and operator credentials that led nowhere.
+
+The scaffold now runs the images CI publishes (`MOTHERBASE_REGISTRY` / `MOTHERBASE_TAG` in
+`.env`, rolling `latest` by default; `--repo` / `--ref` still build from source), includes the
+edge runtime, writes `CORS_ORIGINS` and `CONSOLE_SQL_ENABLED`, and prints the one command that
+creates the operator account. Verified end to end: health check, operator sign-in, `db sql`,
+`functions deploy` and `functions invoke`.
+
+*Held by:* `cli-init-scaffold.unit.test.ts`.
+
+### Signed storage URLs pointed at the internal MinIO address
+
+`createSignedUrl()`, `createSignedUrls()` and `createSignedUploadUrl()` returned URLs on
+`http://minio:9000`, MinIO's address on the stack's private network. A SigV4 signature covers
+the host, so the URL could not be rewritten afterwards. The S3 driver now signs with a second
+client pointed at `S3_PRESIGN_ENDPOINT`, which every Compose file sets to the storage domain
+Traefik routes to MinIO's S3 port. Signing makes no request, so nothing else changes.
+
+*Held by:* `storage-presign-endpoint.unit.test.ts` and `console-compose-env.unit.test.ts`.
+
+### `rpc()` never returned a count
+
+`rpc(fn, args, { count: 'exact' })` resolved `count: null`: the SDK reads the total from
+`Content-Range` and `/rest/v1/rpc/` sent none. A set-returning call now answers with one, as
+PostgREST does. `/rpc/` has no paging, so the exact total is the row count and costs nothing.
+
+*Held by:* `rest-rpc-count.unit.test.ts`.
+
+### Console projects could not set three server variables
+
+A Console project's Compose file passes an explicit `environment` block and did not forward
+`EDGE_INVOKE_TOKEN`, `EDGE_PUBLIC_INVOKE_ENABLED` or `MAX_UPLOAD_MB`, so setting them in the
+project's `.env.prod` did nothing: no server-to-server edge token, and a hard 25 MB upload
+cap. All three are forwarded now, with the same defaults as before.
+
+*Held by:* `console-compose-env.unit.test.ts`.
+
+### A realtime channel stayed anonymous after sign-in
+
+The server reads the session once, in the Socket.IO handshake, and nothing reopened the socket
+when the session changed. A channel subscribed before `signIn` kept running as `anon` and RLS
+filtered every row out of it. Since `@motherbase/client` 2.2.2 the socket reconnects when the
+access token changes (sign-in, sign-out), and joined channels are replayed on the new socket.
+
+*Held by:* `packages/client/tests/realtime-auth.test.ts`.
+
+### Presence callbacks were typed `unknown`
+
+`on('presence', …)` declared one `(payload: unknown) => void` callback for every event, so
+`({ key, newPresences }) => …` failed strict TypeScript. Since `@motherbase/client` 2.2.2 each
+presence event has its own overload with its payload type.
+
+*Held by:* `packages/client/tests/user-type.test-d.ts`.
+
+### The Supabase importer closed webhook functions
+
+A function with `verify_jwt: false` on Supabase (a Stripe or GitHub webhook receiver) was
+imported private, so every delivery answered `401` after the switch. It is now imported
+**Public**, keeping exactly the access it had, and the summary lists those functions.
+
+*Held by:* `import-sections.unit.test.ts`.
+
+### The Table editor preselected a preset that opened every row
+
+The *New table* modal preselected `starter`: every row readable by signed-out visitors and
+writable by every signed-in user. It now preselects `admin_only`, which exposes nothing until
+policies are written, and every option says who can do what.
+
+### The advisor called a table without RLS "fully open over REST"
+
+`/rest/v1` refuses a table with RLS off. The finding (`sec_rls_disabled`, still critical) now
+says what is actually exposed: functions reached through `rpc()`.
+
+---
+
+## Deliberate: one API instance per project
+
+Rate limiting, the custom rate-limit rules, the log buffer, request metrics, shield
+telemetry and realtime presence all keep their state in the process. Scheduled work does
+**not** share that constraint — the realtime outbox and the bucket-deletion queue take
+database leases, so two processes can never run the same job twice.
+
+Run two replicas of one project and each enforces its own share of every limit, holds a
+different slice of the logs, and sees a different presence set. Nothing corrupts; the
+numbers just quietly stop meaning what they say.
+
+This is not going to be fixed with a shared store. Motherbase's premise is one VPS and no
+moving parts, and adding Redis to every project to support a topology the product does not
+offer is the wrong trade — you scale by adding projects, not replicas.
+
+What changed is that it is no longer silent. Every database connection is tagged
+`motherbase-api:<instanceId>`, so the Shield report counts the live instances and raises a
+warning naming the multiplier and the exact subsystems that stopped being accurate:
+
+```json
+{
+  "runtime": {
+    "instanceId": "9f2c1a04",
+    "instances": 2,
+    "perInstanceSubsystems": ["rate limiting", "log buffer", "…"]
+  }
+}
+```
+
+The count degrades to `null` if `pg_stat_activity` cannot be read — it is a diagnostic, and
+it must never be the reason the Shield screen fails.
+
+*Held by:* `shield-replicas.unit.test.ts`.
+
+---
+
+## How to use this page
+
+If you are evaluating Motherbase: nothing is open, and the one deliberate constraint is a
+property of the deployment model rather than a bug. Two of the fixes above ship in a client
+release: they need `@motherbase/client` 2.2.2 or later.
+
+If you are contributing: each fixed item names the test that holds it. If you find yourself
+deleting one of those tests to make a change pass, you are re-opening the issue above it.

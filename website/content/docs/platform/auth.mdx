@@ -1,0 +1,410 @@
+---
+title: "Auth"
+description: "Better Auth-powered authentication: email/password, social login, magic links, email OTP, passkeys, two-factor, organizations, per-org SSO, and API keys."
+order: 1
+---
+
+Motherbase Auth is built on [Better Auth](https://www.better-auth.com/). Each project gets its own auth instance, assembled at runtime from the `auth.*` settings groups. Enabling a method or plugin in **Project Studio → Authentication** rebuilds the instance live — no redeploy.
+
+<Note>
+Auth is **config-driven**. The server reads the `auth.*` settings groups and turns providers and plugins on or off per project. Saving in the console rebuilds the auth instance in-process; in-flight requests keep their handler.
+</Note>
+
+## What you get
+
+| Capability | Setting group | Plugin |
+|------------|---------------|--------|
+| Email & password | `auth.methods.emailPassword` | core |
+| Magic link (passwordless email link) | `auth.methods.magicLink` | `magicLink` |
+| Email OTP (one-time code) | `auth.methods.emailOTP` | `emailOTP` |
+| Anonymous guest sign-in | `auth.methods.anonymous` | `anonymous` |
+| Phone / SMS OTP | `auth.phoneOtp` | `phoneNumber` |
+| Social login (Google, Apple, …) | `auth.social` | core `socialProviders` |
+| Custom OIDC / OAuth2 | `auth.oauth.custom` | `genericOAuth` |
+| Passkeys (WebAuthn) | `auth.passkey` | `passkey` |
+| Two-factor: TOTP, backup codes, trusted devices, optional email/SMS second factor | `auth.twoFactor` | `twoFactor` |
+| Organizations, with optional teams | `auth.organization` | `organization` |
+| SSO, per-organization SSO included | `auth.sso` | `sso` |
+| User API keys (managed only, see [below](#api-keys)) | `auth.apiKey` | `apiKey` |
+| Anonymous / guest sign-in | `auth.methods.anonymous` | `anonymous` |
+| JWT / JWKS issuance | always on | `jwt` + `bearer` |
+
+Email-password, magic link, email OTP and organizations default **on**. Everything else is
+off until it is enabled *and* configured — phone OTP additionally needs SMS credentials
+before the plugin is mounted at all.
+
+Anonymous sign-in is a real, opt-in session. Enable `auth.methods.anonymous` in Studio;
+the server creates a user with `is_anonymous = true`, and RLS can distinguish that user
+from an unauthenticated request. A guest can later become a permanent account with
+`client.auth.updateUserCredentials({ email })` or `client.auth.linkSocial()` without changing its user id. This is distinct
+from a signed-out request, which still uses the PostgreSQL `anon` role.
+
+Every account gets a `username` even though Better Auth does not set one: the `user.create.before` hook (`apps/server/auth/instance.ts`) fills it from `UserService.getRandomUsername()` when the sign-up does not supply one, across every method — password, social, magic link, OTP, passkey. A client-supplied username is kept as is, and a generation failure leaves the column null rather than failing the sign-up. Passwordless methods (magic link, email OTP, password reset) require SMTP — configure it in **Project Studio → Authentication → Settings → Email · SMTP**. See [Notifications](/docs/platform/notifications/) for SMTP, SMS and template handling.
+
+## Sessions and tokens
+
+Better Auth issues a single **session token**, not an access/refresh pair. Send it as a bearer token:
+
+```http
+Authorization: Bearer <session-token>
+```
+
+Two kinds of token exist, with different jobs:
+
+| Token | Issued by | Used for |
+|---|---|---|
+| Session token (opaque) | Every sign-in | What the SDK stores and sends. Revocable: signing out or ending the session kills it at once |
+| Access token (JWT) | `GET /api/auth/token`, for the current session | Handing an identity to another service that verifies it offline against the JWKS |
+
+The API accepts either as a bearer, and also a JWT from a configured [third-party issuer](/docs/studio/auth/)
+(Clerk, Firebase, Auth0…). Whichever arrives, the server resolves the user id, then **reloads the full user record by id** on every request. Role and status are always read live from the database — never trusted from the token. A soft-deleted or deactivated account (`status !== 'active'`) is rejected with `403`.
+
+For downstream services that want a verifiable JWT, the `jwt` plugin issues one and publishes a JWKS:
+
+```http
+GET /api/auth/token   # mint a signed JWT for the current session
+GET /api/auth/jwks    # public keys to verify it
+GET /auth/v1/.well-known/jwks.json   # the same set, where Supabase clients and JWT libraries look (cached 5 min)
+```
+
+<Note>
+**Custom access token claims.** The Supabase-style hook `auth.hooks.accessToken` adds claims to every JWT the
+project issues, from **Studio → Authentication → Auth Hooks**: `includeUserFields` copies the listed user fields into the token,
+and `staticClaims` (JSON) merges a fixed set (`auth/hooks/access-token.ts`). `password`, `passwordHash`,
+`twoFactorEnabled` and `phoneNumberVerified` are never copied, and the standard claims (`iss`, `sub`, `aud`, `exp`,
+`nbf`, `iat`, `jti`) are never overridden.
+
+**Signing keys.** Access tokens are signed with a row of `auth.jwks`, with a Supabase-style lifecycle that Better
+Auth's plugin lacks (`auth/signing-keys.ts`), managed under **Project Settings → JWT keys**:
+
+| Status | Meaning |
+|---|---|
+| `standby` | Published in the JWKS so verifiers cache it ahead of time; signs nothing yet. Every new key starts here |
+| `in_use` | The one key that signs |
+| `previously_used` | No longer signs, still verifies the tokens it issued |
+| `revoked` | Dropped from the JWKS: its tokens stop verifying |
+
+```text
+GET    /api/admin/auth/signing-keys              public keys only, plus the iss / aud tokens carry
+POST   /api/admin/auth/signing-keys              { algorithm?, privateKey? }  generate (ES256 by default; RS256, EdDSA) or import a private JWK
+POST   /api/admin/auth/signing-keys/:id/rotate   a standby key starts signing; the old one keeps verifying
+POST   /api/admin/auth/signing-keys/:id/revoke   only a previously used key
+DELETE /api/admin/auth/signing-keys/:id          only a key that verifies nothing (standby or revoked)
+```
+
+An imported key's public half is derived on the server, never trusted from the input. `motherbase gen signing-key`
+produces the same shape. `JWT_SECRET` is separate: it signs session cookies and internal HMACs, no access token is
+HS256, and rotating it signs every user out.
+
+The JWKS private key is stored unencrypted (self-hosted, trusted DB) so it is decoupled from the auth secret — rotating `JWT_SECRET` will not make existing keys undecryptable.
+</Note>
+
+## Email + password with the SDK
+
+`client.auth` is Better Auth's own client (see the [SDK reference](/docs/reference/sdk/#auth)),
+so every snippet in Better Auth's documentation runs as written against `client.auth`.
+
+```ts
+const { data: signedUp, error: signUpError } = await client.auth.signUp.email({
+  email: 'user@example.com',
+  password: 'secret123',
+  name: 'Alice',
+})
+
+const { data: signedIn, error: signInError } = await client.auth.signIn.email({
+  email: 'user@example.com',
+  password: 'secret123',
+})
+
+const { data: current } = await client.auth.getSession() // GET /api/auth/get-session
+const stored = await client.hydrate()                     // local, no network
+
+await client.auth.signOut()
+```
+
+`signUp.email` and `signIn.email` answer `{ token, user }`; the SDK stores the token as the
+session bearer. While the project requires email verification, `signUp.email` answers with a
+`null` token. Passwords are hashed with argon2 (bcrypt hashes are verified for import compatibility).
+
+Auth state listener:
+
+```ts
+const { data: { subscription } } = client.auth.onAuthStateChange((event, session) => {
+  // event: 'INITIAL_SESSION' | 'SIGNED_IN' | 'USER_UPDATED'
+  //      | 'MFA_CHALLENGE_VERIFIED' | 'SIGNED_OUT'
+})
+
+subscription.unsubscribe()
+```
+
+The SDK attaches the session token automatically. On a `401` it revalidates the session once against `/api/auth/get-session`; if the session is gone it clears local state and emits `SIGNED_OUT`.
+
+<Note>
+Every Better Auth plugin the server can mount is typed on `client.auth`: magic link, email
+OTP, phone number, anonymous, two-factor (`client.auth.twoFactor.*`), passkeys
+(`client.auth.passkey.*`), organizations and teams (`client.auth.organization.*`), SSO
+(`client.auth.signIn.sso`, `client.auth.sso.*`) and user API keys (`client.auth.apiKey.*`).
+Motherbase adds `onAuthStateChange`, `getSessionFromUrl`, `exchangeCodeForSession`,
+`reauthenticate`, `updateUserCredentials` and secret-key user administration
+(`client.auth.admin.*`). A plugin that is off in the project answers its methods with a `404`.
+The [SDK compatibility matrix](/docs/reference/sdk/#compatibility-matrix) maps every
+supabase-js call to its Better Auth name.
+</Note>
+
+## Social login
+
+Enable a provider in **Project Studio → Authentication → Sign In / Providers** (`auth.social`). A provider is only assembled when it is enabled **and** has both `clientId` and `clientSecret`.
+
+| Provider | Fields | Apple-only |
+|----------|--------|-----------|
+| Google, GitHub, Apple, … | `enabled`, `clientId`, `clientSecret` | `audiences` → `appBundleIdentifier` |
+
+Sign-in and callback:
+
+```ts
+// Navigates to the server's start route, which redirects on to the provider
+await client.auth.signIn.social({ provider: 'google', callbackURL: 'https://app.example.com/dashboard' })
+
+// On the callback page (createClient already does it on load)
+await client.auth.getSessionFromUrl()
+```
+
+`callbackURL` must be a trusted origin. Without the SDK, point the button at
+`https://<your-project-domain>/api/auth/sign-in/social/<provider>?callbackURL=…`: it is the
+same start route, and a full-page navigation keeps the OAuth state cookie first-party.
+
+```text
+Callback URL to register at the provider:
+https://<your-project-domain>/api/auth/callback/<provider>
+```
+
+The **Authentication** panel in Studio shows per-provider readiness — enabled, configured, and the exact callback URL — so `missing: ['clientSecret']` never surprises you in production.
+
+## Custom OIDC / OAuth2
+
+For any provider that isn't a first-class social provider, add a generic OIDC/OAuth2 config under **Authentication → Sign In / Providers → Custom OIDC / OAuth2** (`auth.oauth.custom`). Each entry needs a `providerId`, a `clientId`, and either a `discoveryUrl` or both `authorizationUrl` + `tokenUrl`.
+
+```text
+Callback URL:
+https://<your-project-domain>/api/auth/oauth2/callback/<providerId>
+```
+
+## Magic link
+
+Passwordless sign-in by emailed link. Requires SMTP.
+
+```ts
+await client.auth.signIn.magicLink({ email: 'user@example.com', callbackURL: '/dashboard' })
+```
+
+The server emails a one-time sign-in URL; opening it establishes the session.
+
+## Email OTP
+
+Passwordless one-time code, also over SMTP. Better Auth exposes the standard `email-otp` routes under `/api/auth`:
+
+```ts
+await client.auth.emailOtp.sendVerificationOtp({ email: 'user@example.com', type: 'sign-in' })
+await client.auth.signIn.emailOtp({ email: 'user@example.com', otp: '123456' })
+```
+
+Codes are delivered as `${APP_NAME} verification code`. Rate limits apply per IP.
+
+## Phone / SMS OTP
+
+Enable `auth.phoneOtp` under **Authentication → Sign In / Providers**. That is the only
+switch: the SMS transport (`phone.sms`, under **Authentication → Settings → Phone / SMS**) has
+no toggle of its own and is ready as soon as its Twilio credentials are set, like SMTP. The
+plugin is mounted when the setting is on **and** the credentials are present; with the
+setting on and no credentials there is nowhere to send a code, and the phone panel says so
+rather than failing at the first sign-in. See [Notifications](/docs/platform/notifications/).
+
+| Field | Default | Notes |
+|---|---|---|
+| `enabled` | `false` | Enable phone sign-in |
+| `otpLength` | `6` | Clamped to `[4, 10]` |
+| `expiresIn` | `300` | Seconds |
+| `signUpOnVerification` | `true` | Create an account on the first verified number |
+
+```ts
+await client.auth.phoneNumber.sendOtp({ phoneNumber: '+33600000000' })
+await client.auth.phoneNumber.verify({ phoneNumber: '+33600000000', code: '123456' })
+```
+
+**Test numbers.** `phone.sms` → `testNumbers` takes comma-separated `phone:code` pairs
+(`+15550001111:123456, +15550002222:000000`). A matching number sends no SMS and accepts its fixed
+code, for app-store review and end-to-end tests. Studio edits the list as chips.
+
+<Note>
+`User.email` is a required unique column, so a phone-only sign-up gets a stand-in address
+of the form `33600000000@phone.local` until the user attaches a real one. Do not treat that
+value as a deliverable address, and do not key application logic on it.
+</Note>
+
+## Passkeys (WebAuthn)
+
+Enable `auth.passkey`. Configure the relying party so browsers scope credentials correctly:
+
+| Field | Meaning |
+|-------|---------|
+| `rpId` | Relying-party ID, usually your bare domain (`example.com`) |
+| `rpName` | Human name shown in the passkey prompt |
+| `origin` | Full origin (`https://app.example.com`) |
+
+```ts
+// Register a passkey for the signed-in user
+await client.auth.passkey.addPasskey()
+
+// Sign in with a passkey
+await client.auth.signIn.passkey()
+```
+
+Studio readiness flags `missing: ['rpId']` if the plugin is on but `rpId` is unset.
+
+## Two-factor (TOTP)
+
+Enable `auth.twoFactor`. Users enroll an authenticator app and verify a TOTP on sign-in.
+
+```ts
+await client.auth.twoFactor.enable({ password: 'secret123' }) // returns TOTP URI + backup codes
+await client.auth.twoFactor.verifyTotp({ code: '123456' })
+```
+
+## Organizations and teams
+
+The `organization` plugin is loaded by default and can be disabled with
+`auth.organization.enabled`. It is the end-user tenant model inside one project;
+it is separate from the Platform Console's organizations, which group projects
+for operators.
+
+| Field | Default | Effect |
+|---|---|---|
+| `allowUserToCreateOrganization` | `true` | Whether end-users can create orgs |
+| `teamsEnabled` | `false` | Adds Better Auth teams and their endpoints |
+| `maxMembers` | `0` (unlimited) | Seat cap, enforced on direct adds, invitation accepts, and SSO auto-provisioning |
+
+```ts
+const { data: org } = await client.auth.organization.create({
+  name: 'BigCorp',
+  slug: 'bigcorp',
+})
+
+await client.auth.organization.inviteMember({
+  organizationId: org!.id,
+  email: 'teammate@bigcorp.com',
+  role: 'member',
+})
+
+await client.auth.organization.setActive({ organizationId: org!.id })
+const { data: current } = await client.auth.organization.getFullOrganization() // the active one
+```
+
+The SDK returns `{ data, error }` like the rest of the Motherbase client. The
+organization namespace includes:
+
+| Area | Methods | Important behavior |
+|---|---|---|
+| Organizations | `create`, `update`, `delete`, `list`, `getFullOrganization`, `setActive`, `checkSlug`, `leave` | Calls that omit `organizationId` use the session's active organization. Creating an organization makes it active unless `keepCurrentActiveOrganization` is set. |
+| Members | `listMembers`, `getActiveMember`, `getActiveMemberRole`, `removeMember`, `updateMemberRole`, `hasPermission` | Roles are `owner`, `admin` and `member`; dynamic roles are not enabled. Pagination and filters are supported by `listMembers`. |
+| Invitations | `inviteMember`, `acceptInvitation`, `rejectInvitation`, `cancelInvitation`, `getInvitation`, `listInvitations`, `listUserInvitations` | Invitations are addressed by email; accepting one creates membership and is subject to `maxMembers`. |
+| Teams | `createTeam`, `updateTeam`, `removeTeam`, `listTeams`, `setActiveTeam`, `listUserTeams`, `listTeamMembers`, `addTeamMember`, `removeTeamMember` | Available only when `teamsEnabled` is on. Teams belong to an organization; team membership cannot cross organizations. |
+
+Use `hasPermission` for a capability check instead of assuming that an
+organization member can perform every action. Organization endpoints require a
+signed-in user and return a structured error when the caller lacks the required
+role or the organization is full.
+
+## Per-organization SSO
+
+Each end-user organization can bring its **own** identity provider (Okta, Entra ID, Google Workspace, any OIDC/SAML IdP). This is tenant data managed at runtime by the org's own admins — not project config. The project-wide `auth.sso` switch must still be enabled.
+
+**Turn it on:** enable **Auth · SSO** (`auth.sso`). That is the *only* switch that
+governs SSO, per-organization SSO included — nothing in **Auth · Organizations**
+enables or disables it. Leave the organization plugin enabled so users have orgs to
+attach providers to.
+
+An org admin registers their IdP, scoped to an `organizationId`, through the
+Motherbase SDK:
+
+```ts
+const { data, error } = await client.auth.sso.register({
+  providerId: 'bigcorp-okta',
+  issuer: 'https://bigcorp.okta.com',
+  domain: 'bigcorp.com',            // email domain that maps to this provider
+  organizationId: '<org-id>',
+  oidcConfig: {
+    clientId: '<client-id>',
+    clientSecret: '<client-secret>',
+    discoveryEndpoint: 'https://bigcorp.okta.com/.well-known/openid-configuration',
+    scopes: ['openid', 'email', 'profile'],
+  },
+})
+// data.redirectURI is the callback URL to register at the IdP.
+```
+
+Members then sign in through their org's IdP:
+
+```ts
+// Resolved from the email domain…
+await client.auth.signIn.sso({ email: 'jane@bigcorp.com', callbackURL: 'https://app.example.com/dashboard' })
+// …or explicitly by provider id:
+await client.auth.signIn.sso({ providerId: 'bigcorp-okta', callbackURL: 'https://app.example.com/dashboard' })
+```
+
+```text
+Callback URL to register at the IdP:
+https://<your-project-domain>/api/auth/sso/callback/<providerId>
+```
+
+SAML is registered the same way with a `samlConfig` block instead of
+`oidcConfig`. The provider management namespace also exposes
+`client.auth.sso.providers()`, `getProvider({ query: { providerId } })`, `updateProvider(...)` and
+`deleteProvider({ providerId })`. Secrets are not returned when providers are
+listed or fetched. Provider records live in the `ssoProvider` table keyed by
+`providerId`; a provider with no `organizationId` is project-wide, while one with
+an `organizationId` is restricted to that organization's members.
+
+<Note>
+The Platform Console (operator) login is deliberately **not** affected by any of this. It stays email + password only.
+</Note>
+
+## API keys
+
+Enable `auth.apiKey` to mount Better Auth's API key plugin, which lets a signed-in user mint and manage their own keys.
+
+```ts
+const { data } = await client.auth.apiKey.create({ name: 'ci-pipeline' })
+// data.key is shown once.
+await client.auth.apiKey.list()
+await client.auth.apiKey.update({ keyId, enabled: false })
+await client.auth.apiKey.delete({ keyId })
+```
+
+The plugin runs with Better Auth's defaults: a key is not a session (no session is minted
+from `x-api-key`), and verifying one is the server-only `auth.api.verifyApiKey`, not an HTTP
+route. No Motherbase route accepts these keys today: the plugin manages them (create, list,
+update, delete), and nothing in the request pipeline authenticates with one. They are distinct from the project's publishable and secret keys, see
+[API Keys](/docs/platform/api-keys/).
+
+## Roles
+
+The user `role` field defaults to `USER`. The middleware loads the user record on every request and exposes the live value to PostgreSQL RLS as `auth.jwt() ->> 'user_role'`. Promote or demote from **Project Studio → Authentication → Users** or the CLI.
+
+```sql
+CREATE POLICY "admin only"
+ON internal_report
+FOR ALL
+TO authenticated
+USING (auth.jwt() ->> 'user_role' = 'ADMIN')
+WITH CHECK (auth.jwt() ->> 'user_role' = 'ADMIN');
+```
+
+See [RLS](/docs/platform/rls) for the full `auth.uid()` / `auth.jwt()` / `anon` / `authenticated` model.
+
+## Readiness status
+
+`GET /api/admin/auth/status` (admin only) returns per method/provider/plugin readiness — `enabled`, `configured`, what's `missing`, and the `callbackUrl`. Studio's **Authentication** panel renders this so "what's on" reads from one source of truth and never contradicts the toggles.
+
+## Rate limiting
+
+Sign-in, sign-up, OTP, magic-link, and password-reset routes are rate-limited per IP. Configure limits in **Project Studio → Authentication → Rate Limits**.

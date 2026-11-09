@@ -1,0 +1,692 @@
+---
+title: "CLI Commands"
+description: "Reference for the Motherbase CLI command tree."
+order: 3
+---
+
+`@motherbase/cli` builds every help screen and every dispatch from a single command
+registry in `packages/cli/src/commands`. The sections below are the commands with
+something to explain beyond their usage line; [every command](#every-command) at the
+bottom of this page is generated from that same registry, so it cannot be a subset of
+what the CLI ships.
+
+## Global flags
+
+```bash
+motherbase <command> [subcommand] [args] [flags]
+motherbase -h
+motherbase --version
+```
+
+| Flag | Description |
+|------|-------------|
+| `-o`, `--output` | `pretty` (default), `json`, `yaml` or `env` |
+| `--json` | Shorthand for `--output json`. The two stay in step: `--json` sets the format, and `--output json` sets `--json` |
+| `--yes`, `-y` | Skip confirmation prompts where supported |
+| `--project`, `-p`, `--project-ref` | Select a project without reading `.motherbase/config.json`. `--project-ref` is Supabase's spelling, accepted as an alias |
+| `--url`, `-u` | Select the Platform Console URL |
+| `--token` | Use or store a Console token without reading global config |
+| `--workdir` | Resolve the project link and any relative path from this directory instead of the current one |
+| `--debug` | One line per HTTP request on stderr, never the body. Same as `MOTHERBASE_DEBUG=1` |
+| `-h`, `--help` | Show help |
+| `-v`, `--version` | Show version |
+
+`--version` is only read as the version flag when no command was given, because
+`motherbase migration squash --version <v>` is Supabase's own flag and has to keep
+working.
+
+## Connection
+
+```bash
+motherbase login [--url <consoleUrl>] [--email <email>] [--password <password>] [--token <token>]
+motherbase logout [--url <consoleUrl>]
+motherbase whoami
+motherbase link [projectNameOrId]
+motherbase unlink
+motherbase status
+```
+
+`login` posts to `/api/auth/sign-in/email` on the Console and stores the returned
+token. Omit `--email`/`--password` and it prompts. With `--token` it stores a token
+directly and makes no request, which is the CI form.
+
+`link` writes `.motherbase/config.json` in the current directory. `status` prints
+Console URL, login state, active mode, linked project, and project health.
+
+**Where admin commands go.** Everything below that touches a project resolves its
+base URL from the link file:
+
+| Mode | Base |
+|---|---|
+| Console (linked project) | `<consoleUrl>/api/projects/<projectId>/admin` |
+| Direct (`--url` of a project API) | `<projectUrl>/api/admin` |
+
+The `/api/admin/...` paths named per section are the direct-mode form; the Console
+proxies the same routes.
+
+## Projects
+
+```bash
+motherbase projects list
+motherbase projects create <name> [--domain <domain>]
+motherbase projects start <id>
+motherbase projects stop <id>
+motherbase projects restart <id>
+motherbase projects update <id>
+motherbase projects rebuild <id>
+motherbase projects delete <id> --confirm <id>
+motherbase projects logs <id> [-f]
+motherbase projects info <id>
+motherbase projects limits <id> [--api-cpus n --api-mem mb --db-cpus n --db-mem mb --minio-cpus n --minio-mem mb --edge-cpus n --edge-mem mb]
+```
+
+These commands call `/api/platform/*` on the Platform Console. Deleting a project requires `--confirm <id>`. `logs -f` polls the snapshot endpoint every 3 seconds.
+
+## Local stack
+
+```bash
+motherbase init [dir]
+motherbase start
+motherbase stop
+motherbase deploy
+motherbase logs [service...]
+```
+
+These commands are local Docker Compose wrappers and do not require Console login.
+
+`init` scaffolds a single project without the Console: a `docker-compose.yml` with the API,
+Postgres, MinIO and the edge runtime, and a `.env` with secrets generated for this install.
+By default it runs the images published for Motherbase (`MOTHERBASE_REGISTRY` /
+`MOTHERBASE_TAG` in `.env`), so it needs Docker and nothing else. The stack has no Project
+Studio, which the Console serves. The operator account is created by running the seed once:
+`docker compose exec api node apps/server/dist/prisma/seed.js`. The
+[Quickstart](/docs/getting-started/quickstart/#without-the-console-an-api-only-stack) shows
+how to use it.
+
+| Flag | Effect |
+|---|---|
+| `--port` | API port, default 5001 |
+| `--postgres-port` | Host port for PostgreSQL, default 55432, bound to loopback |
+| `--cors-origins` | Browser origins allowed to call the API, comma-separated, default `http://localhost:3000` |
+| `--tag` | Image tag to run, default `latest`; a `sha-<commit>` tag pins one build |
+| `--repo` / `--ref` | Build the images from source instead (needs `motherbase-deps:1.0.0` built locally first, as the generated compose file explains) |
+| `--admin-email` | Operator account, default `admin@example.com` |
+| `--admin-password` | Password for that account. Omit it and one is generated and printed |
+| `--force` | Overwrite an existing `.env` and compose file |
+
+`--force` discards the secrets in the existing `.env`, which is the only copy of
+the key your existing data was encrypted with. Without it, existing files are kept
+and reported rather than replaced.
+
+`start`, `stop`, `deploy` and `logs` refuse to run in a directory with no compose
+file, and name `motherbase init` as the fix.
+
+## Database
+
+```bash
+motherbase db tables
+motherbase db sql -e "select 1"
+motherbase db sql <file.sql>
+motherbase db dump [file]
+motherbase db restore <file> --confirm
+motherbase db restore --key <remoteKey> --confirm
+motherbase db backups
+motherbase db backups list
+motherbase db backups config
+motherbase db backups config --set key=value --set key2=value2
+```
+
+`db sql` uses `/api/admin/sql`; projects can disable raw SQL with `CONSOLE_SQL_ENABLED=false`. Backups use `/api/admin/backups/*`.
+
+## Migrations
+
+```bash
+motherbase migration new <name>
+motherbase migrations list
+motherbase migrations diff
+motherbase migrations get <id>
+motherbase migrations create --name <name> --up <file.sql> [--down <file.sql>]
+motherbase migrations apply <id>
+motherbase migrations rollback <id>
+```
+
+`migration new` creates a local timestamped SQL file. `migrations *` uses the server-side schema migration API.
+
+## Supabase import
+
+```bash
+motherbase import --from-supabase <connectionString>   [--service-role-key <key>] [--management-token <sbp_...>]   [--preview] [--no-data] [--no-auth] [--no-storage] [--no-edge-functions] [--no-secrets]
+```
+
+Imports a Supabase project into the linked Motherbase project. Six sections, three credentials:
+
+| Credential | Unlocks |
+|---|---|
+| `--from-supabase` (required) | `public` schema, table data, RLS policies, email/password users, bucket catalog |
+| `--service-role-key` | The storage objects' bytes. Without it, buckets are created empty |
+| `--management-token` | Edge functions (ported from Deno) and project secrets |
+
+Each section is independent. A missing credential downgrades that section to a note instead of
+failing the import, and a failing section never takes another down. `--preview` is a dry run.
+Without `--yes` the CLI asks for confirmation first.
+
+None of the three credentials is logged, written to disk, or echoed back in the summary.
+
+See [Migrate from Supabase](/docs/getting-started/migrate-from-supabase) for the full migration workflow.
+
+## Port the application code
+
+```bash
+motherbase migrate codemod <dir> [--write]
+```
+
+Rewrites `@supabase/supabase-js` to `@motherbase/client` and `@supabase/ssr` to `@motherbase/ssr`
+in every source file under `<dir>`, and reports the calls this SDK does not implement, with a
+line number and what to do instead.
+
+Without `--write` nothing is touched — it prints what it would rewrite. Run it that way first.
+
+Deliberately a text pass rather than an AST pass, so the CLI does not carry a TypeScript parser:
+import specifiers and method names do not need one. The cost is that a match inside a comment or
+a string still gets reported, which is the right direction to be wrong in for a list a human reads.
+
+## RLS
+
+```bash
+motherbase rls list
+motherbase rls enable <table>
+motherbase rls disable <table>
+motherbase rls policy create --table <table> --name <name> --command <SELECT|INSERT|UPDATE|DELETE|ALL> [--using <expr>] [--check <expr>] [--roles anon,authenticated]
+motherbase rls policy delete <table> <name>
+
+motherbase rls preset <table> <preset> [--owner-column c] [--org-column c] [--org-claim c] [--deleted-column c] [--replace]
+motherbase rls simulate --sql "select * from t" [--as anon|authenticated|<userId>] [--claims '{"org_id":"x"}'] [--limit n]
+motherbase rls lint [--level critical|warning|info]
+```
+
+Policies are real PostgreSQL policies, the same objects shown in Project Studio → Authentication → Policies.
+
+`rls preset` applies one of the shipped policy sets in a single step:
+`starter`, `public_crud`, `authenticated_crud`, `admin_only`, `blocked`, `owner_only`,
+`org_scoped`, `public_read_owner_write`, `soft_delete`. `--replace` drops the table's
+existing policies first instead of adding to them.
+
+`rls simulate` runs a query as a given caller and shows what RLS actually lets through —
+the CLI form of the Studio's policy simulator. `rls lint` runs the same security and
+performance advisor as `motherbase inspect advisor`, filtered by level.
+
+## Users
+
+```bash
+motherbase users list
+motherbase users get <id>
+motherbase users create --email <email> --password <password> [--name <name>] [--role USER|ADMIN]
+motherbase users update <id> [--email <email>] [--name <name>] [--role USER|ADMIN]
+motherbase users delete <id>
+motherbase users reset-password <id> [--password <password>]
+motherbase users promote <id>
+motherbase users demote <id>
+motherbase users revoke-sessions <id>
+```
+
+These commands operate project auth users through `/api/admin/users/*`.
+
+## Storage
+
+```bash
+motherbase storage buckets list
+motherbase storage buckets create <slug> [--name <name>] [--visibility public|private]
+motherbase storage buckets delete <slug> [--force]
+motherbase storage ls [bucket]
+motherbase storage cp <local-file> <bucket[:path]> [--visibility public|private]
+motherbase storage cp <fileId> <local-file>
+motherbase storage rm <id>
+```
+
+Uploads go through `/api/admin/storage/files`; downloads stream `/api/admin/storage/files/:id/raw`. Object identity is the server file id.
+
+## Edge functions
+
+```bash
+motherbase functions list
+motherbase functions get <id>
+motherbase functions new <name>
+motherbase functions deploy [name] [--memory <mb>] [--timeout <ms>]
+motherbase functions deploy --file <file.ts> --route <route> [--name <name>]
+motherbase functions pull [name]
+motherbase functions serve [name]
+motherbase functions delete <id>
+motherbase functions invoke <route> [--body <json>]
+motherbase functions logs <id>
+```
+
+`new` scaffolds `functions/<name>/index.ts` and, the first time, writes
+`functions/motherbase.d.ts` next to it: the declarations for the globals the runtime
+injects (`env`, `context`, `sendMail`), so an editor stops flagging them. The file is
+generated and never overwritten — delete it and scaffold again to refresh it.
+
+`invoke` runs a deployed function as you, the operator: it looks the route up and calls
+`POST /admin/edge-functions/:id/invoke`, the same call as Studio's **Run**, so it needs no
+`EDGE_INVOKE_TOKEN` and works whether or not public invocation is enabled. The public
+`/api/edge/<route>` URL is for the function's own callers, and the Console proxy strips your
+session before forwarding there.
+
+`deploy` with no argument deploys every function under the local `functions/`
+directory; with a name, just that one. The `--file` form is the older single-file
+path and is still supported. Either way the deploy upserts by route: it patches the
+existing function when the route is already taken, otherwise it creates one.
+
+`pull` writes deployed function source back to disk — the inverse of `deploy`, and the way
+to recover a function that was edited in Studio. `serve` watches local function files and
+redeploys on every save, which is the local development loop.
+
+## Secrets
+
+```bash
+motherbase secrets list
+motherbase secrets set <NAME> <value>
+motherbase secrets unset <NAME>
+```
+
+Secrets are injected into edge functions when `EDGE_SECRETS_ENABLED=true`.
+
+## API keys
+
+```bash
+motherbase keys list
+motherbase keys create <NAME> [--type publishable|secret]
+motherbase keys revoke <ID>
+```
+
+A **publishable** key identifies the project and is safe in a browser bundle; a
+**secret** key runs requests as `service_role` and bypasses row level security.
+`--type` defaults to `secret`. A secret key is printed once at creation and stored
+hashed, so it can never be shown again.
+
+Different from `secrets` above: those are values an edge function reads, these are
+what a client presents to reach the project. See
+[API Keys](/docs/platform/api-keys/).
+
+## Realtime
+
+```bash
+motherbase realtime config
+motherbase realtime config --models todo,products
+motherbase realtime channels
+```
+
+Realtime config maps to `/api/admin/realtime/config`. `channels` lists active server-side realtime channels.
+
+## Webhooks
+
+```bash
+motherbase webhooks list
+motherbase webhooks create --name <name> --url <url> --events event.a,event.b
+motherbase webhooks delete <id>
+motherbase webhooks test <id>
+```
+
+Webhooks are project admin resources under `/api/admin/webhooks/*`.
+
+## Cron
+
+```bash
+motherbase cron list
+motherbase cron list --app
+motherbase cron create --name nightly --schedule "0 3 * * *" --command "select cleanup();"
+motherbase cron delete <id>
+motherbase cron toggle <id> --active <true|false>
+```
+
+Without `--app`, cron commands manage `pg_cron` jobs through `/api/admin/cron/pg/jobs`. `--app` lists code-defined app jobs read-only.
+
+## Config and diagnostics
+
+```bash
+motherbase config list
+motherbase config get <group>
+motherbase config set <group> key=value [key2=value2 ...]
+
+motherbase inspect logs [--limit n]
+motherbase inspect stats
+motherbase inspect performance
+motherbase inspect requests
+motherbase inspect advisor
+motherbase inspect shield
+```
+
+Settings map to `/api/admin/settings/:group`. Diagnostics map to admin logs, metrics, advisor, and shield endpoints.
+
+---
+
+## Codegen
+
+```bash
+motherbase gen types typescript [--schema public] [--local] [--output database.types.ts] [--check]
+```
+
+Generates the `Database` type for the SDK from the **live** schema:
+
+| Flag | Effect |
+|---|---|
+| `--schema` | Schema to emit, default `public` |
+| `--output` | File to write. Omit it and the file goes to stdout, so `… > database.types.ts` works |
+| `--local` | Bypass the Console proxy and talk straight to a project API on this machine (default `http://localhost:5001`) — no console account or link file needed |
+| `--check` | Fail when the file on disk differs from what would be generated, for CI |
+
+The server owns the emitter (`apps/server/services/admin/typegen`); the CLI is a transport that asks `GET /admin/schema/types` for the rendered file. That is deliberate: re-implementing it here would drift from the Studio download and the schema tools within a release.
+
+```ts
+import type { Database } from './database.types'
+const client = createClient<Database>(url, anonKey)
+```
+
+```bash
+motherbase gen types zod [--schema public] [--local] [--output database.schemas.ts] [--check]
+```
+
+Same catalog, rendered as runtime zod schemas instead of types. TypeScript types vanish at
+runtime, so a form post, a webhook body or a row from an untyped source is `any` in practice and
+the mistake first shows up as a column constraint violation in production.
+
+Emits `<Relation>Row`, `<Relation>Insert` and `<Relation>Update` per table and view, camel-cased
+and capitalised (`order_items` becomes `OrderItemsRow`). Optionality matches the TypeScript
+`Insert` / `Update` types exactly, so a value that passes the schema is a value the REST layer
+accepts. Enum columns become `z.enum([...])`; a type the emitter does not model becomes
+`z.unknown()` rather than a guess that would reject valid data.
+
+Output is deterministic — stable order, no timestamps, LF endings — which is what makes `--check`
+usable in CI.
+See the [SDK reference](/docs/reference/sdk/).
+
+## AI agents
+
+```bash
+motherbase mcp [--write]
+```
+
+Serves the linked project to an AI agent over the Model Context Protocol, on
+stdio. Read-only by default: schema, policies, the advisor lint, the RLS
+simulator, logs and generated types. `--write` adds `apply_migration` (real DDL,
+recorded and rollbackable) and raw SQL writes.
+
+Authentication is the CLI's own context, so an MCP session reaches exactly what a
+`motherbase` command could. See [MCP Server](/docs/platform/mcp/).
+
+## Every command
+
+Generated from `packages/cli/src/commands` — the same registry `motherbase --help`
+renders — by `npm run docs:cli` in the backend. `packages/cli/test/docs.test.js` fails
+when the committed table no longer matches the registry, so a command added to the CLI
+cannot stay missing from this page.
+
+{/* BEGIN GENERATED CLI */}
+
+### Connection
+
+| Command | Usage | What it does |
+|---|---|---|
+| `login` | `motherbase login [--url <consoleUrl>] [--email <email>] [--code <totp>]` | Log in to a Motherbase Console (email/password → session token) |
+| `logout` | `motherbase logout [--url <consoleUrl>]` | Remove the stored token for the current (or --url) console |
+| `whoami` | `motherbase whoami` | Show the current console, account and platform info |
+| `link` | `motherbase link [projectNameOrId]` | Link the current directory to a project (writes ./.motherbase/config.json) |
+| `unlink` | `motherbase unlink` | Remove the project link from the current directory |
+| `status` | `motherbase status` | Show connection status: console, link, and a project health probe |
+
+### Orgs & projects (Console)
+
+| Command | Usage | What it does |
+|---|---|---|
+| `orgs` | `motherbase orgs <list\|create> ...` | Manage organizations on the Platform Console |
+| `orgs list` | `motherbase orgs list` | List the organizations you belong to |
+| `orgs create` | `motherbase orgs create <name>` | Create an organization |
+| `projects` | `motherbase projects <list\|create\|start\|stop\|restart\|update\|rebuild\|delete\|logs\|info\|limits\|api-keys> ...` | Manage projects on the Platform Console |
+| `projects list` | `motherbase projects list` | List all projects on the console |
+| `projects create` | `motherbase projects create <name> [--domain <domain>]` | Create a new project |
+| `projects delete` | `motherbase projects delete <id> --confirm <name>` | Delete a project (requires --confirm &lt;name&gt;) |
+| `projects logs` | `motherbase projects logs <id> [-f]` | Show recent logs for a project |
+| `projects info` | `motherbase projects info <id>` | Show project details and DNS checks |
+| `projects limits` | `motherbase projects limits <id> [--api-cpus n --api-mem mb --db-cpus n --db-mem mb --minio-cpus n --minio-mem mb --edge-cpus n --edge-mem mb]` | Get or set per-project resource limits |
+| `projects start` | `motherbase projects start <id>` | start a project |
+| `projects stop` | `motherbase projects stop <id>` | stop a project |
+| `projects restart` | `motherbase projects restart <id>` | restart a project |
+| `projects update` | `motherbase projects update <id>` | update a project |
+| `projects rebuild` | `motherbase projects rebuild <id>` | rebuild a project |
+| `projects api-keys` | `motherbase projects api-keys [--project-ref <id>]` | List project API keys |
+| `branches` | `motherbase branches <create\|list\|get\|update\|delete\|pause\|unpause\|reset\|merge\|rebase\|switch> ...` | Manage preview branches of the linked project |
+| `branches create` | `motherbase branches create <name> [--git-branch <ref>] [--with-data]` | Create a preview branch of the linked project |
+| `branches list` | `motherbase branches list` | List the branches of the linked project, main first |
+| `branches get` | `motherbase branches get <name>` | Show one branch, with the migrations it is ahead and behind |
+| `branches update` | `motherbase branches update <name> --git-branch <ref>` | Change a branch's git branch |
+| `branches delete` | `motherbase branches delete <name>` | Delete a branch and its whole stack |
+| `branches pause` | `motherbase branches pause <name>` | Stop a branch's stack, keeping its data |
+| `branches unpause` | `motherbase branches unpause <name>` | Start a paused branch again |
+| `branches reset` | `motherbase branches reset <name>` | Recreate a branch from the parent as it is now (its changes are lost) |
+| `branches merge` | `motherbase branches merge <name>` | Apply the branch's new migrations to the parent |
+| `branches rebase` | `motherbase branches rebase <name>` | Apply the parent's newer migrations to the branch |
+| `branches switch` | `motherbase branches switch <name\|main>` | Point this directory's link at a branch (or back at main) |
+| `domains` | `motherbase domains <create\|get\|reverify\|activate\|delete> ...` | Custom domain for the linked project's API |
+| `domains create` | `motherbase domains create --custom-hostname <api.example.com>` | Start using a custom hostname (prints the DNS records to publish) |
+| `domains get` | `motherbase domains get` | Show the custom hostname and its verification state |
+| `domains reverify` | `motherbase domains reverify` | Check the DNS records again |
+| `domains activate` | `motherbase domains activate` | Serve the API on the verified hostname (TLS is issued on first request) |
+| `domains delete` | `motherbase domains delete` | Stop using the custom hostname |
+| `vanity-subdomains` | `motherbase vanity-subdomains <get\|check-availability\|activate\|delete> ...` | Vanity subdomain under the platform domain |
+| `vanity-subdomains get` | `motherbase vanity-subdomains get` | Show the active vanity subdomain |
+| `vanity-subdomains check-availability` | `motherbase vanity-subdomains check-availability --desired-subdomain <name>` | Is a subdomain free? |
+| `vanity-subdomains activate` | `motherbase vanity-subdomains activate --desired-subdomain <name>` | Serve the API on &lt;name&gt;.&lt;platform domain&gt; as well |
+| `vanity-subdomains delete` | `motherbase vanity-subdomains delete` | Remove the vanity subdomain |
+
+### Local self-host
+
+| Command | Usage | What it does |
+|---|---|---|
+| `init` | `motherbase init [dir] [--port 5001] [--cors-origins http://localhost:3000] [--tag latest] [--repo URL --ref BRANCH] [--force]` | Scaffold a runnable local stack (compose file, .env, generated secrets) |
+| `start` | `motherbase start` | Start the local docker compose stack |
+| `stop` | `motherbase stop` | Stop the local docker compose stack |
+| `deploy` | `motherbase deploy` | Rebuild and start the local docker compose stack |
+| `logs` | `motherbase logs [service...]` | Follow logs from the local docker compose stack |
+
+### Database
+
+| Command | Usage | What it does |
+|---|---|---|
+| `db` | `motherbase db <push\|pull\|diff\|reset\|dump\|seed\|tables\|sql\|backup\|restore\|backups\|lint\|indexes\|types\|roles\|column-privileges\|publications> ...` | Database: tables, SQL, dumps, restores, indexes, types, roles, publications |
+| `db tables` | `motherbase db tables` | List database tables |
+| `db sql` | `motherbase db sql -e "select 1" \| motherbase db sql <file.sql>` | Run SQL from -e "..." or a file |
+| `db backup` | `motherbase db backup [file]` | Create a database backup on the server |
+| `db restore` | `motherbase db restore <file> \| --key <remoteKey>  --confirm` | Restore the database from a server dump or offsite key |
+| `db backups` | `motherbase db backups [list] \| motherbase db backups config [--set key=value ...]` | List backups, or manage backup config (`db backups config`) |
+| `db push` | `motherbase db push [--dry-run] [--include-seed] [--include-all]` | Apply pending local migrations to the linked project |
+| `db pull` | `motherbase db pull [name]` | Create a migration from the remote schema changes local files lack |
+| `db diff` | `motherbase db diff [-f <name>]` | Diff the remote schema against local migrations |
+| `db reset` | `motherbase db reset --confirm [--no-seed]` | Reset the linked database to local migrations and seeds |
+| `db dump` | `motherbase db dump [-f <file>] [--schema-only \| --data-only] [--schema a,b] [--use-copy]` | Dump the linked database (app schemas) to a local file or stdout |
+| `db seed` | `motherbase db seed` | Run the seed files against the linked database |
+| `db indexes` | `motherbase db indexes <list\|create\|drop> ...` | Indexes across a schema: list, create, drop |
+| `db types` | `motherbase db types <list\|create\|add-value\|rename-value\|drop> ...` | Enumerated types: list, create, add-value, rename-value, drop |
+| `db roles` | `motherbase db roles <list\|create\|alter\|drop> ...` | Postgres roles: list, create, alter, drop |
+| `db column-privileges` | `motherbase db column-privileges <list\|grant\|revoke> <[schema.]table> ...` | Column-level GRANT / REVOKE per role |
+| `db publications` | `motherbase db publications <list\|create\|alter\|drop> ...` | Logical-replication publications: list, create, alter, drop |
+| `db cron` | `motherbase db cron <list\|get\|run\|create>` | Manage pg_cron jobs |
+| `db lint` | `motherbase db lint [--level critical\|warning\|info]` | Run the security and performance advisor |
+| `backups` | `motherbase backups <list\|restore> ...` | List and restore database backups |
+| `backups list` | `motherbase backups list` | List database backups |
+| `backups restore` | `motherbase backups restore <file> \| --key <remoteKey>  --confirm` | Restore the database from a server dump or offsite key |
+| `migrations` | `motherbase migrations <new\|list\|up\|down\|repair\|squash\|fetch\|diff\|get\|create\|apply\|rollback> ... (alias of `migration`)` | Schema migrations: local files and the remote history |
+| `migrations new` | `motherbase migration new <name>` | Scaffold a local migration .sql file |
+| `migrations list` | `motherbase migration list` | List local and remote migrations side by side |
+| `migrations diff` | `motherbase migration diff` | Show a diff between live schema and migrations |
+| `migrations get` | `motherbase migration get <id>` | Show a single migration |
+| `migrations create` | `motherbase migration create --name <name> --up <file.sql> [--down <file.sql>]` | Create a migration from up/down SQL files |
+| `migrations apply` | `motherbase migration apply <id>` | Apply a migration |
+| `migrations rollback` | `motherbase migration rollback <id>` | Roll back a migration |
+| `migrations up` | `motherbase migration up [--include-all] [--dry-run]` | Apply pending local migrations to the linked project |
+| `migrations down` | `motherbase migration down [--last <n>] [--yes]` | Roll back the last n applied migrations with their down SQL |
+| `migrations repair` | `motherbase migration repair <version...> --status applied\|reverted` | Mark migrations applied or reverted in the remote history, without running them |
+| `migrations squash` | `motherbase migration squash [--version <v>] [--linked]` | Squash local migrations into one file |
+| `migrations fetch` | `motherbase migration fetch [--force]` | Write the remote migration history into local files |
+| `migration` | `motherbase migration <new\|list\|up\|down\|repair\|squash\|fetch\|diff\|get\|create\|apply\|rollback> ...` | Schema migrations: local files and the remote history |
+| `migration new` | `motherbase migration new <name>` | Scaffold a local migration .sql file |
+| `migration list` | `motherbase migration list` | List local and remote migrations side by side |
+| `migration diff` | `motherbase migration diff` | Show a diff between live schema and migrations |
+| `migration get` | `motherbase migration get <id>` | Show a single migration |
+| `migration create` | `motherbase migration create --name <name> --up <file.sql> [--down <file.sql>]` | Create a migration from up/down SQL files |
+| `migration apply` | `motherbase migration apply <id>` | Apply a migration |
+| `migration rollback` | `motherbase migration rollback <id>` | Roll back a migration |
+| `migration up` | `motherbase migration up [--include-all] [--dry-run]` | Apply pending local migrations to the linked project |
+| `migration down` | `motherbase migration down [--last <n>] [--yes]` | Roll back the last n applied migrations with their down SQL |
+| `migration repair` | `motherbase migration repair <version...> --status applied\|reverted` | Mark migrations applied or reverted in the remote history, without running them |
+| `migration squash` | `motherbase migration squash [--version <v>] [--linked]` | Squash local migrations into one file |
+| `migration fetch` | `motherbase migration fetch [--force]` | Write the remote migration history into local files |
+| `import` | `motherbase import --from-supabase <connectionString> [--service-role-key <key>] [--management-token <sbp_…>] [--preview] [--no-data] [--no-auth] [--no-storage] [--no-edge-functions] [--no-secrets]` | Import a Supabase project (schema, data, auth, storage, edge functions, secrets) |
+| `test` | `motherbase test db [file.sql ...]` | Run database tests (pgTAP) |
+| `test db` | `motherbase test db [file.sql ...]` | Run pgTAP tests from motherbase/tests against the linked database |
+| `postgres-config` | `motherbase postgres-config <get\|update\|delete> ...` | Postgres configuration (statement_timeout, work_mem, max_connections, ...) |
+| `postgres-config get` | `motherbase postgres-config get [--all]` | Show Postgres config overrides (--all for every managed setting) |
+| `postgres-config update` | `motherbase postgres-config update --config key=value [--config ...] [--scope database\|role\|system] [--role r] [--replace-existing-overrides]` | Set Postgres config values |
+| `postgres-config delete` | `motherbase postgres-config delete --config key1,key2 [--scope database\|role\|system] [--role r]` | Remove Postgres config overrides, restoring the defaults |
+
+### Resources
+
+| Command | Usage | What it does |
+|---|---|---|
+| `rls` | `motherbase rls <list\|enable\|disable\|policy\|preset\|simulate\|lint> ...` | Row-level security (tables, policies, presets, simulator, lint) |
+| `rls list` | `motherbase rls list` | List tables with RLS status and policies |
+| `rls enable` | `motherbase rls enable <table>` | Enable RLS on a table |
+| `rls disable` | `motherbase rls disable <table>` | Disable RLS on a table |
+| `rls policy` | `motherbase rls policy create --table <t> --name <n> --command <SELECT\|INSERT\|UPDATE\|DELETE\|ALL> [--using <expr>] [--check <expr>] [--roles a,b] \| motherbase rls policy delete <table> <name>` | Manage RLS policies |
+| `rls preset` | `motherbase rls preset <table> <starter\|public_crud\|authenticated_crud\|admin_only\|blocked\|owner_only\|org_scoped\|public_read_owner_write\|soft_delete> [--owner-column c] [--org-column c] [--org-claim c] [--deleted-column c] [--replace]` | Apply a policy preset to a table |
+| `rls simulate` | `motherbase rls simulate --sql "select * from t" [--as anon\|authenticated\|<userId>] [--claims '{"org_id":"x"}'] [--limit n]` | Run a query as a given caller and show what RLS lets through |
+| `rls lint` | `motherbase rls lint [--level critical\|warning\|info]` | Run the security and performance advisor |
+| `users` | `motherbase users <list\|get\|create\|update\|delete\|reset-password\|promote\|demote\|revoke-sessions\|deactivate\|impersonate\|audit> ...` | Project auth users |
+| `users list` | `motherbase users list` | List project users |
+| `users get` | `motherbase users get <id>` | Get a user by id |
+| `users create` | `motherbase users create --email <e> --password <p> [--name <n>] [--role <r>]` | Create a user |
+| `users update` | `motherbase users update <id> [--email ...] [--name ...] [--role ...]` | Update a user |
+| `users delete` | `motherbase users delete <id>` | Delete a user |
+| `users reset-password` | `motherbase users reset-password <id> [--password <p>]` | Reset a user password |
+| `users promote` | `motherbase users promote <id>` | Promote a user to ADMIN |
+| `users demote` | `motherbase users demote <id>` | Demote a user to USER |
+| `users revoke-sessions` | `motherbase users revoke-sessions <id>` | Revoke all sessions for a user |
+| `users deactivate` | `motherbase users deactivate <id>` | Deactivate a user account and revoke its sessions |
+| `users impersonate` | `motherbase users impersonate <id>` | Grants a token to impersonate a user by id |
+| `users audit` | `motherbase users audit [--action <a>] [--actor <email\|id>] [--type <log type>] [--from <iso>] [--to <iso>] [--limit <n>]` | Read the auth audit log, newest first |
+| `storage` | `motherbase storage <buckets\|ls\|cp\|mv\|rm> ...` | Storage buckets and objects (ss:///bucket/key paths) |
+| `storage buckets` | `motherbase storage buckets <list\|create\|delete> ...` | Manage storage buckets |
+| `storage ls` | `motherbase storage ls [ss:///bucket/prefix] [-r]` | List buckets, or the objects under a path |
+| `storage cp` | `motherbase storage cp <src> <dst> [-r]   e.g. cp ./a.png ss:///media/  \|  cp -r ss:///media/img ./img` | Copy between local paths and ss:///bucket/key (upload, download or in-bucket copy) |
+| `storage mv` | `motherbase storage mv <ss:///bucket/src> <ss:///bucket/dst> [-r]` | Move objects within a bucket |
+| `storage rm` | `motherbase storage rm <ss:///bucket/key \| fileId>... [-r]` | Delete objects by path (or a file by id) |
+| `functions` | `motherbase functions <list\|get\|new\|deploy\|pull\|download\|serve\|delete\|invoke\|logs> ...` | Edge functions (repo files, deploy, invoke, logs) |
+| `functions list` | `motherbase functions list` | List edge functions |
+| `functions get` | `motherbase functions get <id>` | Get an edge function by id |
+| `functions new` | `motherbase functions new <name> [--template hello-world\|stripe-webhook\|openai\|resend-email\|image-transform\|websocket\|storage-upload]` | Scaffold functions/&lt;name&gt;/index.ts |
+| `functions deploy` | `motherbase functions deploy [name] [--memory <mb>] [--timeout <ms>] [--file <f> --route <r>]` | Deploy local functions (all of them, or one by name) |
+| `functions pull` | `motherbase functions pull [name]` | Write deployed function source back to disk |
+| `functions serve` | `motherbase functions serve [name]` | Watch local functions and redeploy on every save |
+| `functions delete` | `motherbase functions delete <id>` | Delete an edge function by id |
+| `functions invoke` | `motherbase functions invoke <route> [--body <json>]` | Invoke a deployed edge function by route, as the operator |
+| `functions logs` | `motherbase functions logs <id>` | Show logs for an edge function |
+| `functions download` | `motherbase functions download [name]` | Write deployed function source back to disk |
+| `secrets` | `motherbase secrets <list\|set\|unset> ...` | Edge function secrets |
+| `secrets list` | `motherbase secrets list` | List edge secrets (names only) |
+| `secrets set` | `motherbase secrets set NAME=VALUE [NAME=VALUE ...] [--env-file .env]` | Set one or more secrets |
+| `secrets unset` | `motherbase secrets unset <NAME>` | Remove a secret |
+| `keys` | `motherbase keys <list\|create\|revoke> ...` | Project API keys (publishable and secret) |
+| `keys list` | `motherbase keys list` | List project API keys |
+| `keys create` | `motherbase keys create <NAME> [--type publishable\|secret]` | Create a key. A secret key is printed once and never again |
+| `keys revoke` | `motherbase keys revoke <ID>` | Revoke a key by id |
+| `realtime` | `motherbase realtime <config\|channels> ...` | Realtime configuration and channels |
+| `realtime config` | `motherbase realtime config [--models a,b,c]` | Show realtime config, or set enabled models with --models a,b,c |
+| `realtime channels` | `motherbase realtime channels` | List active realtime channels |
+| `webhooks` | `motherbase webhooks <list\|create\|delete\|test> ...` | Outgoing webhooks |
+| `webhooks list` | `motherbase webhooks list` | List webhooks |
+| `webhooks create` | `motherbase webhooks create --name <n> --url <u> --events a,b` | Create a webhook |
+| `webhooks delete` | `motherbase webhooks delete <id>` | Delete a webhook |
+| `webhooks test` | `motherbase webhooks test <id>` | Send a test event to a webhook |
+| `cron` | `motherbase cron <list\|create\|delete\|toggle> ...` | Scheduled jobs (pg_cron) |
+| `cron list` | `motherbase cron list [--app]` | List pg_cron jobs (and app jobs with --app) |
+| `cron create` | `motherbase cron create --name <n> --schedule "<cron>" --command "<sql>"` | Create a pg_cron job |
+| `cron delete` | `motherbase cron delete <id>` | Delete a pg_cron job by numeric id |
+| `cron toggle` | `motherbase cron toggle <id> --active <true\|false>` | Enable/disable a pg_cron job |
+| `queues` | `motherbase queues <list\|enable\|expose\|create\|drop\|send\|read\|archive\|purge> ...` | Message queues (pgmq) |
+| `queues list` | `motherbase queues list` | List queues with their depth |
+| `queues enable` | `motherbase queues enable` | Install pgmq for this project |
+| `queues expose` | `motherbase queues expose <true\|false>` | Expose queues to the client SDK through pgmq_public (or hide them) |
+| `queues create` | `motherbase queues create <name> [--type basic\|unlogged\|partitioned] [--rls true\|false]` | Create a queue |
+| `queues drop` | `motherbase queues drop <name>` | Drop a queue and its messages |
+| `queues send` | `motherbase queues send <name> '<json>' [--delay seconds]` | Send a JSON message |
+| `queues read` | `motherbase queues read <name> [--qty 1] [--vt 30]` | Read messages, hiding them from other readers for the visibility timeout |
+| `queues archive` | `motherbase queues archive <name> <msg-id>` | Move a message to the archive |
+| `queues purge` | `motherbase queues purge <name>` | Delete every message in a queue |
+| `vault` | `motherbase vault <list\|enable\|create\|update\|reveal\|delete> ...` | Encrypted secrets (Vault) |
+| `vault list` | `motherbase vault list` | List Vault secrets (names and metadata, never values) |
+| `vault enable` | `motherbase vault enable` | Install the Vault for this project |
+| `vault create` | `motherbase vault create <name> --secret <value> [--description <text>]` | Store an encrypted secret |
+| `vault update` | `motherbase vault update <id> [--name <n>] [--secret <value>] [--description <text>]` | Rename a secret, change its value or its description |
+| `vault reveal` | `motherbase vault reveal <id>` | Print the decrypted value of a secret |
+| `vault delete` | `motherbase vault delete <id>` | Delete a secret |
+| `wrappers` | `motherbase wrappers <list\|enable\|create-server\|drop-server\|credentials\|import\|create-table\|drop-table> ...` | Foreign data wrappers (postgres_fdw, file_fdw) |
+| `wrappers list` | `motherbase wrappers list` | List wrappers, foreign servers and foreign tables |
+| `wrappers enable` | `motherbase wrappers enable <postgres_fdw\|file_fdw>` | Install a wrapper extension |
+| `wrappers create-server` | `motherbase wrappers create-server <name> --wrapper <postgres_fdw\|file_fdw> [--option k=v ...] [--user <u> --password <p>]` | Create a foreign server; the password goes to the Vault |
+| `wrappers drop-server` | `motherbase wrappers drop-server <name>` | Drop a foreign server |
+| `wrappers credentials` | `motherbase wrappers credentials <server> --user <u> --password <p>` | Replace the remote credentials of a foreign server |
+| `wrappers import` | `motherbase wrappers import <server> --remote-schema <s> --local-schema <s> [--tables a,b]` | Import a remote schema as foreign tables |
+| `wrappers create-table` | `motherbase wrappers create-table <schema>.<table> --server <s> --column <name>:<type> ... [--option k=v ...]` | Create one foreign table |
+| `wrappers drop-table` | `motherbase wrappers drop-table <schema>.<table>` | Drop a foreign table |
+| `config` | `motherbase config <list\|get\|set> ...` | Project settings groups |
+| `config list` | `motherbase config list` | List setting groups |
+| `config get` | `motherbase config get <group>` | Get a settings group |
+| `config set` | `motherbase config set <group> key=value [key2=value2 ...]` | Set values in a settings group |
+| `inspect` | `motherbase inspect <db\|report\|logs\|stats\|performance\|index-advisor\|requests\|advisor\|shield>` | Diagnostics: database inspection, report, logs, stats, index-advisor, advisor, shield |
+| `inspect db` | `motherbase inspect db <bloat\|blocking\|calls\|db-stats\|index-stats\|locks\|long-running-queries\|outliers\|replication-slots\|role-stats\|table-stats\|traffic-profile\|vacuum-stats>` | Inspect the database: bloat, locks, slow queries, index and table stats |
+| `inspect report` | `motherbase inspect report [--output-dir <dir>]` | Write every inspect query to a CSV in a dated folder |
+| `inspect logs` | `motherbase inspect logs [--limit n] [--source api\|rest\|postgres\|pooler\|auth\|storage\|realtime\|edge-function\|cron\|platform]` | Recent server logs |
+| `inspect index-advisor` | `motherbase inspect index-advisor --sql "<select ...>" \| motherbase inspect index-advisor --enable` | Suggest indexes for a statement (hypopg + index_advisor) |
+| `inspect stats` | `motherbase inspect stats` | Stats overview |
+| `inspect performance` | `motherbase inspect performance` | Performance metrics |
+| `inspect requests` | `motherbase inspect requests` | Request metrics |
+| `inspect advisor` | `motherbase inspect advisor` | Advisor findings |
+| `inspect shield` | `motherbase inspect shield` | Security shield report |
+| `snippets` | `motherbase snippets <list\|download> ...` | SQL Editor snippets |
+| `snippets list` | `motherbase snippets list` | List SQL snippets (yours and the ones shared with the project) |
+| `snippets download` | `motherbase snippets download <id>` | Print a snippet as plain SQL (redirect it to a file to save it) |
+| `network-restrictions` | `motherbase network-restrictions <get\|update> ...` | IP ranges allowed to connect to the database directly |
+| `network-restrictions get` | `motherbase network-restrictions get` | Show the allowed ranges |
+| `network-restrictions update` | `motherbase network-restrictions update --db-allow-cidr <cidr> [--db-allow-cidr <cidr> ...]` | Replace the allowed ranges (repeat --db-allow-cidr; IPv4 and IPv6 are told apart) |
+| `ssl-enforcement` | `motherbase ssl-enforcement <get\|update> ...` | Require TLS for direct database connections |
+| `ssl-enforcement get` | `motherbase ssl-enforcement get` | Show whether TLS is enforced |
+| `ssl-enforcement update` | `motherbase ssl-enforcement update --enable-db-ssl-enforcement \| --disable-db-ssl-enforcement` | Turn enforcement on or off |
+
+### Codegen
+
+| Command | Usage | What it does |
+|---|---|---|
+| `gen` | `motherbase gen <types\|signing-key\|bearer-jwt\|keys> ...` | Generate code from the live schema, and signing keys, tokens and secrets |
+| `gen types` | `motherbase gen types [--lang typescript\|zod] [flags]  \|  motherbase gen types <typescript\|zod> [flags]` | Generate types from the database schema |
+| `gen signing-key` | `motherbase gen signing-key [--algorithm ES256\|RS256\|EdDSA] [--append] [--key-file motherbase/signing_keys.json]` | Generate a JWT signing key (a private JWK) to import into a project |
+| `gen bearer-jwt` | `motherbase gen bearer-jwt --sub <user id> [--role authenticated] [--valid-for 1h \| --exp <unix>] [--payload <json>] [--issuer <url>] [--key-file <file>]` | Sign an access token with a local signing key, for calling the API as a user |
+| `gen keys` | `motherbase gen keys [-o env]` | Generate a fresh set of secrets for a local stack (use -o env) |
+
+### AI agents
+
+| Command | Usage | What it does |
+|---|---|---|
+| `mcp` | `motherbase mcp [--write]` | Serve the linked project and console to an AI agent over MCP (stdio) |
+
+### Shell
+
+| Command | Usage | What it does |
+|---|---|---|
+| `completion` | `motherbase completion <bash\|zsh\|fish>` | Generate the autocompletion script for a shell |
+
+### Ungrouped
+
+| Command | Usage | What it does |
+|---|---|---|
+| `migrate` | `motherbase migrate codemod <dir> [--write]` | Port an application from Supabase |
+| `migrate codemod` | `motherbase migrate codemod <dir> [--write]` | Rewrite Supabase imports and report what this SDK does not support |
+
+{/* END GENERATED CLI */}

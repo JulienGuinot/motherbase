@@ -1,0 +1,94 @@
+---
+title: "Project Proxy"
+description: "How the Console reaches a project's admin, REST and edge APIs: upstream resolution, token injection, and the capability mapping."
+order: 8
+---
+
+Studio in the Console never talks to a project container directly. It calls the Console, which proxies to the project API and injects that project's platform token.
+
+```text
+Studio ──▶ console.example.com/api/projects/<id>/admin/…
+              │  resolve upstream, strip client auth,
+              │  inject X-Platform-Token
+              ▼
+        http://<id>-api:5001/api/admin/…
+```
+
+Source: `apps/server/console/routes/proxy.routes.ts`.
+
+## Path rewriting
+
+| Console path | Project path |
+|---|---|
+| `/api/projects/:id/admin/*` | `/api/admin/*` |
+| `/api/projects/:id/rest/*` | `/rest/*` |
+| `/api/projects/:id/edge/*` | `/api/edge/*` |
+
+## Upstream resolution
+
+Candidates come from `registry.apiTargets(id)`, falling back to `registry.apiTarget(id)` and finally to `http://<id>-api:5001`. The list is walked in full on each attempt, so a project whose `<name>-api` network alias was never registered still resolves via its container name or its Traefik IP.
+
+Selection probes `GET <candidate>/api/health-check` with a 1 s timeout, retrying with a `[150 ms, 300 ms]` backoff. A freshly restarted container therefore gets a moment to come up instead of returning a spurious error.
+
+Results are cached:
+
+| Outcome | TTL |
+|---|---|
+| Reachable | 10 s |
+| Unreachable | 2 s |
+
+<Note>
+Caching **failures** is the load-bearing part. `/rest` and `/edge` take no session, so without it every anonymous request to a stopped project would pay a full probe sweep (candidates × attempts × timeout) and a burst would become a probe storm against the Docker network. The TTL is short because nothing invalidates it when the container returns — while a stack is down no request reaches the proxy error handler, so the entry has to expire on its own.
+</Note>
+
+When nothing answers, the request is still proxied to the first candidate so the failure surfaces as the usual `502` with the upstream error logged, rather than as a new error shape. The proxy error handler calls `invalidateUpstream(id)`, so a container that moved is re-resolved on the next request.
+
+## Header handling
+
+`applyAdminProxyHeaders` does three things before forwarding:
+
+1. **Deletes `Authorization`** — the caller's Console session must never reach the project API.
+2. **Strips `Origin` and `Referer`** — these are server-to-server calls; the project's CORS middleware must not evaluate the Console origin.
+3. Injects `X-Platform-Token`, read from the project's `.env.prod` via `registry.platformToken(id)`. No token means the request fails rather than being forwarded unauthenticated.
+
+For the non-admin paths, `stripSameOriginCorsHeaders` removes `Origin`/`Referer` only when the request is same-origin — verified against `Host` and `X-Forwarded-Host`.
+
+JSON bodies already parsed by `express.json()` are re-serialized onto the proxied request with a corrected `Content-Length`.
+
+## Capability mapping
+
+`adminProxyCapability(method, url)` decides what the caller needs. The mapping is centralized on purpose: a new privileged surface must not silently inherit write access.
+
+| Admin path | Required capability |
+|---|---|
+| A path that fails to URL-decode | `secrets.manage` |
+| `/edge-secrets`, `/api-keys`, `/database/connection`, `/storage/connection`, `/storage/s3`, `/storage/buckets/:b/tokens`, `/integrations`, `/vault`, `/wrappers`, `/git`, `/import/supabase`, `/users` itself and `/users/:id/` `reset-password`, `email-verification`, `revoke-sessions`, `impersonate`, `impersonate/stop`, `sessions/:sessionId` — reads included | `secrets.manage` |
+| `/settings/<group>` where the group contains secrets | `secrets.manage` |
+| `/backups/download` (even a `GET`: it is a full dump) | `runtime.manage` |
+| Any other safe method (`GET`/`HEAD`/`OPTIONS`) | `project.read` |
+| Writes to `/database/roles` (a role can carry a login password) | `secrets.manage` |
+| `/settings/<group>` | `settings.write` |
+| Writes to `/auth/signing-keys` | `secrets.manage` |
+| `/settings`, `/webhooks`, `/realtime/config`, `/backups/config`, `/network-restrictions`, `/ssl-enforcement`, `/log-drains`, `/users/:id/promote\|demote` | `settings.write` |
+| `/backups`, `/jobs` (forcing or rearming a job), `/db/dump`, `/db/reset` | `runtime.manage` |
+| `/tables`, `/schema`, `/rls`, `/sql`, `/edge-functions`, `/cron`, `/queues`, `/performance`, `/migrations`, `/db`, `/storage`, `/users`, `/realtime/policies`, `/content`, `/content-folders` | `content.write` |
+| Anything else | `settings.write` (fail closed) |
+
+The branches are **ordered, first match wins**, and the table above is in that order.
+
+Three deliberate details:
+
+- `/users` appears in three branches, narrowest first: `/users` itself and its
+  credential-adjacent actions (`reset-password`, `email-verification`, `revoke-sessions`,
+  `impersonate`, deleting a session) need `secrets.manage` — impersonation mints a working
+  session for another user, the same class of thing as rotating their password; `/users/:id/promote|demote`, which grants privilege, needs
+  `settings.write`; everything else under `/users` (ordinary profile edits) needs
+  `content.write`. **Reordering these branches changes who can rotate a password.**
+- A safe method is only "read" **after** excluding endpoints that disclose credentials or secret-backed configuration — a `GET` on `/edge-secrets` needs `secrets.manage`, not `project.read`.
+- A settings group path that fails to URL-decode is treated as secret-bearing, so malformed encoding cannot downgrade a request to `project.read`.
+
+Unknown future mutation routes fall through to `settings.write`, so a `developer` never inherits an unrecognized write.
+
+## Audit
+
+Mutations through the proxy are recorded by `console/middlewares/audit.middleware.ts` (`auditMutations`); safe methods are not. See the [audit log](/docs/console/audit-log/).

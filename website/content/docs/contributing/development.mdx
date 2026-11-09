@@ -1,0 +1,84 @@
+---
+title: "Local Development"
+description: "Running the API, the Console and Studio locally, with Postgres, MinIO, Prisma and seed data."
+order: 2
+---
+
+## Infrastructure
+
+```bash
+npm run infra        # docker compose up db minio -d
+npm run infra:down   # stop them
+```
+
+That gives you the Postgres and MinIO the project API expects. `docker-compose.yml` at the repo root is the development stack; the files under `deploy/` are the deployment ones.
+
+## Database
+
+```bash
+npm run prisma:generate   # regenerate the client after editing schema.prisma
+npm run prisma:migrate    # create + apply a migration (development)
+npm run prisma:deploy     # apply pending migrations (CI/production)
+npm run db:seed           # seed development data
+npm run prisma:studio     # Prisma's own data browser
+```
+
+`DATABASE_URL` must be set — `apps/server/config/env.ts` validates it at boot and exits with a readable message if it is missing or malformed.
+
+## The three processes
+
+```bash
+npm run dev           # project API        → http://localhost:5001
+npm run console:dev   # Platform Console   → http://localhost:5500
+npm run studio:dev    # Studio dev server  → http://localhost:5173/studio
+npm run studio:mock   # Studio against MSW mocks, no backend needed
+```
+
+| Process | Serves Studio at | Notes |
+|---|---|---|
+| Console | `/studio` | Platform screens and per-project screens, `mb_product=console` cookie. Needs a Next build in `apps/studio/.next` |
+| Project API | — | Serves no UI. Studio reaches it through the Console proxy |
+
+The Console mounts the Next build under the `/studio` basePath and loads it through
+`nextApp.prepare()`, so run `npm run studio:build` once before you expect the mounted Studio
+to answer. `findStudioDir()` locates it by looking for `apps/studio/.next/BUILD_ID` from
+either the repo root or the server workspace; if it finds nothing, the Console starts without
+`/studio`.
+
+For day-to-day UI work use `npm run studio:dev` instead: it runs `next dev` on port 5173 and
+proxies `/api` through to the API server on 5001, so you get fast refresh without rebuilding.
+
+## Console in dev mode
+
+Set `CONSOLE_MODE=dev` and the Console switches defaults: scheme `http`, domain suffix `localhost`, projects in `.dev-projects`, compose file `deploy/docker-compose.dev-multi.yml`, and a padded dev JWT secret. In prod mode a real `CONSOLE_JWT_SECRET` of 32+ characters is required or the process refuses to start.
+
+Projects created in dev mode are reachable at `<name>.localhost` over HTTP.
+
+## Useful environment switches
+
+| Var | Effect |
+|---|---|
+| `CONSOLE_SQL_ENABLED` | Enable the SQL editor (restricting it to reads is a Studio setting, Database → Settings) |
+| `TRUST_PROXY` | Required behind a proxy so rate limiting keys on the real client IP |
+| `CONFIG_ENCRYPTION_KEY` | Needed before you can save any secret setting |
+| `PG_BIN_DIR` | Where `pg_dump` / `psql` live when they are not on `PATH` |
+| `EDGE_PUBLIC_INVOKE_ENABLED` / `EDGE_INVOKE_TOKEN` | Public edge invocation |
+
+Full list: [environment reference](/docs/reference/environment/).
+
+## The CLI against a local stack
+
+```bash
+npm run cli -- login
+npm run cli -- link <project>
+npm run cli -- status
+```
+
+See the [CLI docs](/docs/cli/getting-started/).
+
+## Regenerating derived files
+
+```bash
+npm run swagger                          # openapi.json
+npm run cli -- gen types typescript      # Database types for the SDK
+```

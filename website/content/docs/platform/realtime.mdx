@@ -1,0 +1,483 @@
+---
+title: "Realtime"
+description: "Socket.IO channels with broadcast, presence, and RLS-aware postgres_changes — plus the room layout, typing indicators, and reconnection rules."
+order: 6
+---
+
+Motherbase Realtime runs on Socket.IO (`/ws`) and exposes Supabase-style SDK channels. One channel multiplexes three things:
+
+| Feature | What it carries | Source |
+|---|---|---|
+| `postgres_changes` | row INSERT/UPDATE/DELETE | REST writes → outbox → RLS check |
+| `broadcast` | arbitrary app messages | other clients, or `POST /realtime/v1/api/broadcast` |
+| `presence` | who is here + their state | in-memory, per server process |
+
+<Warning>
+`postgres_changes` only sees writes made **through the REST API** (`client.from(...)`). A row
+written inside an `rpc()` function, by a trigger, a `pg_cron` job, the SQL editor or a direct
+connection produces no event. This is the main difference from Supabase, which reads the WAL.
+See [Delivery](#delivery) for the workarounds.
+</Warning>
+
+## Subscribe with the SDK
+
+```ts
+const channel = client
+  .channel('room-todo')
+  .on('postgres_changes', { event: '*', schema: 'public', table: 'todo' }, (payload) => {
+    // payload.eventType: 'INSERT' | 'UPDATE' | 'DELETE'
+    console.log(payload.new, payload.old)
+  })
+  .subscribe()
+```
+
+Filter one event type:
+
+```ts
+client
+  .channel('room-products')
+  .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'products' }, (payload) => {
+    console.log('created', payload.new)
+  })
+  .subscribe()
+```
+
+Unsubscribe:
+
+```ts
+await client.removeChannel(channel)
+```
+
+## Channel lifecycle
+
+`subscribe()` is **not** a promise. It returns the channel and does the connect + join in the
+background, reporting through the optional status callback:
+
+```ts
+const room = client.channel('room-42', { config: { presence: { key: userId } } })
+
+room.subscribe((status, err) => {
+  if (status === 'SUBSCRIBED') room.track({ name: 'Ada' })   // safe here
+  if (status === 'CHANNEL_ERROR') console.error(err)
+})
+```
+
+Statuses: `SUBSCRIBED`, `TIMED_OUT` (join ack took over 10 s), `CHANNEL_ERROR`, `CLOSED`.
+
+<Note>
+`await room.subscribe()` does not wait for anything — it awaits a non-promise, and the return
+value is the channel so that `.on(...).subscribe()` keeps chaining. You do not need to guard
+against that: `send()`, `track()` and `untrack()` issued before the join ack are **queued** and
+flushed once the topic is joined, so they arrive rather than being rejected by the server.
+
+They resolve `'error'` only when the channel is not subscribed at all — never subscribed,
+already unsubscribed, or the join failed. Reading that return value is how you tell a message
+that went nowhere from one that landed.
+</Note>
+
+`client.channel(name)` returns the **existing** channel if one with that name is already
+registered, and the `options` argument is ignored on that second call. Pick the config
+(`presence.key`, `broadcast.self`) at the first `channel()` call, or `removeChannel()` first.
+
+## Why a channel joins several rooms
+
+A channel subscribed to `postgres_changes` on `todo` puts the socket in two Socket.IO rooms —
+this is expected, and Project Studio lists both:
+
+| Room | Who joins it | What flows through it |
+|---|---|---|
+| `rt:room-todo` | every public `subscribe()` on topic `room-todo` | `rt:msg` envelopes: broadcast, presence, and the `postgres_changes` payloads for that topic |
+| `rtp:room-todo` | a `subscribe()` on that topic with `private: true` | the same envelopes, for the separate private audience. See [Private channels](#private-channels) |
+| `realtime:model:todo` | added automatically for each `postgres_changes` binding on table `todo` | the delivery + RLS machinery: it is the audience list the outbox worker resolves before emitting a row |
+
+The split is deliberate. `rt:<topic>` is the **application** address — it is whatever string you
+passed to `channel()`, and broadcast/presence fan out to it directly. `realtime:model:<table>` is
+the **data** address — the outbox worker asks "who is watching `todo`?", checks each of those
+sockets against RLS, and only then does the postgres bridge translate the approved row into a
+`postgres_changes` envelope addressed to your topic.
+
+So the model room decides *whether you may see the row*; the topic room decides *which of your
+channels the row is delivered on*. Two channels on different topics watching the same table
+share one model-room membership (refcounted) and each get their own envelope.
+
+Consequences worth knowing:
+
+- Joining `realtime:model:todo` also puts you in range of the **legacy** flat events
+  (`todo:created`, `todo:updated`, `todo:deleted`) that `client.realtime.watchTable()` uses. The
+  server no longer sends you both for the same row: a socket that received the `rt:msg` envelope
+  is skipped for the flat event, per row. A `watchTable()`-only socket keeps receiving the flat
+  events exactly as before.
+- Leaving the channel (`removeChannel`) drops the topic room and decrements the model-room
+  refcount; the model room is left when the last binding goes.
+- A channel with only `broadcast`/`presence` bindings joins **only** `rt:<topic>`. If you see a
+  single room in Studio, that channel is not subscribed to any table.
+
+### Column filters
+
+```ts
+.on('postgres_changes', { event: '*', schema: 'public', table: 'message', filter: 'room_id=eq.42' }, cb)
+```
+
+Supported operators: `eq`, `neq`, `gt`, `gte`, `lt`, `lte`, `in`. The filter runs **after** RLS,
+on the server, per binding — it can only narrow what RLS already allowed, never widen it. An
+unparseable filter is ignored rather than dropping approved rows.
+
+## Payload shape
+
+```ts
+interface PostgresChangePayload<T> {
+  schema: string
+  table: string
+  eventType: 'INSERT' | 'UPDATE' | 'DELETE'
+  new: T | Record<string, never>
+  old: T | Record<string, never>
+  commit_timestamp: string
+}
+```
+
+`INSERT` and `UPDATE` carry the row in `new`. `DELETE` carries the deleted row in `old`.
+`commit_timestamp` is stamped at delivery, not at commit.
+
+## Broadcast
+
+Any channel can carry application messages, independent of the database:
+
+```ts
+const room = client.channel('room-42', { config: { broadcast: { self: true, ack: true } } })
+
+room.on('broadcast', { event: 'cursor' }, ({ payload }) => draw(payload))
+room.subscribe(status => {
+  if (status === 'SUBSCRIBED') room.send({ type: 'broadcast', event: 'cursor', payload: { x: 12, y: 40 } })
+})
+```
+
+- `broadcast.self` — whether the sender receives its own message. Off by default.
+- `broadcast.ack` — `send()` resolves on the server ack (`'ok' | 'timed out' | 'error'`) instead
+  of resolving immediately.
+- `on('broadcast', { event: '*' }, cb)` receives every event on the topic.
+
+Broadcast is **not** persisted and **not** RLS-checked: anyone who can join the topic sees it.
+Do not put data in a broadcast payload that the receiver could not read over REST.
+
+From a backend, emit without a socket:
+
+```bash
+curl -X POST "$MOTHERBASE_URL/realtime/v1/api/broadcast" \
+  -H 'content-type: application/json' \
+  -d '{"messages":[{"topic":"room-42","event":"cursor","payload":{"x":1}}]}'
+```
+
+The response returns `{ delivered }` — the number of sockets currently in the topic room.
+
+## Presence
+
+Presence answers "who is in this channel, and what are they doing". State lives in memory on
+the server, keyed by topic, and is dropped when the socket disconnects.
+
+```ts
+const room = client.channel('room-42', { config: { presence: { key: userId } } })
+
+room.on('presence', { event: 'sync' },  () => render(room.presenceState()))
+room.on('presence', { event: 'join' },  ({ key }) => console.log(key, 'joined'))
+room.on('presence', { event: 'leave' }, ({ key }) => console.log(key, 'left'))
+
+room.subscribe(status => {
+  if (status === 'SUBSCRIBED') room.track({ name: user.name, avatar: user.avatar })
+})
+```
+
+`presenceState()` is keyed by your presence key, and each key holds one entry **per connection**:
+
+```ts
+{
+  'user_123': [{ presence_ref: '8f0…', name: 'Ada', avatar: '…' }],
+  'user_456': [
+    { presence_ref: 'c21…', name: 'Grace' },   // laptop
+    { presence_ref: 'd77…', name: 'Grace' },   // phone
+  ],
+}
+```
+
+Rules that follow from that shape:
+
+- **`presence.key` is yours to choose.** Use a stable user id so the same person collapses into
+  one key across tabs. Omit it and the server falls back to `socket.id`, which makes every tab a
+  separate "user".
+- **`presence_ref` is generated server-side, one per socket per topic.** Calling `track()`
+  again *replaces* your entry rather than appending a second one, so you can update your own
+  state as often as you like — a cursor or a typing flag — without the list growing.
+- **Online users = `Object.keys(presenceState())`.** Count *people* by keys, not by entries.
+
+```ts
+const online = Object.keys(room.presenceState())          // ['user_123', 'user_456']
+const isOnline = (id: string) => id in room.presenceState()
+```
+
+- **Leave is automatic on disconnect** — a closed tab, a lost network, a server restart all
+  remove the presence. You do not need a heartbeat or a cleanup endpoint.
+- **`sync` fires on every change**, after `join` / `leave` for the same update. If you only need
+  the current list, bind `sync` alone and read `presenceState()`.
+- Pass `config: { presence: {…} }` at join time to receive the current state immediately on
+  subscribe. Without it you only start receiving state at the next change.
+
+<Note>
+Presence state is per server process and never persisted. A project runs one API instance by
+design, so every socket sees the same presence; running replicas would split it. See
+[Known issues → one API instance per project](/docs/contributing/known-issues/#deliberate-one-api-instance-per-project).
+</Note>
+
+## Typing indicators
+
+Typing is presence state, not a separate feature — put a `typing` flag in the tracked state and
+let the disconnect cleanup handle the case where someone closes the tab mid-sentence.
+
+```ts
+const conversation = client.channel(`conversation-${conversationId}`, {
+  config: { presence: { key: userId }, broadcast: { self: false } },
+})
+
+let typingTimer: ReturnType<typeof setTimeout> | undefined
+let isTyping = false
+
+function setTyping(next: boolean) {
+  if (next === isTyping) return          // only talk to the server on transitions
+  isTyping = next
+  void conversation.track({ name: user.name, typing: next })
+}
+
+// call on every keystroke
+function onKeyPress() {
+  setTyping(true)
+  clearTimeout(typingTimer)
+  typingTimer = setTimeout(() => setTyping(false), 3000)
+}
+
+conversation.on('presence', { event: 'sync' }, () => {
+  const state = conversation.presenceState<{ name: string; typing: boolean }>()
+  const typing = Object.entries(state)
+    .filter(([key, entries]) => key !== userId && entries.some(entry => entry.typing))
+    .map(([, entries]) => entries[0].name)
+  render(typing)                          // "Ada is typing…"
+})
+
+conversation.subscribe(status => {
+  if (status === 'SUBSCRIBED') conversation.track({ name: user.name, typing: false })
+})
+```
+
+Three details that make this behave:
+
+1. **Debounce on the client, not the server.** `setTyping` only emits on a false→true or
+   true→false transition, and a 3 s timer clears the flag when typing stops. A `track()` per
+   keystroke would fan out the full presence state to every member on every letter.
+2. **No `untrack()` before `track()`.** `track()` replaces your entry for that socket, so
+   repeated calls leave exactly one `presence_ref` per connection.
+3. **Filter yourself out** by key. `presenceState()` includes you.
+
+Reset the flag when the message is sent, not only on the timer:
+
+```ts
+async function sendMessage(body: string) {
+  clearTimeout(typingTimer)
+  setTyping(false)
+  await client.from('message').insert({ conversation_id: conversationId, body })
+}
+```
+
+The message itself arrives through `postgres_changes` on the same channel, so one channel covers
+the whole conversation:
+
+```ts
+conversation.on(
+  'postgres_changes',
+  { event: 'INSERT', schema: 'public', table: 'message', filter: `conversation_id=eq.${conversationId}` },
+  ({ new: message }) => appendMessage(message),
+)
+```
+
+<Note>
+Prefer broadcast over presence for typing only if you need sub-second, high-frequency signals
+(live cursors, scrub position) where a dropped message costs nothing. Broadcast has no state:
+if a "stopped typing" message is lost, the indicator stays on forever. Presence self-heals
+because the server always sends the full state.
+</Note>
+
+## Reconnection
+
+The socket reconnects automatically (Socket.IO `reconnection: true`), and **the client re-joins
+your channel topics for you**. Topic membership, presence, and `postgres_changes` bindings live
+on the server socket and die with it, so the client remembers the join config of every channel
+you subscribed and replays it on reconnect, then re-announces the last `track()` state.
+
+You do not need to tear down and rebuild your channels. Your `on(...)` handlers stay attached
+and keep firing.
+
+The status callback tells you when a replayed join failed, so a channel never silently claims to
+be subscribed while receiving nothing:
+
+```ts
+channel.subscribe(status => {
+  if (status === 'SUBSCRIBED') void refetch()   // close the gap, see below
+  if (status === 'CHANNEL_ERROR') { /* the replayed join was refused */ }
+})
+```
+
+Events emitted while a client was away are **not** replayed. Refetch over REST once the channel
+reports `SUBSCRIBED` again to close the gap.
+
+## Limits
+
+The `realtime.limits` settings group is read live:
+
+| Field | Default | Effect |
+|---|---|---|
+| `enablePostgresChanges` | `true` | Turn table-change subscriptions off entirely |
+| `maxChannelsPerClient` | `100` | Rejects a join past the limit |
+| `privateOnly` | `false` | Refuse public channels; every join must pass `private: true`. See [Private channels](#private-channels) |
+
+Limits are cached and refreshed on join, so a console edit applies within one subscription
+without adding an async read to the hot path. When the settings store is unavailable the
+last-known values are kept — a missing settings row never blocks realtime. With
+`enablePostgresChanges: false` the join still succeeds; it just registers no table bindings, so
+broadcast and presence keep working.
+
+Retention for the delivery outbox is configured in `realtime.retention` (`completedDays`,
+`failedDays`).
+
+## RLS visibility
+
+Realtime respects PostgreSQL RLS by default for table create/update events. Before emitting a
+row to a connected socket, Motherbase checks whether that socket's user can `SELECT` the row
+through the same RLS data plane used by REST. Per-model `respectRls: false` disables the check
+for that model (**Studio → Realtime**).
+
+Deletes are handled differently, because the row is gone by the time the event is sent: the
+audience is **captured before the delete** and stored on the outbox row (`all` or `restricted`
+by row id). Retries are scoped to those captured socket ids, so a reconnect or a restart never
+replays a delete to a session whose pre-delete visibility cannot be proven.
+
+On a **public** channel, broadcast and presence are not RLS-checked — topic membership is the
+only gate. Anyone able to guess a topic name can join it, so derive topic names from ids the
+user already holds, or use a private channel.
+
+## Private channels
+
+A channel joined with `private: true` is authorized by your own RLS policies on
+`realtime.messages`, exactly as on Supabase — this is Realtime Authorization.
+
+```ts
+const room = client.channel('room-42', { config: { private: true } })
+
+room
+  .on('broadcast', { event: 'message' }, ({ payload }) => render(payload))
+  .subscribe(status => {
+    // CHANNEL_ERROR with "Unauthorized: …" when no policy lets this user read the topic
+  })
+```
+
+Write the policies against `realtime.messages`, where `realtime.topic()` is the channel
+being joined and `extension` is `'broadcast'` or `'presence'`:
+
+```sql
+create policy "members read their room"
+  on realtime.messages for select
+  using (
+    exists (
+      select 1 from public.room_member
+      where room_member.room_id = split_part(realtime.topic(), '-', 2)::bigint
+        and room_member.user_id = auth.uid()
+    )
+  );
+
+create policy "members write their room"
+  on realtime.messages for insert
+  with check ( /* the same condition */ );
+```
+
+`SELECT` is permission to **receive**; `INSERT` is permission to **send** or to `track()`
+presence. The decision is made once, at join time, and the join is refused outright only when
+the caller can receive nothing at all:
+
+| Policy outcome | What the client sees |
+|---|---|
+| Can read broadcast and/or presence | `SUBSCRIBED`, with sending allowed only where `INSERT` passed |
+| Can read neither | `CHANNEL_ERROR`, `Unauthorized: You do not have permissions to read from this Channel topic: <topic>` |
+
+Postgres has no "would this policy allow it" query, so the check performs the operations and
+throws them away: one transaction that always ends in `ROLLBACK`, with the caller's role and
+claims and `realtime.topic` set to the channel. Your policies therefore see exactly the
+`auth.uid()`, `realtime.topic()` and `extension` a real message would show them, and nothing is
+left behind in the table.
+
+<Note>
+A private channel is a **separate audience** from the public channel of the same name: the
+socket joins `rtp:<topic>` rather than `rt:<topic>`, so a public subscriber to `room-42` never
+receives a private message, and the two never share a presence state. Re-subscribing the same
+topic with the flag flipped moves the socket between the two rooms.
+</Note>
+
+Set **Private channels only** (`realtime.limits` → `privateOnly`) to refuse public channels
+altogether; a public join is then answered with `This project only allows private channels.`
+See the [settings reference](/docs/reference/settings/).
+
+## Delivery
+
+Events are written into the `RealtimeOutbox` **inside the same transaction as the data change**
+and drained by a worker with a 60 s lease, a heartbeat, and up to 8 attempts. A crash between
+commit and broadcast therefore loses nothing. The worker is woken by Postgres `LISTEN/NOTIFY`
+with a 2 s poll as a fallback. See [background jobs](/docs/architecture/background-jobs/).
+
+Only writes that go **through the REST engine** produce events — insert, bulk insert, update,
+delete, upsert, and writes made with `Prefer: return=minimal`. A write performed inside an
+`.rpc()` function body, by a database trigger, from the SQL editor, or from a direct `psql`
+session or raw SQL migration changes no outbox row and broadcasts nothing.
+
+This is the one structural difference from Supabase, which reads the replication stream (WAL)
+and therefore sees every write however it was made. If a subscriber depends on events from a
+function or a trigger, have the caller write through REST, or broadcast explicitly on a
+channel.
+
+### Queue depth
+
+```text
+GET /api/admin/realtime/queue
+```
+
+Answers `{ pending, processing, failed, oldestPendingAt, lastFailure, measured }` for the durable
+outbox, plus how many events the in-memory inspector retains. The inspector shows recent events
+and nothing else; the depth of the queue behind them is only readable here. `measured: false`
+means the count could not be taken, which is not the same as zero.
+
+## Authentication
+
+Realtime connections are accepted without a token. If a valid token is present in the Socket.IO
+handshake (`auth.token`, or an `Authorization: Bearer` header), the server resolves the session
+and stores the user id and role on `socket.data`, which is what the RLS-aware table broadcast
+uses. An invalid token does not fail the connection — it downgrades it to anonymous, which
+usually shows up as "the channel connects but no rows ever arrive".
+
+The server reads the token in the handshake, so the client reopens the socket whenever the
+access token changes: on a sign-in, a sign-out, or a switch of user. Your channels are joined
+again on the new socket and their status callback reports `SUBSCRIBED` (or `CHANNEL_ERROR`)
+once more, so a channel opened before sign-in starts receiving the signed-in user's rows on its
+own. This needs `@motherbase/client` 2.2.2 or later.
+
+## Project Studio monitoring
+
+Project Studio shows active WebSocket connections, recent events, channels, and presence under
+**Realtime**. The channel list is Socket.IO rooms, so both `rt:<topic>` and
+`realtime:model:<table>` appear there — see [Why a channel joins several rooms](#why-a-channel-joins-several-rooms).
+
+## Low-level API
+
+`client.realtime` exposes the raw Socket.IO transport and `watchTable(model, cb)`, which
+listens for the flat `model:created` / `model:updated` / `model:deleted` events and can fall
+back to REST polling when `socket.io-client` is unavailable. It is deprecated in favour of
+`client.channel()` and kept for backwards compatibility. `client.realtime.onStatusChange()`
+remains the supported way to observe transport status (`connecting`, `connected`,
+`reconnecting`, `polling`, `disconnected`, `error`).
+
+<Note>
+Realtime events are not persisted. If a client disconnects and reconnects, it will miss events
+emitted during the gap. Use the REST API to catch up.
+</Note>

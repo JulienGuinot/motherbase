@@ -1,0 +1,78 @@
+{
+  "name": "@motherbase/client",
+  "version": "2.3.1",
+  "description": "Typed client SDK for Motherbase, the open source self-hosted backend platform.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "publishConfig": {
+    "access": "public"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./query": {
+      "types": "./dist/database/query.d.ts",
+      "import": "./dist/database/query.js"
+    },
+    "./testing": {
+      "types": "./dist/utils/testing.d.ts",
+      "import": "./dist/utils/testing.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "COMPATIBILITY.md"
+  ],
+  "scripts": {
+    "prebuild": "npm run build -w @motherbase/contracts",
+    "build": "tsc -p tsconfig.json",
+    "prepack": "npm run build",
+    "clean": "rm -rf dist",
+    "test": "vitest run --typecheck",
+    "lint": "eslint ."
+  },
+  "keywords": [
+    "sdk",
+    "client",
+    "auth",
+    "backend",
+    "motherbase",
+    "self-hosted"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/JulienGuinot/motherbase.git",
+    "directory": "packages/client"
+  },
+  "homepage": "https://github.com/JulienGuinot/motherbase#readme",
+  "bugs": {
+    "url": "https://github.com/JulienGuinot/motherbase/issues"
+  },
+  "dependencies": {
+    "@better-auth/api-key": "1.7.14",
+    "@better-auth/core": "1.7.14",
+    "@better-auth/passkey": "1.7.14",
+    "@better-auth/sso": "1.7.14",
+    "@better-fetch/fetch": "1.3.3",
+    "@motherbase/contracts": "^1.0.5",
+    "better-auth": "1.7.14"
+  },
+  "peerDependencies": {
+    "socket.io-client": "^4.0.0"
+  },
+  "peerDependenciesMeta": {
+    "socket.io-client": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "typescript": "^5.4.2",
+    "vitest": "^5.0.0"
+  }
+}

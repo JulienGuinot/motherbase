@@ -1,0 +1,48 @@
+---
+title: "create-motherbase-app"
+description: "Scaffold a Next.js or React application with Motherbase authentication ready to customize."
+order: 7
+---
+
+`create-motherbase-app` generates a frontend wired to Motherbase and
+[`@motherbase/ui`](/docs/packages/ui/). It supports Next.js App Router and React with Vite.
+
+## Create an app
+
+```bash
+npx create-motherbase-app my-app --template next
+# or
+npx create-motherbase-app my-app --template react
+```
+
+The command installs dependencies by default. Use `--no-install` for an offline scaffold
+or `--yes` to accept the default name and Next.js template. It refuses to overwrite an
+existing directory.
+
+After creation:
+
+```bash
+cd my-app
+cp .env.example .env.local
+# Set the Motherbase URL and publishable key in .env.local
+npm run dev
+```
+
+## Included flows
+
+Both templates include sign in, sign up, password reset, an OAuth callback, profile editing,
+passkeys and MFA settings. Configure the visible OAuth providers, passkeys and MFA settings
+in `src/config/auth.ts` after enabling those methods in Motherbase. MFA is enforced by the
+backend and appears automatically during sign-in when required.
+
+The generated code is application code: customize or remove its pages and styles as your
+product grows.
+
+## Template differences
+
+| Template | Stack | Session and routing |
+|---|---|---|
+| `next` | Next.js App Router | `@motherbase/ssr`, Node.js Proxy, and server-side user verification for `/app` |
+| `react` | Vite + React Router | Client-side navigation guard; backend authorization still protects every request |
+
+Node.js `22.12` or newer is required by the generated templates.

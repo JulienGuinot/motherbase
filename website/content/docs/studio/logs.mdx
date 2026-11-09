@@ -1,0 +1,68 @@
+---
+title: "Logs, Observability & Advisor"
+description: "The log stream, the shield report, performance, metric series, and advisor findings."
+order: 8
+---
+
+Source: `apps/studio/src/features/logs`. Routes: `/p/:id/logs`, `/p/:id/advisor`, and `/p/:id/observability/*`.
+
+## Calls
+
+| Screen | Endpoint |
+|---|---|
+| Logs | `GET /admin/logs?limit=…&since=…&level=…&source=…&q=…` (also `service`, `status`, `method`, `path`, `user`) |
+| Logs · query mode | `POST /admin/sql/readonly` over `platform.request_logs`; saved queries are Studio content of type `log_sql` |
+| Observability · Overview | `GET /admin/metrics/timeseries?range=…`, `GET /admin/stats` |
+| Observability · API | `GET /admin/shield?range=…` → `ShieldReport` |
+| Observability · Database (Query Performance) | `GET /admin/performance` → `PerformanceReport`; index advisor below |
+| Observability · Reports | Studio content of type `report`: `GET`/`POST /admin/content`, `PATCH`/`DELETE /admin/content/:id` |
+| Advisor | The `advisor` block of `GET /admin/shield` (`findings`, `counts`, `ranAt`) |
+
+Filters travel with the request, so the server filters before it applies its row limit: an error line with a
+thousand newer info lines after it is still found. `GET /admin/logs` answers from the in-memory ring buffer
+(`CONSOLE_LOG_BUFFER_SIZE`, default 500) when log history is off, and from `platform.request_logs` when it is on
+(`persisted: true`, with `retentionDays`, `oldestAvailable` and `hasMore`). It is also readable with a **secret
+project key**, so an application can fetch the server-side trace behind an `x-request-id` it was handed. Sources you
+will see: `http`, `sql`, `edge`, `job`, `webhook`, `auth`, `storage`, `shield`, `realtime`, `events`, `console`, `audit`.
+
+<Note>
+Requests to `/api/admin/*` and `/api/health-check`, and scanner probes, are deliberately excluded from the `http` source, so the Logs screen shows your users' traffic rather than your own Studio browsing. Background work appears via `logActivity`, which is why a backup that never ran is visible as an absence you can actually detect.
+</Note>
+
+## Log history
+
+How far back the Logs screen can look is the `logs.retention` group, edited from the Logs screen's own retention
+panel and nowhere else: lines are stored in `platform.request_logs` and pruned by the data-retention job.
+
+## Shield report
+
+Derived from `lib/shield-telemetry.ts`: per-route `count`, `errors`, `slow` (> 1000 ms), `avgMs`, `p95Ms`; rate-limit hits with their scope and bucket key; and abuse candidates ranked by requests, errors and rate-limit hits with their top path. Traffic is classified by path into `auth`, `rest`, `edge`, `files` or `api`.
+
+## Performance
+
+`GET /admin/performance` reports database-side performance. The screen offers to install `pg_stat_statements` when it is missing:
+
+```text
+POST /admin/schema/extensions/pg_stat_statements
+```
+
+The **index advisor** plans a query over hypothetical indexes (Supabase's `index_advisor`): nothing is built and the
+query never runs. `GET /admin/performance/index-advisor` says whether this database image can run it,
+`POST /admin/performance/index-advisor/enable` installs it, and `POST /admin/performance/index-advisor` with
+`{ query }` returns the suggested indexes and the planner cost before and after.
+
+## Metric series
+
+`GET /admin/metrics/timeseries?range=…` returns `{ samples, coverage }`: samples of `{ at, rps, p95, errorRate, memMb, reqs }`, taken every 10 s and kept for roughly an hour (360 samples), and the period they actually cover, so a 24 h range drawn from one hour of samples says so. History is in-memory and resets on restart — by design, there is no metrics store to operate.
+
+## Reports
+
+`/p/:id/observability/reports` composes a page from the Observability metrics: add a chart from the menu, switch it
+between line and bars, and keep the report to yourself or share it with the project (`visibility: 'user' | 'project'`).
+Reports are saved with the project as Studio content.
+
+## Advisor
+
+`/p/:id/advisor` shows the findings by category (**All checks**, security, performance) with the edge-function exposure posture (public invoke, invoke token) and the most active routes, all from `GET /admin/shield`. Findings are computed by catalogue queries: tables open over REST, RLS on with no policy, policies depending on unprotected tables, sensitive columns publicly readable, unauthenticated writes, `SECURITY DEFINER` functions callable by anon, unindexed policy filters, missing primary keys, unindexed foreign keys, unused indexes, tables needing vacuum.
+
+Each finding has a `category` (`security` / `performance`) and a `level` (`critical` / `warning` / `info`). Full list and semantics: [Observability](/docs/platform/observability/).

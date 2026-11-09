@@ -1,0 +1,115 @@
+---
+title: "REST Engine"
+description: "How /rest/v1 turns a PostgREST query string into SQL: the catalog, the parser, the compiler, exposure rules and HTTP semantics."
+order: 6
+---
+
+`/rest/v1` is not a thin Prisma wrapper. It is a PostgREST-dialect engine with four separated layers, all under `apps/server/services/rest-api`:
+
+```text
+query string ──▶ postgrest-parser ──▶ Filter AST ──▶ sql-compiler ──▶ SQL
+                                                  ▲
+                        catalog (frozen schema snapshot)
+```
+
+| Layer | File | Knows about |
+|---|---|---|
+| Catalog | `catalog/` | The live Postgres schema, cached |
+| Parser | `postgrest-parser/` | Syntax only — never the catalog, never SQL |
+| Model / exposure | `rest-model.ts` | What may be reached at all |
+| Compiler | `sql-compiler.ts` | AST → SQL with bound parameters |
+| HTTP dialect | `http-semantics.ts` | `Prefer`, `Range`, `Content-Range`, `Accept` |
+| RPC | `rpc-args.ts` | Function overload resolution |
+| Service | `rest-api.service.ts` | Orchestration, RLS, outbox |
+| Write capture | `capture-write.ts` | Trigger-buffered row images for realtime, independent of `RETURNING` |
+
+## The catalog
+
+One cached snapshot of the live schema (`catalog/index.ts`), read by REST model resolution, Studio's table list, the schema graph and type generation — so those can never disagree about what a table looks like.
+
+Properties that matter:
+
+- **Lazy, never eager.** Nothing runs at import time, so the process boots with the database unreachable and heals on the first successful load.
+- **Per-process cache with a TTL**, plus `invalidateCatalog()` called from the DDL choke point in `schema-ddl.ts` — same-process DDL is visible immediately; another process's DDL is picked up when the TTL elapses.
+- **Foreign keys recorded in both directions**, because PostgREST-style embedding walks parent → child as well as child → parent.
+
+Files: `queries.ts` (pg_catalog reads), `snapshot.ts` (rows → frozen snapshot), `pg-types.ts` (Postgres → TypeScript), `types.ts` (shapes).
+
+## What is exposable
+
+`rest-model.ts` holds **every** rule about which relation a request may reach, so the URL path, an embedded relation and a write body all pass the same gate.
+
+1. **Schema:** only `public`. Every Motherbase-managed table lives in `auth`, `storage` or `platform`, so this single rule makes system tables unreachable.
+2. **Blocklist** (`policy-types.ts`): defence in depth for names that could be *recreated* in `public` — `session`, `account`, `verification`, `jwks`, `app_settings`, `edge_function_secrets`, `schema_migrations`, `realtime_outbox` (and their Prisma model names).
+3. **Base tables only.** Views and materialized views cannot carry row-level security.
+4. `INTERNAL_TABLE_RE` excludes `_prisma_*` and `pg_*`.
+
+Rows also pass through `maskRow`, so sensitive column names never leave the server.
+
+## The parser
+
+A real parser, not `split('.')`, for three reasons stated in the source:
+
+- Values may be double-quoted: `in.("a,b",c)` is **two** elements. A naive split silently changes a filter's meaning — a security bug on a data plane that leans on RLS.
+- Logic trees nest: `or=(a.eq.1,and(b.gt.2,c.is.null))`.
+- `not.` composes with every operator, so it is a node, not a per-operator special case.
+
+Values stay **raw strings** on purpose. PostgREST sends literals untyped and lets Postgres coerce them from the operand's type — which is why `eq.42` matches a text column containing `"42"` and `eq.null` matches the literal string `null`. Coercing to JS numbers would lose bigint/numeric precision and change those semantics. `is.null` is the only way to reach SQL `NULL`.
+
+Malformed input raises `PGRST100`, PostgREST's own parse-error code. Layers: `ast.ts`, `lexer.ts`, `filters.ts`, `select.ts`, driven by `index.ts`.
+
+## HTTP semantics
+
+`http-semantics.ts` implements the header half of the dialect.
+
+| Header | Handling |
+|---|---|
+| `Prefer: count=` | `exact`, `planned`, `estimated`; drives the `Content-Range` total |
+| `Prefer: return=` | `representation`, `minimal`, `headers-only` |
+| `Prefer: resolution=` | `merge-duplicates`, `ignore-duplicates` — turns an insert into an upsert |
+| `Prefer: params=single-object` | For `/rpc/` |
+| `Prefer: max-affected=N` | Refuse and roll back a write touching more than `N` rows |
+| `Prefer: tx=rollback` | Run the write, report it, roll the transaction back |
+| `Range` | Applied only when `?limit`/`?offset` are absent |
+| `Content-Range` | Computed on the response |
+
+<Note>
+`return` defaults to **`minimal`** for a table write (`POST`/`PATCH`/`DELETE /rest/v1/:model`),
+exactly as PostgREST does: no rows come back unless the caller asks, which `@motherbase/client`
+does by chaining `.select()`. The default is `representation` on `/rpc/:fn` and `/batch`, where
+the result *is* the response and there is nothing else to return. Set
+`Prefer: return=representation` or `minimal` explicitly to override either.
+</Note>
+
+An **unknown preference** is ignored (RFC 7240 makes preferences advisory), but an unknown **value** for a preference that is implemented is rejected — silently ignoring `count=aproximate` would return a response that looks correct and is not.
+
+Two internal projection columns are added and stripped again: `__mb_count` (the exact-count window function) and `__mb_inserted` (`xmax = 0`, so an upsert can tell an insert from an update).
+
+## RPC
+
+`rpc-args.ts` resolves overloads the way PostgREST does — by argument **names**, not arity:
+
+- every supplied name must be an input argument of the candidate (`IN`, `INOUT`, `VARIADIC`);
+- every input argument without a default must have been supplied;
+- an overload with a `VARIADIC` tail is never selectable, because named notation cannot fill it.
+
+No match returns `404 PGRST202` with the PostgREST message text.
+
+## Where RLS enters
+
+The service builds an `RlsContext` from the request user (`lib/rls-claims.ts`) and runs the compiled SQL through the `RlsPool` — a non-owner role with `request.jwt.claims` set for the transaction. The REST engine never queries as the owner. See [security model](/docs/architecture/security-model/) and [RLS](/docs/platform/rls/).
+
+## Where realtime enters
+
+Mutations write their events into the `RealtimeOutbox` **inside the same transaction** as the data change, and the outbox scheduler drains them. See [background jobs](/docs/architecture/background-jobs/).
+
+The row images those events carry do **not** come from `RETURNING`, which is why a write that
+answers `return=minimal` still broadcasts. `capture-write.ts` installs a short-lived database
+trigger that buffers the before/after images for the statement, inside the same transaction and
+subject to the same rollback. The mutation itself always runs as the caller under native RLS;
+only the capture buffer runs as the owner, because a caller with no SELECT policy must still
+produce an event for the subscribers who do have one.
+
+## Error codes
+
+The engine emits PostgREST codes so existing clients recognise them: `PGRST100` (parse error), `PGRST122` (bad `Prefer`), `PGRST202` (function not found). General error shape: [errors](/docs/reference/errors/). Endpoint list: [REST API](/docs/reference/rest-api/).

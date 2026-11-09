@@ -1,0 +1,206 @@
+.card {
+  background: var(--surface);
+  display: flex;
+  flex-direction: column;
+  min-height: 460px;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--border);
+}
+
+.sessionBadge {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--green);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 3px 10px;
+}
+
+.authBar {
+  border-top: 1px solid var(--border);
+  padding: 14px 20px;
+  background: var(--surface-2);
+}
+
+.authBarSignedIn {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: color-mix(in oklch, var(--green) 6%, transparent);
+}
+
+.authPrompt {
+  font-size: 12px;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  margin: 0 0 10px;
+}
+
+.authModeToggle {
+  background: none;
+  border: none;
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  cursor: pointer;
+  margin-left: 10px;
+  padding: 0;
+}
+
+.row {
+  display: flex;
+  gap: 8px;
+  margin-right: 8px;
+}
+
+.input {
+  flex: 1;
+  background: var(--ink-2);
+  border: 1px solid var(--border-strong);
+  color: var(--text);
+  padding: 7px 10px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  border-radius: var(--radius-sm);
+  outline: none;
+}
+
+.button {
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: 7px 14px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.buttonPrimary {
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+
+.buttonPrimary:disabled {
+  background: var(--ink-3);
+  color: var(--text-mute);
+  cursor: default;
+}
+
+.buttonGhost {
+  background: none;
+  border: 1px solid var(--border-strong);
+  color: var(--text-dim);
+}
+
+.linkButton {
+  background: none;
+  border: none;
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  cursor: pointer;
+  padding: 0;
+  margin-top: 8px;
+}
+
+.resetStep {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.error {
+  margin: 8px 0 0;
+  font-size: 11px;
+  color: var(--red);
+  font-family: var(--font-mono);
+}
+
+.info {
+  margin: 0 0 8px;
+  font-size: 11px;
+  color: var(--green);
+  font-family: var(--font-mono);
+}
+
+.addRow {
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+}
+
+.list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  flex: 1;
+  overflow-y: auto;
+}
+
+.item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 20px;
+  border-bottom: 1px solid var(--border);
+}
+
+.checkbox {
+  width: 15px;
+  height: 15px;
+  flex-shrink: 0;
+  cursor: pointer;
+  border: 1px solid var(--border-strong);
+  border-radius: 3px;
+  background: transparent;
+}
+
+.checkboxChecked {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+
+.itemTitle {
+  flex: 1;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.itemTitleDone {
+  color: var(--text-mute);
+  text-decoration: line-through;
+}
+
+.deleteButton {
+  background: none;
+  border: none;
+  color: var(--text-mute);
+  cursor: pointer;
+  font-size: 16px;
+  padding: 0 2px;
+  line-height: 1;
+}
+
+.appError {
+  margin: 0;
+  padding: 0 20px 12px;
+  font-size: 11px;
+  color: var(--red);
+  font-family: var(--font-mono);
+}
+
+.footer {
+  padding: 8px 20px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 10px;
+  color: var(--text-mute);
+  font-family: var(--font-mono);
+}

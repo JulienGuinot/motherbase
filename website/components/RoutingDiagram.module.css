@@ -1,0 +1,224 @@
+.diagram {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(150px, 0.8fr) minmax(220px, 1.2fr) minmax(220px, 1fr);
+  gap: 56px;
+  align-items: center;
+}
+
+/* ---- Wires: same language as the hero's tentacles ---------------------- */
+.wires {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.arm,
+.pulse {
+  fill: none;
+  stroke-linecap: round;
+  vector-effect: non-scaling-stroke;
+}
+
+.arm {
+  stroke: color-mix(in oklch, var(--text) 22%, var(--bg));
+  stroke-width: 1;
+  transition: stroke 0.26s var(--ease-out), opacity 0.26s var(--ease-out);
+}
+
+.pulse {
+  stroke: var(--accent);
+  stroke-width: 1.6;
+  stroke-dasharray: 3 97;
+  stroke-dashoffset: 3;
+  opacity: 0;
+}
+
+.diagram[data-has-active] g[data-active] .arm {
+  stroke: var(--accent);
+}
+
+.diagram[data-has-active] g:not([data-active]) .arm {
+  opacity: 0.45;
+}
+
+/* A request in flight: one bead, one trip, remounted for each hop. */
+.wires g[data-live] .arm {
+  stroke: var(--accent);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .pulse {
+    animation: travel 0.9s cubic-bezier(0.45, 0, 0.55, 1) forwards;
+  }
+}
+
+@keyframes travel {
+  0% { stroke-dashoffset: 3; opacity: 0; }
+  10% { opacity: 1; }
+  100% { stroke-dashoffset: -97; opacity: 1; }
+}
+
+/* ---- Nodes --------------------------------------------------------------- */
+.dns,
+.card {
+  position: relative;
+  display: grid;
+  gap: 6px;
+  padding: 14px 16px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+
+.kicker {
+  color: var(--text-mute);
+  font-size: 11px;
+}
+
+.host {
+  display: inline-flex;
+  gap: 7px;
+  align-items: center;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+}
+
+.dns {
+  justify-self: start;
+}
+
+.proxy {
+  display: grid;
+  justify-items: center;
+  padding: 14px 16px 4px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+}
+
+.proxy .kicker {
+  justify-self: start;
+}
+
+/* The figure's 5:4 box has air round the panel: pull it in so the card hugs it. */
+/* The panel fills a band of the figure's 5:4 box (y 100 to 220 of 320): crop to it.
+   A percentage margin is a share of the width, so -25% lifts it by 100/320 of the box. */
+.patch {
+  width: 100%;
+  max-width: 340px;
+  aspect-ratio: 400 / 120;
+  overflow: hidden;
+}
+
+.patch > * {
+  margin-top: -25%;
+}
+
+.routes {
+  display: grid;
+  gap: 38px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.card {
+  outline: none;
+  transition: border-color 0.26s var(--ease-out);
+}
+
+.card[data-active] {
+  border-color: var(--accent);
+}
+
+.card[data-active] .host svg {
+  color: var(--accent);
+}
+
+.card:focus-visible {
+  outline: 1.5px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.scheme {
+  color: var(--text-mute);
+}
+
+/* Stacked: the flow reads top to bottom. The connectors are drawn by the
+   cards themselves in CSS, so they can never drift off a card the way measured
+   wires can: DNS drops into Traefik, and a trunk in the left gutter elbows into
+   each project. The project a request is routed to lights its elbow. */
+@media (max-width: 760px) {
+  .diagram {
+    --gap: 28px;
+    --wire: color-mix(in oklch, var(--text) 22%, var(--bg));
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--gap);
+  }
+  .wires {
+    display: none;
+  }
+  .dns {
+    justify-self: stretch;
+  }
+  .dns::after {
+    content: '';
+    position: absolute;
+    top: 100%;
+    left: 50%;
+    width: 1px;
+    height: var(--gap);
+    background: var(--wire);
+    transition: background 0.26s var(--ease-out);
+  }
+  .dns[data-live]::after {
+    background: var(--accent);
+  }
+  .patch {
+    max-width: 280px;
+  }
+  .routes {
+    --step: 12px;
+    gap: var(--step);
+    padding-left: 34px;
+  }
+  .card::before,
+  .card:not(:last-child)::after {
+    content: '';
+    position: absolute;
+    left: -18px;
+    width: 18px;
+    border-left: 1px solid var(--wire);
+    pointer-events: none;
+    transition: border-color 0.26s var(--ease-out);
+  }
+  /* the elbow: from the gap above down to the card's middle, then in */
+  .card::before {
+    top: calc(-1 * var(--step) - 1px);
+    height: calc(50% + var(--step) + 1px);
+    border-bottom: 1px solid var(--wire);
+    border-bottom-left-radius: 8px;
+  }
+  .card:first-child::before {
+    top: calc(-1 * var(--gap) - 1px);
+    height: calc(50% + var(--gap) + 1px);
+  }
+  /* the trunk carries on past the card to the next one */
+  .card:not(:last-child)::after {
+    top: 50%;
+    bottom: -1px;
+  }
+  .card[data-live]::before,
+  .card[data-active]::before {
+    border-color: var(--accent);
+  }
+  .host {
+    font-size: 12px;
+    overflow-wrap: anywhere;
+  }
+}

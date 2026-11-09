@@ -1,0 +1,46 @@
+---
+title: "API Explorer & Edge Functions"
+description: "The request playground, edge function editing and invocation, and edge secrets."
+order: 7
+---
+
+Source: `apps/studio/src/features/api-tools`, two routes: `/p/:id/api` (API explorer) and `/p/:id/edge-functions`.
+
+## API explorer
+
+`ApiExplorer.tsx` is a request playground. It loads what the REST API actually serves (`GET /admin/rest/resources` — `public` base tables only, so it never documents an endpoint that 404s) to offer real table names, then issues the request you compose through the same API client (`apiToolsApi.request({ url, method, data })`), so it inherits the session or proxy token you are already using.
+
+That means what you see in the explorer is exactly what your app gets from the [REST API](/docs/reference/rest-api/) — no separate mock path.
+
+## Edge functions
+
+| Action | Endpoint |
+|---|---|
+| List | `GET /admin/edge-functions` |
+| Create | `POST /admin/edge-functions` |
+| Update | `PATCH /admin/edge-functions/:id` |
+| Delete | `DELETE /admin/edge-functions/:id` |
+| Invoke | `POST /admin/edge-functions/:id/invoke` → `InvokeResult` |
+| Logs | `GET /admin/edge-functions/:id/logs` |
+
+A function row carries `name`, `route`, `code`, `enabled`, an optional cron `schedule`, and optional per-function `memoryLimitMb` / `timeoutMs` — both clamped by the console-global ceilings, so a function can ask for more than the default but never more than the host allows.
+
+Invoking from Studio runs the same sandbox as an HTTP call, and each run appends an `EdgeFunctionLog` (`status`, `durationMs`, `stdout`, `errorMessage`) shown in the logs panel. Runtime and sandbox details: [Edge functions](/docs/platform/edge-functions/).
+
+## Edge secrets
+
+```text
+GET    /admin/edge-secrets
+PUT    /admin/edge-secrets        { name, value }
+DELETE /admin/edge-secrets/:name
+```
+
+Secrets are injected into the sandbox as `env.NAME`. They are also what [Integrations](/docs/platform/integrations/) writes when you connect a provider.
+
+<Warning>
+Through the Console proxy, every `/edge-secrets` route requires the `secrets.manage` capability — including the `GET`. A `developer` can edit function code but cannot read the credentials that code uses.
+</Warning>
+
+## Assistant dock
+
+The AI assistant (`features/assistant`) is a dock available across Studio rather than a route of its own. It posts to `/api/admin/ai/chat`, or `/api/projects/:id/admin/ai/chat` when Studio is served by the Console, and reads the SSE stream with `fetch` plus a stream reader. `features/assistant/lib/context.ts` builds the page context sent with each message; `features/assistant/lib/dock-state.ts` holds the open/closed state. See [AI assistant](/docs/platform/ai-assistant/).

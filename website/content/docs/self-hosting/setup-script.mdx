@@ -1,0 +1,160 @@
+---
+title: "Setup Script"
+description: Run setup.sh interactively or unattended and understand every generated file, check, and reset path.
+order: 2
+---
+
+`setup.sh` performs the installation. On a VPS, the one-line installer downloads the checked release bundle to `~/motherbase` and runs it interactively in VPS mode:
+
+```bash
+curl -fsSL https://www.motherbase.site/install.sh | bash
+```
+
+From a backend checkout, run it directly; it changes to its own directory before doing any work.
+
+```bash
+./setup.sh
+```
+
+## Flags
+
+| Flag | Effect |
+|------|--------|
+| `--yes`, `-y` | Uses prompt defaults and requires mandatory VPS values to come from environment variables. |
+| `--prod` | Makes VPS (`v`) the default mode; retained for backward compatibility. |
+| `--reset`, `--fresh` | Deletes this installation's containers and volumes before rebuilding and starting it. |
+| `--skip-dns-check` | Skips the VPS DNS polling loops. |
+| `--allow-root` | Permits running as root inside another user's checkout. Without it setup refuses, because root-owned files left in that checkout (`.git` included) break that user's next `git fetch` and take the deployment with it. Setup elevates on its own where it needs root, so this is for someone who means it. |
+| `--build` | Always build the images locally instead of pulling the prebuilt ones. |
+| `--help`, `-h` | Prints the leading comment block from `setup.sh` and exits. |
+
+By default setup pulls the `api`, `console`, `postgres`, `edge-runtime` and `orchestrator`
+images CI published for this commit (`$MOTHERBASE_REGISTRY/motherbase-<name>:sha-<commit>`), and
+only when this checkout **is** that commit: a dirty tree or an unpushed commit falls back to
+building, because an image that does not match the Compose files beside it is worse than a slower
+install. In an install bundle (no `.git`), the commit is read from its `VERSION` file. One missing
+image falls back to building everything; a bundle has no sources to build from, so there setup
+stops and says so. `--build` forces the build path.
+
+Unknown arguments are ignored by the argument loop in `setup.sh`.
+
+## Environment read by setup.sh
+
+These values can affect the installer before it reads generated environment files:
+
+| Variable | Default | Use |
+|----------|---------|-----|
+| `DOMAIN` | empty | Base project domain; a non-empty value also makes VPS the default mode. |
+| `CONSOLE_DOMAIN` | `console.<DOMAIN>` | Public Platform Console hostname. |
+| `ACME_EMAIL` | none | Required in VPS mode for Let's Encrypt. |
+| `ADMIN_EMAIL` | `admin@example.com` at the prompt | Initial Console owner email. |
+| `ADMIN_PASSWORD` | generated | Initial owner password; required when an unattended run must repair a missing hash. |
+| `MOTHERBASE_IMAGE_TAG` | `1.0.0` | Tag used to derive the first-party image defaults. |
+| `MOTHERBASE_REGISTRY` | `ghcr.io/julienguinot` | Where the prebuilt first-party images are pulled from. |
+| `API_IMAGE` | `motherbase-api:<tag>` | API image, pulled or built, and written into Console configuration. |
+| `CONSOLE_IMAGE` | `motherbase-console:<tag>` | Console image, pulled or built. |
+| `POSTGRES_IMAGE` | `motherbase-postgres:<tag>` | Project PostgreSQL image, pulled or built. |
+| `ORCHESTRATION_IMAGE` | `motherbase-orchestrator:<tag>` | Internal orchestration daemon image, pulled or built. |
+
+The edge runtime image is always `motherbase-edge-runtime:1.0.0` and cannot be overridden: it must be the name the Compose files default to, because nothing passes it through to the Console.
+| `MINIO_IMAGE` | `alpine/minio:RELEASE.2025-10-15T17-29-55Z` | External MinIO image; pinned to a digest in VPS mode. |
+| `MINIO_MC_IMAGE` | `bitnamilegacy/minio-client:2025.5.21` | External MinIO client image; pinned in VPS mode. |
+| `TRAEFIK_IMAGE` | `traefik:v3.3` | External production Traefik image; pinned in VPS mode. |
+| `TRAEFIK_DOCKER_PROXY_IMAGE` | `nginx:alpine` | Docker API proxy image; pinned in VPS mode. |
+| `DOCKER_CLI_IMAGE` | `docker:27-cli` | CLI source for the orchestrator image; pinned in VPS mode. |
+| `GODADDY_API_KEY` | empty | Preset for the deep-subdomain DNS-01 prompt. |
+| `GODADDY_API_SECRET` | empty | Preset for the deep-subdomain DNS-01 prompt. |
+| `PLATFORM_DOMAIN_SUFFIX` | `DOMAIN` in VPS repair | Optional value persisted into `deploy/console/.env`. |
+| `USER` | shell value | Used only when adding the current non-root Linux user to the `docker` group after Docker installation. |
+
+On an existing installation, the script also reads `BASE_HOST`, `PORT`, `MINIO_CONSOLE_PORT`, `SEED_ADMIN_EMAIL`, `SEED_ADMIN_PASSWORD`, `CONSOLE_ADMIN_EMAIL`, `CONSOLE_ADMIN_PASSWORD_HASH_B64`, `CONSOLE_ADMIN_PASSWORD_HASH`, `CONSOLE_JWT_SECRET`, `ORCHESTRATION_SECRET`, and image/domain values from `.env`, `deploy/console/.env`, and `deploy/traefik/.env` to recover the mode and repair missing fields.
+
+## Prompts
+
+For a new install, the wizard asks for the mode: `L` for local or `v` for VPS.
+
+Local mode then asks for:
+
+1. Admin email and admin password. Leaving the password empty generates one.
+2. API port, default `5001`.
+3. MinIO port, default `59000`; the Console port is calculated as the next port.
+4. Whether to configure SMTP; if yes: host, port (`587`), username, password, and from address.
+5. Whether to configure Firebase; if yes: project ID, client email, and service-account JSON path.
+6. Whether to configure APNs; if yes: `.p8` path, key ID, team ID, bundle ID, and production versus sandbox.
+
+VPS mode asks for:
+
+1. Required base domain, Console domain, and required Let's Encrypt email.
+2. Console admin email and password. Leaving the password empty generates one.
+3. For a base domain with at least two dots, whether to configure DNS-01. The implemented provider prompt is GoDaddy and asks for its API key and secret.
+
+Additional prompts can appear:
+
+- If `.env` exists: keep and redeploy (`k`), fresh reset (`f`), regenerate (`r`), or quit (`q`).
+- Before an interactive `--reset` or `--fresh`: confirm the destructive reset; the default is no.
+- If database volumes already exist while a new VPS `.env` is being generated: optionally destroy those volumes; the default is no.
+- If `deploy/console/.env` or its password hash is missing: Console email and password are requested for repair.
+
+With `--yes`, prompt helpers accept their defaults. In unattended VPS mode, `DOMAIN` and `ACME_EMAIL` must therefore be provided. An omitted `ADMIN_PASSWORD` is generated unless setup is repairing an existing Console hash, in which case it stops and requires `ADMIN_PASSWORD`.
+
+## Password validation
+
+The initial admin password must be at least 12 characters locally or 16 in VPS mode, contain at least two of lowercase, uppercase, digit, and symbol, differ from the admin email, and not match the weak-password list in `setup.sh`. Generated passwords use `Mb-` followed by 24 random bytes encoded as hexadecimal and are printed once.
+
+## Generated files and secrets
+
+For a new local install, `write_env_local` replaces the repository `.env`. It generates a 32-byte hexadecimal `JWT_SECRET`, a base64 32-byte `CONFIG_ENCRYPTION_KEY`, and writes the selected ports, storage, seed-admin, SMTP, Firebase, and APNs values. `EMAIL_SMTP_PORT` and `EMAIL_FROM` are written by this function, although `apps/server/config/env.ts` does not declare them.
+
+For a new VPS install, the repository `.env` contains only the install marker and:
+
+```env
+BASE_HOST=<base-domain>
+CONSOLE_DOMAIN=<console-domain>
+ACME_EMAIL=<acme-email>
+```
+
+It is set to mode `600`.
+
+`deploy/console/.env` is also set to mode `600` and contains:
+
+- a generated 32-byte hexadecimal `CONSOLE_JWT_SECRET`;
+- a generated 32-byte hexadecimal `ORCHESTRATION_SECRET`;
+- the initial email and a base64-encoded bcrypt password hash;
+- whether the generated password is temporary;
+- first-party image references and pinned external image references;
+- `PLATFORM_DOMAIN_SUFFIX` and `CERT_RESOLVER`.
+
+`deploy/traefik/.env` contains the ACME email, pinned Traefik and Nginx references, empty dashboard settings, and DNS-01 credentials when configured. Project secrets are not generated by VPS setup: the Console creates `/srv/projects/<name>/.env.prod` when each project is created, as implemented in `apps/server/console/lib/manifest.ts`.
+
+## Docker and network checks
+
+The installer:
+
+1. Finds or installs Docker, starts the daemon when possible, and selects Compose v2 or legacy `docker-compose`.
+2. Verifies `/var/run/docker.sock` before starting the orchestrator.
+3. Creates the external `traefik_proxy` network when absent.
+4. In VPS mode, checks ports `80` and `443`. It stops and disables active Nginx, Apache, httpd, Caddy, HAProxy, or lighttpd services that occupy them; any remaining listener aborts setup.
+5. Opens `80/tcp` and `443/tcp` through active `ufw`, or inserts `iptables` rules when available.
+6. Resolves every external production image to a `repository@sha256:...` reference and aborts if no valid repository digest is available.
+
+## DNS and health checks
+
+In VPS mode, the script resolves a random host under `DOMAIN` and compares it with the public IPv4 returned by `https://ifconfig.me`. It tries `dig`, `nslookup`, `host`, then `getent`, polling 36 times at 10-second intervals. Failure after six minutes is a warning, not a fatal error. An external Console domain is polled separately.
+
+Console health is checked from inside its container at `http://127.0.0.1:5500/console`: up to 60 attempts, two seconds apart, accept any status from `200` through `499`. Failure prints the last 80 Console log lines and aborts.
+
+During a VPS rerun, every currently running project API found under `/srv/projects/<name>/.env.prod` is force-recreated without its dependencies. Its `/api/health-check` must return `200` within 120 seconds; otherwise setup prints 80 API log lines and stops. The standalone API health and seed helpers in `setup.sh` target `/api/health-check` and `apps/server/dist/prisma/seed.js`, but the current local and VPS Console startup functions do not call them.
+
+## Idempotency
+
+With an existing `.env`, the default path keeps it. Setup recovers local versus VPS mode from `BASE_HOST`, preserves `deploy/console/.env`, repairs missing Console secrets and hashes, updates image references, and recreates Traefik and the Console with `--force-recreate --remove-orphans`.
+
+Normal reruns do not use `down -v`. Production project database, storage, backup, and assistant volumes remain in place. Running project API containers are recreated as described above.
+
+## Reset behavior
+
+`--reset` and `--fresh` call the destructive reset inside `setup.sh`, then continue into a new startup. In production it iterates each `/srv/projects/<name>/.env.prod`, runs `deploy/docker-compose.prod.yml down -v`, and removes each project directory. It also removes Console volumes. In local mode it removes Console and legacy stack volumes, then removes volumes whose names end in `_db_data` or `_minio_data`.
+
+<Warning>
+`./setup.sh --reset` is not an upgrade command. It deletes project data before reinstalling. Use [Upgrades](/docs/self-hosting/upgrades) for normal releases.
+</Warning>

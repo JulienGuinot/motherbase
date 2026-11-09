@@ -1,0 +1,21 @@
+{
+  "name": "create-motherbase-app",
+  "version": "0.1.0",
+  "description": "Create a Next.js or React app with Motherbase authentication ready to customize",
+  "type": "commonjs",
+  "bin": {
+    "create-motherbase-app": "./bin/create-motherbase-app.js"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "files": ["bin", "src", "templates", "README.md"],
+  "scripts": {
+    "test": "node --test",
+    "lint": "eslint ."
+  },
+  "license": "MIT",
+  "repository": { "type": "git", "url": "git+https://github.com/JulienGuinot/motherbase.git", "directory": "packages/create-app" },
+  "homepage": "https://github.com/JulienGuinot/motherbase#readme",
+  "bugs": { "url": "https://github.com/JulienGuinot/motherbase/issues" }
+}

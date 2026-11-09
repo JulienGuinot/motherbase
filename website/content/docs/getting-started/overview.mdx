@@ -1,0 +1,132 @@
+---
+title: "Overview"
+description: "What is Motherbase and why does it exist?"
+order: 1
+---
+
+Motherbase is an open source self-hosted backend platform for running many isolated projects from one VPS and one domain.
+
+Think of it as the backend you'd build yourself, with a Supabase-style Project Studio and a multi-project Platform Console.
+
+<Note>
+**Platform Console** = control plane for creating, starting, stopping, rebuilding, and inspecting projects. **Project Studio** = admin UI for one project: tables, SQL, auth, policies, logs, storage, realtime, edge functions, triggers, cron jobs, settings, and Connect.
+</Note>
+
+## What building on it looks like
+
+A table and its access rule are SQL, run once in Project Studio:
+
+```sql
+CREATE TABLE notes (
+  id       uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  body     text NOT NULL,
+  owner_id text NOT NULL DEFAULT auth.uid()
+);
+ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "own notes" ON notes FOR ALL TO authenticated
+  USING (owner_id = auth.uid()) WITH CHECK (owner_id = auth.uid());
+```
+
+Everything else is client code. There is no API layer to write: the table is
+already an endpoint, and Postgres enforces the policy on every request.
+
+```ts
+import { createClient, localStorageStorage } from '@motherbase/client'
+
+const client = createClient(MOTHERBASE_URL, PUBLISHABLE_KEY, { storage: localStorageStorage() })
+
+await client.auth.signIn.email({ email, password })
+
+await client.from('notes').insert({ body: 'Buy milk' })
+const { data: notes } = await client.from('notes').select('*')   // only this user's rows
+
+client
+  .channel('notes')
+  .on('postgres_changes', { event: '*', schema: 'public', table: 'notes' }, ({ eventType, new: row }) => {
+    console.log(eventType, row)
+  })
+  .subscribe()
+
+await client.storage.from('attachments').upload('notes/receipt.png', file)
+await client.functions.invoke('summarize', { body: { noteId } })
+```
+
+If you have written against `supabase-js`, this is the same surface for data, storage,
+realtime and functions; `client.auth` is [Better Auth](https://www.better-auth.com/)'s
+client. The [Quickstart](/docs/getting-started/quickstart/) runs this end to end on your
+machine.
+
+## How the pieces fit
+
+| Piece | What it is | You use it to |
+|---|---|---|
+| **Project** | One isolated backend: its own Postgres, storage, auth, API and subdomain | Back one app |
+| **Project Studio** | The admin UI of one project, opened from the Platform Console | Write SQL, edit tables and policies, manage users, read logs, copy connection values |
+| **`@motherbase/client`** | The TypeScript SDK your app imports | Read and write data, sign users in, upload files, subscribe to changes, call functions |
+| **Platform Console** | The control plane for every project on a machine | Create, start, stop, rebuild, back up and inspect projects |
+| **`@motherbase/cli`** | The command line for both | Script migrations, deploy functions, generate types, run backups |
+
+A request from your app reaches its project's API, which authenticates it, then runs
+the query inside a Postgres transaction carrying the caller's identity, so `auth.uid()`
+and every RLS policy apply. Projects share nothing at runtime: two projects on one
+machine have two databases, two storage namespaces and two sets of users.
+
+## What's included
+
+- **Auth** — [Better Auth](https://www.better-auth.com/): email/password, social login, magic links, email OTP, passkeys, two-factor, organizations, per-org SSO, API keys, JWT/JWKS, live-reloaded config, server-side roles, rate limiting
+- **Database** — PostgreSQL, SQL editor first, Table editor, indexes, extensions, functions, and triggers
+- **RLS** — Native PostgreSQL row-level security with Supabase-style `auth.uid()`, `auth.jwt()`, `anon`, and `authenticated`
+- **REST API** — Automatic table API under `/rest/v1/:model`, enforced by PostgreSQL RLS
+- **Storage** — Local or S3-compatible storage such as MinIO, AWS S3, Cloudflare R2
+- **Realtime** — Socket.IO with JWT authentication, Project Studio monitoring, and RLS-aware table broadcasts
+- **Edge Functions** — Server-side TypeScript/JS in a private Deno runtime, one process per function, with a hard memory cap, a timeout that kills the process, and an SSRF-guarded `fetch`; stored in the database, invoked over HTTP. A Supabase function runs verbatim
+- **Postgres Triggers** — Real `CREATE TRIGGER` workflows for database-side automation
+- **Cron Jobs** — `pg_cron` scheduling plus read-only status for code-defined app jobs
+- **Project Studio** — Supabase-style admin UI for one project
+- **Client SDK** — `@motherbase/client` for Next.js, Expo, React Native, browser/server TypeScript; query tables with Supabase-style `client.from()` or Prisma-style `client.db`
+- **Platform Console** — Provision and operate multiple project stacks with Docker Compose and Traefik
+- **Operator CLI** — `@motherbase/cli` for Console login/link workflows, projects, database, RLS, users, storage, edge functions, cron, backups, Supabase imports, diagnostics, and local stack operations
+
+## When to use Motherbase
+
+Supabase is great for the hosted experience. Motherbase is for the moment where your VPS has room for more than one project and you want one control plane for isolated backends.
+
+It fits when:
+
+- you want several apps' backends on one machine you control, each fully isolated;
+- your data has to stay on that machine;
+- your team already writes `supabase-js`-shaped code and Postgres policies.
+
+It is the wrong tool when:
+
+- you do not want to operate a server: upgrades, backups and TLS are yours;
+- one project needs more than one API instance: a project runs exactly one, by design (see
+  [Known issues](/docs/contributing/known-issues/#deliberate-one-api-instance-per-project));
+- you depend on WAL-level change capture or GraphQL: realtime sees writes made through the API
+  only, and there is no `pg_graphql`.
+
+## Migration path
+
+Motherbase imports a Supabase project with one command: schema and data, RLS policies, email/password users, storage buckets and objects, edge functions and secrets. Auth provider settings, Vault and GraphQL do not come across. See [Migrate from Supabase](/docs/getting-started/migrate-from-supabase/).
+
+## Requirements
+
+- Node.js >= 22.12.0 for backend development and build scripts
+- Node.js >= 18 for `@motherbase/cli`
+- Docker and Docker Compose. Postgres is not installed separately: every project
+  runs the bundled `postgres:16` image extended with `pg_cron`, `pgvector` and
+  PostGIS.
+
+## Explore the docs
+
+| Section | Start at |
+|---|---|
+| Get running | [Quickstart](/docs/getting-started/quickstart/), then [Deploy](/docs/getting-started/deploy/) |
+| Build on it | [Database](/docs/platform/database/), [Auth](/docs/platform/auth/), [SDK reference](/docs/reference/sdk/) |
+| How it works | [Architecture overview](/docs/architecture/overview/) |
+| Operate it | [Platform Console](/docs/console/overview/) and [Self-hosting](/docs/self-hosting/overview/) |
+| Admin UI | [Project Studio](/docs/studio/overview/) |
+| Automate it | [CLI](/docs/cli/overview/) and the [Console API](/docs/console/console-api/) |
+| Internals per package | [Workspace overview](/docs/packages/overview/) |
+| Contribute | [Repo & toolchain](/docs/contributing/overview/) |
+| Full walkthrough | [Todo app example](/docs/example/todo-app/) |

@@ -1,0 +1,570 @@
+---
+title: "REST API"
+description: "HTTP API reference for Motherbase core endpoints and dynamic table routes."
+order: 2
+---
+
+Motherbase exposes core platform endpoints and dynamic REST routes for exposed database tables.
+
+Swagger covers the core API surface. Dynamic `/rest/v1/:model` routes depend on the tables discovered in each project.
+
+## Authentication
+
+Auth is powered by [Better Auth](https://www.better-auth.com/). Most endpoints require the **session token** in the `Authorization` header:
+
+```http
+Authorization: Bearer <session-token>
+```
+
+The server verifies the session, then reloads the full user record by id — role and status are always live, never trusted from the token. The SDK attaches the token and revalidates the session on `401`. See [Auth](/docs/platform/auth) for the full method and plugin surface.
+
+### Running as another user
+
+```http
+x-motherbase-impersonate: <user-id> | anon
+```
+
+Runs the request as that user, or as a signed-out visitor. It exists so a row level security
+policy can actually be asserted: proving a policy denies what it claims to deny means issuing the
+same query as several callers, and without this that means creating real users and signing in as
+each of them inside a test.
+
+Gated on the **secret** key, which already bypasses RLS, so the header can only ever *lower* a
+caller's privilege. Presented with anything else it is refused with `403` rather than ignored — a
+test that silently ran as `service_role` instead of the user it named would pass while proving
+nothing. Nothing derived from a user's own token or from a request body can set it.
+
+The SDK wrapper is [`createTestClient`](/docs/reference/sdk/).
+
+
+---
+
+## Auth endpoints
+
+All auth routes are served by Better Auth under the `/api/auth` base path. Core routes:
+
+```http
+GET  /api/auth/get-session           # current session + user
+POST /api/auth/sign-up/email         # email + password account
+POST /api/auth/sign-in/email         # sign in with email + password
+POST /api/auth/sign-out              # end the session
+
+GET  /api/auth/token                 # mint a signed JWT for the session
+GET  /api/auth/jwks                  # JWKS to verify issued JWTs
+```
+
+Plugin routes are mounted under the same base path when their setting group is enabled — for example `/api/auth/magic-link/*`, `/api/auth/email-otp/*`, `/api/auth/two-factor/*`, `/api/auth/passkey/*`, `/api/auth/organization/*`, `/api/auth/api-key/*`, and `/api/auth/sso/*`.
+
+### Sign-in / sign-up response
+
+```json
+{
+  "token": "<session-token>",
+  "user": {
+    "id": "<user-id>",
+    "email": "user@example.com",
+    "name": "alice",
+    "role": "USER",
+    "status": "active"
+  }
+}
+```
+
+Send `token` back as `Authorization: Bearer <token>`. The user `role` is resolved server-side from the live record on every protected request.
+
+### OAuth callback URLs
+
+| Provider kind | Setting group | Callback URL |
+|---------------|---------------|--------------|
+| Social (Google, Apple, …) | `auth.social` | `/api/auth/callback/<provider>` |
+| Custom OIDC / OAuth2 | `auth.oauth.custom` | `/api/auth/oauth2/callback/<providerId>` |
+| Per-organization SSO | `auth.sso` | `/api/auth/sso/callback/<providerId>` |
+
+Providers are assembled only when enabled **and** configured. `GET /api/admin/auth/status` — admin-only — reports per-provider readiness (`enabled`, `configured`, `missing`, `callbackUrl`). See [Auth](/docs/platform/auth) for setup.
+
+---
+
+## REST table endpoints
+
+Every base table in the `public` schema with row level security enabled is a REST route. Replace `:model` with the table name, such as `todo`, `post`, or `product`. A `public` table with RLS off answers `403`, and a name that is not an exposed table answers `404`.
+
+```http
+GET    /rest/v1/:model           # list records
+HEAD   /rest/v1/:model           # count only, no rows read
+POST   /rest/v1/:model           # create record
+PATCH  /rest/v1/:model           # update records matching filters
+DELETE /rest/v1/:model           # delete records matching filters
+POST   /rest/v1/batch            # several writes in one transaction, all or nothing
+```
+
+Only the `public` schema is reachable. Every Motherbase-managed table lives in `auth`, `storage` or `platform`, so system tables are unreachable by construction; a name-based blocklist (`session`, `account`, `verification`, `jwks`, `app_settings`, `edge_function_secrets`, `schema_migrations`, `realtime_outbox`) is the second gate in case one of those names is recreated in `public`. Views and materialized views are also excluded — they cannot carry row-level security. See [REST engine](/docs/architecture/rest-engine/).
+
+### RLS defaults
+
+Mental model: **RLS is the REST authorization layer**.
+
+Motherbase maps requests to PostgreSQL roles:
+
+| Role | Meaning |
+|------|---------|
+| `anon` | No valid bearer token |
+| `authenticated` | Valid bearer token |
+
+Tables created from Project Studio SQL/Table editor have RLS enabled automatically. If RLS is enabled and there is no matching policy, `anon` and `authenticated` callers see no rows and writes fail.
+
+If RLS is disabled, REST can access the whole table because the `anon` and `authenticated` data-plane roles have broad table grants. Keep RLS on for public app tables.
+
+`PATCH` and `DELETE` require filters for non-admin callers. Unfiltered bulk mutations are rejected.
+
+### RLS policies required per method
+
+```http
+# Needs a SELECT policy for anon or authenticated
+GET /rest/v1/todo?done=eq.false&order=created_at.desc&limit=20
+
+# Needs an INSERT policy with WITH CHECK
+POST /rest/v1/todo
+Content-Type: application/json
+
+{ "title": "Buy milk", "done": false }
+
+# Needs SELECT + UPDATE policies and a filter unless caller is admin
+PATCH /rest/v1/todo?id=eq.2df3...
+Content-Type: application/json
+
+{ "done": true }
+
+# Needs a DELETE policy and a filter unless caller is admin
+DELETE /rest/v1/todo?id=eq.2df3...
+```
+
+Common owner policies:
+
+```sql
+CREATE POLICY "todo owner read"
+ON todo FOR SELECT
+TO authenticated
+USING (auth.uid() IS NOT NULL AND auth.uid() = user_id);
+
+CREATE POLICY "todo owner write"
+ON todo FOR ALL
+TO authenticated
+USING (auth.uid() IS NOT NULL AND auth.uid() = user_id)
+WITH CHECK (auth.uid() IS NOT NULL AND auth.uid() = user_id);
+```
+
+See [RLS](/docs/platform/rls) for the full SQL Editor workflow.
+
+### Query parameters
+
+Reserved parameters (everything else is treated as a filter on a column):
+
+| Parameter | Description |
+|-----------|-------------|
+| `select` | Columns to return, with embedding, aliases (`alias:column`) and casts (`qty::text`) |
+| `order` | `field.asc` / `field.desc`, comma-separated; `.nullsfirst` / `.nullslast` supported |
+| `limit` | Max records. Omitted, the server returns up to the `api.rest` → `maxRows` setting (**1000** by default), which is one number governing both the default and the ceiling. The parser caps that setting at `1000` |
+| `offset` | Pagination offset |
+| `on_conflict` | Upsert conflict target |
+| `columns` | Restrict the columns an insert reads from the body |
+| `<field>` | Filter: `?field=op.value` |
+
+### Filter operators
+
+| Operator | Meaning |
+|----------|---------|
+| `eq`, `neq` | Equal / not equal |
+| `gt`, `gte`, `lt`, `lte` | Comparisons |
+| `like`, `ilike` | `LIKE` / `ILIKE` |
+| `match`, `imatch` | POSIX regex `~` / `~*` |
+| `in` | `?id=in.(1,2,3)`; quoted values may contain commas: `in.("a,b",c)` |
+| `is` | `?deleted_at=is.null` — the only way to reach SQL `NULL` |
+| `isdistinct` | `IS DISTINCT FROM` |
+| `fts`, `plfts`, `phfts`, `wfts` | Full-text search (`to_tsquery`, `plainto_`, `phraseto_`, `websearch_to_`), optional config: `?body=fts(english).cat` |
+| `cs`, `cd`, `ov` | Contains / contained by / overlaps (arrays, ranges) |
+| `sl`, `sr`, `nxr`, `nxl`, `adj` | Range: strictly left/right, not extending right/left, adjacent |
+
+Prefix any operator with `not.` to negate it: `?status=not.eq.archived`. Modifiers `any` and `all` are supported where PostgREST supports them.
+
+Values are sent to Postgres **untyped** and coerced from the operand's type, exactly as in PostgREST: `eq.42` matches a text column containing `"42"`, and `eq.null` matches the literal string `null`.
+
+JSON columns can be traversed in both filters and `select`: `?data->>name=eq.alice`, `?data->0->>id=eq.7`. `->>` yields text, `->` yields JSON.
+
+### Logic trees
+
+```http
+GET /rest/v1/todos?or=(done.eq.false,and(priority.gte.3,owner_id.eq.me))
+GET /rest/v1/todos?not.and=(done.eq.true,archived.eq.true)
+```
+
+`and(...)` and `or(...)` nest arbitrarily, and `not.` composes with both.
+
+### Embedding
+
+```http
+GET /rest/v1/posts?select=id,title,author(id,name)
+GET /rest/v1/posts?select=*,comments!inner(body)
+GET /rest/v1/posts?select=*,author!left(name)
+GET /rest/v1/posts?select=*,author!fk_posts_author(name)
+```
+
+`!inner` / `!left` choose the join type; any other `!hint` names the relationship to disambiguate multiple foreign keys between the same pair of tables. Foreign keys are known in both directions, so parent → child and child → parent both embed. An embedded relation passes the same exposure checks as a top-level one.
+
+### Prefer, Range and Content-Range
+
+| Header | Values |
+|---|---|
+| `Prefer: count=` | `exact`, `planned`, `estimated` — populates the total in `Content-Range` |
+| `Prefer: return=` | `representation`, `minimal`, `headers-only`. Default: `minimal` on a table write, `representation` on `/rpc/` and `/batch` |
+| `Prefer: resolution=` | `merge-duplicates`, `ignore-duplicates` — turns an insert into an upsert |
+| `Prefer: params=single-object` | Pass one JSON object as a single `/rpc/` argument |
+| `Prefer: max-affected=N` | Refuse a write that would touch more than `N` rows, and roll it back. What the SDK's `.maxAffected(n)` sends |
+| `Prefer: tx=rollback` | Run the write, report what it would have done, roll the transaction back. A dry run; the SDK's `.rollback()` |
+| `Range` | Rows, not bytes, and inclusive: `Range: 0-9` is ten rows. Applied only when `limit`/`offset` are absent |
+| `Content-Range` | Returned on every collection response: `0-9/57`, `0-9/*` when no count was asked for |
+| `Range-Unit` | Always `items` on a collection response |
+
+An unknown preference **name** is ignored (RFC 7240 makes preferences advisory); an unknown **value** for a preference the server implements is rejected with `400 PGRST122`, so `count=aproximate` fails loudly instead of returning a plausible wrong answer.
+
+A table write (`POST`/`PATCH`/`DELETE /rest/v1/:model`) defaults to `return=minimal` and
+answers with no rows, as PostgREST does — ask for them with `Prefer: return=representation`,
+which is what the SDK's `.select()` sends. `/rpc/:fn` and `/batch` default to
+`representation` instead, because there the result is the whole point of the call.
+
+### Response encodings
+
+The `Accept` header picks the representation. Anything unrecognised falls back to JSON.
+
+| `Accept` | Result |
+|---|---|
+| *(default)* | JSON array of rows |
+| `application/vnd.pgrst.object+json` | Exactly one row as a bare object, or `406 PGRST116` for zero or many |
+| `text/csv` | RFC 4180 CSV; header row is the union of the keys in first-seen order, JSON columns are rendered as their JSON text |
+| `application/vnd.pgrst.plan` | `EXPLAIN` output. **Admin callers only** — it leaks row estimates and index names for rows the caller cannot read. Anyone else gets `403 PGRST103` |
+
+### Status codes
+
+| Method | Success |
+|---|---|
+| `GET` | `200` |
+| `HEAD` | `200`, no body — the row query is skipped entirely, only the count runs |
+| `POST` | `201` |
+| `PATCH`, `DELETE` | `200` |
+
+### Batch writes
+
+```http
+POST /rest/v1/batch
+```
+
+Several writes, one Postgres transaction, all or nothing. There is no PostgREST or supabase-js equivalent; the usual workaround is a sequence of awaited writes inside a `try`, which is not a rollback — whatever already committed stays committed.
+
+```json
+{
+  "operations": [
+    { "method": "POST",   "model": "orders", "body": { "id": 7, "total": 40 } },
+    { "method": "PATCH",  "model": "stock",  "query": { "sku": "eq.A1" }, "body": { "count": 4 } },
+    { "method": "DELETE", "model": "cart",   "query": { "user_id": "eq.42" } }
+  ]
+}
+```
+
+`query` carries the same filters as the single-row routes, plus `on_conflict` for an upsert. The response is `{ "status": 1, "message": "OK", "data": { "results": [...] } }` with one result array per operation, in the order they were declared.
+
+Rules:
+
+- **Writes only.** `POST`, `PATCH`, `DELETE`. A read is refused with 400, because rows returned mid-batch would invite ordering guarantees nothing can make.
+- **100 operations maximum.** A batch holds one transaction open for its whole run, which is how long every other writer waits on the rows it touches.
+- **One caller for the whole batch.** Keys and impersonation are resolved per request, so two operations can never run as different users.
+- A failure anywhere rolls back every statement **and** every realtime outbox row written alongside them, so nothing is announced that did not happen.
+
+The `Prefer` header applies to the batch as a whole. In the SDK this is [`client.transaction()`](/docs/reference/sdk/).
+
+### Functions (RPC)
+
+```http
+POST /rest/v1/rpc/my_function      # arguments in the JSON body
+GET  /rest/v1/rpc/my_function?a=1  # read-only form, arguments as query params
+HEAD /rest/v1/rpc/my_function      # the GET call without a body; no Content-Range total
+```
+
+Overloads resolve by argument **names**, as in PostgREST: every supplied name must be an input argument, and every argument without a default must be supplied. `VARIADIC`-tail overloads are not reachable over REST. An unmatched call returns `404 PGRST202`.
+
+- **GET and HEAD** are refused for a `VOLATILE` function with `405 PGRST101`; use `POST`.
+- **Return shape.** A scalar or single composite returns one JSON value; a `setof` or `returns table` function returns an array.
+- **Schemas.** `public` by default. `Content-Profile` (POST) or `Accept-Profile` (GET) selects another exposed schema, such as `pgmq_public` when Queues is on; any other answers `406 PGRST106`.
+- **`SECURITY DEFINER`** functions are refused with `403 PGRST203` unless their name is listed in the `api.rest.rpcSecurityDefiner` setting, because they run as their owner and bypass RLS.
+- **Count.** A set-returning call answers with `Content-Range`, like a table read: `0-9/10` with `Prefer: count=exact`, `0-9/*` without. There is no paging on `/rpc/`, so the exact total is the number of rows returned. A scalar or single-row function gets no `Content-Range`.
+
+SDK usage and examples: [Database functions](/docs/reference/sdk/#database-functions).
+
+### Error codes
+
+| Code | Status | Meaning |
+|---|---|---|
+| `PGRST100` | 400 | Malformed query string |
+| `PGRST101` | 405 | A `VOLATILE` function called with GET or HEAD |
+| `PGRST103` | 403 / 416 | `EXPLAIN` requested by a non-admin caller, or an inverted `Range` header |
+| `PGRST106` | 406 | The profile header names a schema that is not exposed |
+| `PGRST116` | 406 | `application/vnd.pgrst.object+json` asked for exactly one row and got zero or many |
+| `PGRST122` | 400 | Invalid `Prefer` value |
+| `PGRST124` | 400 | A write would touch more rows than `Prefer: max-affected` allows; nothing was written |
+| `PGRST200` | 400 | No relationship to embed, or the embedded table is not exposed |
+| `PGRST201` | 400 | More than one relationship matches an embed; disambiguate with `relation!hint` |
+| `PGRST202` | 404 | No function matched the supplied argument names |
+| `PGRST203` | 403 | A `SECURITY DEFINER` function that is not allowlisted |
+| `PGRST204` | 400 | A column named in the query does not exist on the table |
+
+Database failures are mapped separately, by SQLSTATE — an RLS denial surfaces as `403` with a fixed sentence. See the [error reference](/docs/reference/errors/).
+
+Engine internals: [REST engine](/docs/architecture/rest-engine/).
+
+---
+
+## Storage endpoints
+
+Authenticated user file endpoints:
+
+```http
+POST   /api/files/                     # upload file, multipart/form-data field "file"
+POST   /api/files/presign              # get a presigned PUT URL, S3 driver only
+POST   /api/files/:id/finalize         # confirm a presigned upload landed
+GET    /api/files/:id/url              # get a download URL, ?expiresIn=<seconds>
+GET    /api/files/:id/raw              # stream a file
+DELETE /api/files/:id                  # delete a file
+```
+
+The same objects are also addressable by bucket and key, for callers that track
+storage paths rather than file ids:
+
+```http
+GET    /api/files/list/:bucket         # list objects in a bucket
+GET    /api/files/object/:bucket/*     # stream by key
+GET    /api/files/object-url/:bucket/* # download URL by key, ?expiresIn=<seconds>
+GET    /api/files/object-info/:bucket/* # object metadata, no body
+DELETE /api/files/object/:bucket/*     # delete by key
+
+POST   /api/files/copy                 # { bucket, from, to, upsert? }
+POST   /api/files/move                 # { bucket, from, to, upsert? }
+```
+
+`copy` and `move` take both keys in the body rather than the URL: a destination key
+contains slashes too, and two wildcards in one route cannot be told apart.
+
+Bucket public/token endpoints:
+
+```http
+POST   /api/storage/:slug/upload     # bucket-token upload, requires write token
+GET    /api/storage/:slug/files/:id  # public bucket read, or read token for private buckets
+DELETE /api/storage/:slug/files/:id  # requires delete token
+```
+
+`/api/files/*` routes need a caller: a user session, a secret project key (which runs as `service_role`, impersonation
+included), or, when `storage.policies` is on, an anonymous caller that the policies on `storage.files` then decide
+about. Otherwise they answer `401 Storage requires a user session or a secret project API key.` Public bucket reads go
+through `/api/storage/:slug/files/:id`.
+
+Bucket administration with a secret project key (what `client.storage.createBucket()` and its siblings call):
+
+```http
+GET    /api/files/bucket                 # list buckets
+POST   /api/files/bucket                 # create
+GET    /api/files/bucket/:slug           # read one
+PUT    /api/files/bucket/:slug           # update
+DELETE /api/files/bucket/:slug           # delete; refused while it holds objects unless forced
+POST   /api/files/bucket/:slug/empty     # remove every object
+```
+
+Image transformations, with Supabase's paths and limits (`storage.imageTransform`):
+
+```http
+GET /storage/v1/render/image/public/:slug/*          # public bucket
+GET /storage/v1/render/image/authenticated/:bucket/* # same caller rules as /api/files
+GET /storage/v1/render/image/sign/:bucket/*          # signed URL, ?token=
+```
+
+They take `width`, `height`, `resize` (`cover`, `contain`, `fill`), `quality` and `format`; without `format`, WebP is
+negotiated from `Accept`.
+
+Protocol routes, mounted before the body parsers because they stream their own bodies:
+
+```http
+/storage/v1/upload/resumable         # TUS resumable uploads, 6 MB chunks, same caller rules
+/api/admin/storage/upload/resumable  # the same for an operator
+/storage/v1/s3                       # S3 protocol endpoint
+```
+
+### Upload
+
+```http
+POST /api/files/
+Authorization: Bearer <token>
+Content-Type: multipart/form-data
+
+file=<binary>
+visibility=public        # optional: public | private
+bucket=avatars           # optional logical bucket slug
+```
+
+When `bucket` is provided, Motherbase stores the file under that logical bucket, applies bucket visibility and quota rules, and prefixes S3 keys with `<bucket-slug>/`. Legacy uploads without `bucket` keep the visibility-based fallback.
+
+### Admin buckets
+
+```http
+GET    /api/admin/storage/buckets
+POST   /api/admin/storage/buckets
+GET    /api/admin/storage/buckets/:slug
+PATCH  /api/admin/storage/buckets/:slug
+DELETE /api/admin/storage/buckets/:slug?force=true
+GET    /api/admin/storage/buckets/:slug/files
+```
+
+Bucket CORS, access tokens, and webhooks are managed under `/api/admin/storage/buckets/:slug/*`. See [Storage](/docs/platform/storage) for the full bucket workflow.
+
+### Presign
+
+```http
+POST /api/files/presign
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "filename": "photo.jpg",
+  "size": 184320,
+  "mime": "image/jpeg",
+  "visibility": "private",
+  "bucket": "avatars"
+}
+```
+
+Returns `{ "file": { ... }, "uploadUrl": "https://s3.example.com/...?X-Amz-Signature=..." }`
+inside the standard `data` envelope.
+
+Presigning creates a **reservation**, not a finished file. The full flow is three steps:
+
+1. `POST /api/files/presign` → a reservation row plus a signed `PUT` URL.
+2. `PUT` the bytes straight to the returned `uploadUrl`. The server is not in this hop.
+3. `POST /api/files/:id/finalize` → the server `HEAD`s the object to confirm it landed,
+   flips the reservation to a real file, and fires the bucket's `uploaded` webhook.
+
+A reservation that is never finalized is swept by the expired-reservation job, which
+deletes the orphaned object. Skip step 3 and the file never becomes readable.
+
+<Warning>
+Presigned uploads require `STORAGE_DRIVER=s3`. With the default `local` driver the endpoint returns `400 Presigned uploads are not supported with the local storage driver` — upload through `POST /api/files` instead. See [storage pipeline](/docs/architecture/storage-pipeline/).
+</Warning>
+
+---
+
+## Edge functions
+
+```http
+POST /api/edge/:route
+Content-Type: application/json
+
+{ ...payload }
+```
+
+`:route` is configured in **Project Studio → Edge Functions**. Send a user's bearer token or `x-motherbase-edge-token`; anonymous callers reach only a function marked **Public** (or every function, with `EDGE_PUBLIC_INVOKE_ENABLED=true`). Anything else is a `401`. See [Who can call a function](/docs/platform/edge-functions/#who-can-call-a-function).
+
+---
+
+## User endpoints
+
+Require authentication.
+
+```http
+PUT    /api/users/username
+PUT    /api/users/image
+DELETE /api/users/
+```
+
+---
+
+## Device / push notification endpoints
+
+```http
+POST   /api/devices/             # register a push token   — any signed-in user
+DELETE /api/devices/             # unregister a push token — any signed-in user
+
+POST   /api/notifications/send   # send to other users     — ADMIN role only
+POST   /api/notifications/test   # send to yourself        — any signed-in user
+```
+
+`/api/notifications/send` is guarded by `requireRole(ADMIN)`, not just by a session:
+fan-out to arbitrary users is an operator action. Use `/test` from an app account.
+
+---
+
+## Supabase import
+
+Admin-only endpoint used by the CLI migration command.
+
+```http
+POST /api/admin/import/supabase
+Content-Type: application/json
+```
+
+Six sections, three credentials. The connection string alone carries the `public` schema, table
+data, RLS policies, email/password users and the bucket catalog. A `service_role` key adds the
+storage objects' bytes. A Supabase Management API token (`sbp_…`) adds edge functions and project
+secrets.
+
+Dry-run preview:
+
+```json
+{
+  "connectionString": "postgresql://...",
+  "serviceRoleKey": "eyJ...",
+  "managementToken": "sbp_...",
+  "include": {
+    "schema": true, "data": true, "auth": true,
+    "storage": true, "edgeFunctions": true, "secrets": true
+  },
+  "preview": true
+}
+```
+
+Import: drop `preview` and send `"confirm": "IMPORT"` instead.
+
+Optional `projectRef` overrides the ref derived from the connection string, and `projectUrl`
+overrides `https://<ref>.supabase.co` for a self-hosted Supabase.
+
+The preview answers with `tables`, `policies`, `authUsers`, `buckets`, `edgeFunctions`, `secrets`
+and `notes`. The real run answers with a per-section summary and a `status` of `success`,
+`partial` or `failed`.
+
+Every section is independent: a missing credential downgrades that section to a note rather than
+failing the import, and a section that fails never takes another down. None of the three
+credentials is logged, written to disk, or echoed back in a summary, a note or an error.
+
+See [Migrate from Supabase](/docs/getting-started/migrate-from-supabase).
+
+---
+
+## Admin routes
+
+Admin routes under `/api/admin/*` are for Platform Console and Project Studio. They are not client-app APIs and may be blocked publicly in production by Traefik or an IP allowlist.
+
+---
+
+## Health
+
+```http
+GET /api/health-check
+```
+
+Returns `200` with `{ "message": "Server is running!", "status": 200, "db": "connected" }`
+when the API and database are both reachable, and `503` with
+`{ "message": "Database unavailable", "status": 503, "db": "disconnected" }` when the
+`SELECT 1` probe fails. It is unauthenticated, so it works as a load-balancer probe as-is.
+
+---
+
+## OpenAPI
+
+Swagger UI is available at `/api/docs`. It covers core endpoints; dynamic REST table routes depend on project tables and policies. See [OpenAPI spec](/docs/reference/openapi/) for what the document contains and how to regenerate it.
+
+```bash
+npm run swagger
+```

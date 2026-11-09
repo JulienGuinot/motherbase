@@ -1,0 +1,137 @@
+---
+title: "Security Model"
+description: "Trust boundaries, credentials, the two database connection planes, RLS claim propagation, and the guards that back them."
+order: 5
+---
+
+## Trust boundaries
+
+| Boundary | Who crosses it | How it is checked |
+|---|---|---|
+| Internet → Traefik | Anyone | TLS termination, host routing (`deploy/traefik`) |
+| Traefik → project API | Proxy only | `TRUST_PROXY` declares how many hops to trust for `req.ip` |
+| Console → project API | The Console proxy | `X-Platform-Token` compared to `PLATFORM_SERVICE_TOKEN` in constant time |
+| Client → project API | End users, machines | Better Auth session (cookie or bearer), API key, or bucket token |
+| API → Postgres (control plane) | Prisma, as owner | Platform tables; RLS not in play |
+| API → Postgres (data plane) | `RlsPool`, as `anon` / `authenticated` / `service_role` | Postgres RLS policies, bypassed only by `service_role` |
+
+## Credentials
+
+| Credential | Where it comes from | Grants |
+|---|---|---|
+| `JWT_SECRET` | env, ≥32 chars, boot-validated | Signs project tokens |
+| `PLATFORM_SERVICE_TOKEN` | env, ≥32 chars when set | **Synthetic ADMIN** on `/api/admin`. Absent = single-instance mode |
+| `CONFIG_ENCRYPTION_KEY` | env, base64 32 bytes | Encrypts secret settings at rest |
+| `EDGE_INVOKE_TOKEN` | env | Public edge invocation without a session |
+| Better Auth session | Sign-in | The user's own role and RLS identity |
+| API key | Auth API (`ApiKey` table) | Machine access, optionally rate-limited and expiring |
+| Bucket token | Storage admin | `read` / `write` / `delete` on one bucket |
+
+<Warning>
+`PLATFORM_SERVICE_TOKEN` is an admin bearer credential. A request presenting a **wrong** `X-Platform-Token` is rejected outright — it never falls through to session auth (`middlewares/platform-admin.middleware.ts`). Compare that with leaving the header off entirely, which takes the normal session path.
+</Warning>
+
+All secret comparisons go through `lib/safe-equal.ts`, which wraps `crypto.timingSafeEqual`. Plain `===` short-circuits on the first differing byte and leaks a prefix-length oracle to anyone who can time responses.
+
+## Two connection planes
+
+This is the core of the security model.
+
+```text
+Prisma (owner role)          RlsPool (anon / authenticated / service_role)
+  platform + auth + storage    public schema, your tables
+  no RLS in the way            every query inside a transaction with RLS on
+```
+
+`lib/rls-pool.ts` is a dedicated `pg` pool (max 10). Every call runs inside a transaction that:
+
+1. `BEGIN`
+2. `SET LOCAL ROLE <anon|authenticated|service_role>` — the role name is validated against an allowlist because `SET ROLE` cannot be parameterised
+3. `SELECT set_config('request.jwt.claims', $1, true)` — claims **are** bound as a parameter
+4. optionally `set_config('statement_timeout', …, true)`
+5. run the caller's work, then `COMMIT` (or `ROLLBACK` when `rollback: true`)
+
+Claims are built by `lib/rls-claims.ts`:
+
+```ts
+// authenticated
+{ "sub": "<user id>", "role": "authenticated", "user_role": "<app role or null>" }
+// anonymous
+{ "role": "anon" }
+// secret API key: BYPASSRLS. `sub` is kept when a user token rode along, so a
+// trigger or SECURITY INVOKER view reading auth.uid() still sees on whose behalf
+// the call was made. It changes no access decision.
+{ "sub": "<user id or null>", "role": "service_role", "user_role": "<app role or null>" }
+```
+
+Your policies read them with `current_setting('request.jwt.claims', true)::json`. See [Row Level Security](/docs/platform/rls/).
+
+The `rollback: true` mode exists for the RLS simulator: it runs operator-supplied SQL and must not be able to leave a trace, and that guarantee must not depend on the static read-only analysis in front of it being complete.
+
+## Identity is re-read, never trusted from the token
+
+Both the custom rate-limit identity resolver (`app.ts`) and the auth middleware reload the user from the database and check `status === 'active'` before using a role. A token carrying a stale role, or belonging to a since-deleted user, does not grant anything.
+
+## Which data-plane role a request runs as
+
+One function decides, and it reads the resolved project API key and nothing else.
+The flag it sets travels on the caller object every data-plane entry point already
+threads down to the RLS context, so it cannot be honoured on one route and dropped
+on another.
+
+| Presented | Postgres role |
+|---|---|
+| Nothing, or a publishable key | `anon` |
+| A user access token, with or without a publishable key | `authenticated` |
+| A secret key | `service_role` (`BYPASSRLS`) |
+
+The caller is projected field by field rather than spread from the user row, so a
+column named `serviceRole` appearing on `users` some day cannot hand every
+signed-in user `BYPASSRLS`.
+
+`BYPASSRLS` does not bypass `GRANT`: `service_role` holds the same coarse
+privileges on `public` that `anon` and `authenticated` hold, and nothing on the
+`auth`, `storage` or `platform` schemas. The REST block-list and the
+`SECURITY DEFINER` allowlist apply to it unchanged.
+
+A secret key opens the data plane and `/api/auth/admin/*`. It does **not** open the
+Studio admin API, which runs SQL, DDL, backups and settings changes and keeps its
+own operator authentication and capability model. This is narrower than Supabase's
+`service_role` on purpose: one credential that both bypasses RLS and drops tables
+is a much worse thing to leak. See [API Keys](/docs/platform/api-keys/).
+
+## Roles
+
+`UserRole` is `USER` or `ADMIN` (`apps/server/prisma/schema.prisma`). `requireRole(...)` gates by it, `adminGuard` requires `ADMIN` (or the platform token). Organization membership roles are a separate, string-typed dimension on `Member` handled by Better Auth.
+
+## Error masking
+
+In production, unknown errors never expose internals: `normalizeApiError` returns a generic message unless the error is an `ApplicationError` marked `expose`. Database constraint failures are translated to a fixed sentence keyed off the SQLSTATE — no schema name, column value, or SQL text reaches the client. See [error reference](/docs/reference/errors/).
+
+## Observability of security events
+
+| Mechanism | File | What it holds |
+|---|---|---|
+| `LogBuffer` | `lib/log-buffer.ts` | In-memory ring buffer, size `CONSOLE_LOG_BUFFER_SIZE` (default 500) |
+| `logActivity` | `lib/activity-log.ts` | Non-HTTP sources: `edge`, `job`, `webhook`, `auth`, `storage`, `shield`, `realtime`. Never throws — a failed log write must not fail the operation it describes |
+| `shieldTelemetry` | `lib/shield-telemetry.ts` | Per-route metrics (count, errors, slow, avg, p95), rate-limit hits, and abuse candidates keyed by user or IP |
+
+## Storage exposure
+
+Only the public bucket is served statically (`app.use('/'+S3_PUBLIC_BUCKET, express.static(...))`). Private objects live in a sibling directory and are reachable **only** through the authenticated file endpoint — there is no guessable static URL for them.
+
+Authorization on top of that split is either the built-in rule (public, or owner)
+or PostgreSQL policies on `storage.files`, decided by the `storage.policies`
+setting. When policies are on, every check runs the real statement through
+`RlsPool` under the caller's role; writes are evaluated by attempting them and
+rolling back, because `WITH CHECK` cannot be evaluated any other way without
+reimplementing the expression. A policy violation (SQLSTATE `42501`) becomes a
+403; any other error is re-thrown, so a broken migration surfaces as a 500 rather
+than hiding behind a permission denial. The physical bucket split stays in place
+either way, as defence in depth. See [Storage](/docs/platform/storage/).
+
+## Fail-fast boot checks
+
+- Invalid or missing environment: every offending key is printed, then `exit(1)`.
+- Production without a CORS allowlist: refuses to boot.
+- Database unreachable at startup: the process does not advertise readiness; `connectDB` exits on failure.

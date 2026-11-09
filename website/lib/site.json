@@ -1,0 +1,7 @@
+{
+  "url": "https://www.motherbase.site",
+  "repo": "https://github.com/JulienGuinot/motherbase",
+  "repoName": "motherbase",
+  "clientPackage": "@motherbase/client",
+  "cliPackage": "@motherbase/cli"
+}

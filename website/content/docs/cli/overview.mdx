@@ -1,0 +1,160 @@
+---
+title: "CLI Overview"
+description: "Use the Motherbase CLI to operate the Platform Console, linked projects, local stacks, and admin resources."
+order: 1
+---
+
+`@motherbase/cli` is the operator CLI for Motherbase.
+
+It is designed as a Supabase-style terminal surface for the same things exposed by the Platform Console and Project Studio: projects, database, RLS, auth users, storage buckets, edge functions, secrets, realtime, webhooks, cron, settings, diagnostics, backups, and local self-host workflows.
+
+```bash
+npm install -g @motherbase/cli
+motherbase --help
+```
+
+<Note>
+The CLI talks to two surfaces: the **Platform Console** for account and project lifecycle commands, then a **linked project** for resource commands through the Console proxy. Recent resource commands also cover branches, domains, network/SSL policy, JWT key generation, queues, Vault, Wrappers and index-advisor inspection.
+</Note>
+
+## Connection model
+
+1. Log in to a Console.
+2. Link the current directory to a project.
+3. Run project commands from that directory.
+
+```bash
+motherbase login --url https://console.example.com
+motherbase projects list
+motherbase link todo
+motherbase status
+motherbase db tables
+```
+
+The same command tree falls back to a direct single-project mode for local
+automation. It applies only when the context has no Console token *and* no linked
+project:
+
+```bash
+MOTHERBASE_URL=http://localhost:5001 \
+MOTHERBASE_ADMIN_TOKEN=... \
+motherbase users list
+```
+
+## What it controls
+
+Every command and subcommand the CLI registers (`packages/cli/src/commands`), in registry order:
+
+{/* BEGIN GENERATED CLI OVERVIEW */}
+
+| Command | What it does | Subcommands |
+|---|---|---|
+| `login` | Log in to a Motherbase Console (email/password → session token) | — |
+| `logout` | Remove the stored token for the current (or --url) console | — |
+| `whoami` | Show the current console, account and platform info | — |
+| `link` | Link the current directory to a project (writes ./.motherbase/config.json) | — |
+| `unlink` | Remove the project link from the current directory | — |
+| `status` | Show connection status: console, link, and a project health probe | — |
+| `orgs` | Manage organizations on the Platform Console | `list`, `create` |
+| `projects` | Manage projects on the Platform Console | `list`, `create`, `delete`, `logs`, `info`, `limits`, `start`, `stop`, `restart`, `update`, `rebuild`, `api-keys` |
+| `branches` | Manage preview branches of the linked project | `create`, `list`, `get`, `update`, `delete`, `pause`, `unpause`, `reset`, `merge`, `rebase`, `switch` |
+| `domains` | Custom domain for the linked project's API | `create`, `get`, `reverify`, `activate`, `delete` |
+| `vanity-subdomains` | Vanity subdomain under the platform domain | `get`, `check-availability`, `activate`, `delete` |
+| `init` | Scaffold a runnable local stack (compose file, .env, generated secrets) | — |
+| `start` | Start the local docker compose stack | — |
+| `stop` | Stop the local docker compose stack | — |
+| `deploy` | Rebuild and start the local docker compose stack | — |
+| `logs` | Follow logs from the local docker compose stack | — |
+| `db` | Database: tables, SQL, dumps, restores, indexes, types, roles, publications | `tables`, `sql`, `backup`, `restore`, `backups`, `push`, `pull`, `diff`, `reset`, `dump`, `seed`, `indexes`, `types`, `roles`, `column-privileges`, `publications`, `cron`, `lint` |
+| `backups` | List and restore database backups | `list`, `restore` |
+| `migrations` |  | `new`, `list`, `diff`, `get`, `create`, `apply`, `rollback`, `up`, `down`, `repair`, `squash`, `fetch` |
+| `migration` | Schema migrations: local files and the remote history | `new`, `list`, `diff`, `get`, `create`, `apply`, `rollback`, `up`, `down`, `repair`, `squash`, `fetch` |
+| `import` | Import a Supabase project (schema, data, auth, storage, edge functions, secrets) | — |
+| `test` | Run database tests (pgTAP) | `db` |
+| `postgres-config` | Postgres configuration (statement_timeout, work_mem, max_connections, ...) | `get`, `update`, `delete` |
+| `rls` | Row-level security (tables, policies, presets, simulator, lint) | `list`, `enable`, `disable`, `policy`, `preset`, `simulate`, `lint` |
+| `users` | Project auth users | `list`, `get`, `create`, `update`, `delete`, `reset-password`, `promote`, `demote`, `revoke-sessions`, `deactivate`, `impersonate`, `audit` |
+| `storage` | Storage buckets and objects (ss:///bucket/key paths) | `buckets`, `ls`, `cp`, `mv`, `rm` |
+| `functions` | Edge functions (repo files, deploy, invoke, logs) | `list`, `get`, `new`, `deploy`, `pull`, `serve`, `delete`, `invoke`, `logs`, `download` |
+| `secrets` | Edge function secrets | `list`, `set`, `unset` |
+| `keys` | Project API keys (publishable and secret) | `list`, `create`, `revoke` |
+| `realtime` | Realtime configuration and channels | `config`, `channels` |
+| `webhooks` | Outgoing webhooks | `list`, `create`, `delete`, `test` |
+| `cron` | Scheduled jobs (pg_cron) | `list`, `create`, `delete`, `toggle` |
+| `queues` | Message queues (pgmq) | `list`, `enable`, `expose`, `create`, `drop`, `send`, `read`, `archive`, `purge` |
+| `vault` | Encrypted secrets (Vault) | `list`, `enable`, `create`, `update`, `reveal`, `delete` |
+| `wrappers` | Foreign data wrappers (postgres_fdw, file_fdw) | `list`, `enable`, `create-server`, `drop-server`, `credentials`, `import`, `create-table`, `drop-table` |
+| `config` | Project settings groups | `list`, `get`, `set` |
+| `inspect` | Diagnostics: database inspection, report, logs, stats, index-advisor, advisor, shield | `db`, `report`, `logs`, `index-advisor`, `stats`, `performance`, `requests`, `advisor`, `shield` |
+| `snippets` | SQL Editor snippets | `list`, `download` |
+| `network-restrictions` | IP ranges allowed to connect to the database directly | `get`, `update` |
+| `ssl-enforcement` | Require TLS for direct database connections | `get`, `update` |
+| `gen` | Generate code from the live schema, and signing keys, tokens and secrets | `types`, `signing-key`, `bearer-jwt`, `keys` |
+| `mcp` | Serve the linked project and console to an AI agent over MCP (stdio) | — |
+| `completion` | Generate the autocompletion script for a shell | — |
+| `migrate` | Port an application from Supabase | `codemod` |
+
+{/* END GENERATED CLI OVERVIEW */}
+
+Every subcommand, with its flags, is in the [command reference](/docs/cli/commands/), generated from the CLI's own registry.
+
+## Config files
+
+Global credentials are stored outside your project:
+
+```text
+~/.motherbase/config.json
+```
+
+The project link is stored locally:
+
+```text
+.motherbase/config.json
+```
+
+Example local link:
+
+```json
+{
+  "consoleUrl": "https://console.example.com",
+  "projectId": "todo",
+  "projectName": "todo"
+}
+```
+
+The local file contains routing metadata only. Do not put tokens in it.
+
+## CI and non-interactive use
+
+Use Console mode when CI should operate a project through the Platform Console:
+
+```bash
+MOTHERBASE_CONSOLE_URL=https://console.example.com \
+MOTHERBASE_TOKEN=mbp_... \
+MOTHERBASE_PROJECT=todo \
+motherbase db sql -e "select 1"
+```
+
+Use direct mode when CI points straight at one project API:
+
+```bash
+MOTHERBASE_URL=https://todo.example.com \
+MOTHERBASE_ADMIN_TOKEN=... \
+motherbase db tables
+```
+
+Each value resolves in that order: explicit flag, environment variable, the local
+link file, then `~/.motherbase/config.json`. Direct mode is chosen only when
+`MOTHERBASE_URL` and `MOTHERBASE_ADMIN_TOKEN` are both set and Console mode has no
+token or no project.
+
+## Supabase migration
+
+The CLI includes a first-class Supabase import path:
+
+```bash
+motherbase import --from-supabase "$SUPABASE_DB_URL" --preview --json
+motherbase import --from-supabase "$SUPABASE_DB_URL" --yes
+```
+
+The database connection imports schema, data, RLS policies, email/password users, and bucket names. Add `--service-role-key` to copy storage files, and `--management-token` to import edge functions and project secrets. See [Migrate from Supabase](/docs/getting-started/migrate-from-supabase).

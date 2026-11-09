@@ -1,0 +1,94 @@
+# Traefik reverse proxy: runs ONCE per VPS, in front of every project.
+#
+# Usage on the VPS:
+#   cp .env.example .env && edit .env
+#   docker compose up -d
+#
+# Each project's stack joins the external `traefik_proxy` network and exposes
+# itself via Docker labels (see ../project/docker-compose.yml).
+
+services:
+  # Rewrites old Docker API versions (e.g. /v1.24/) to /v1.45/ before
+  # forwarding to the Unix socket. Required for Docker 29+ which dropped
+  # support for API < 1.40, while Traefik's embedded client defaults to 1.24.
+  docker-proxy:
+    image: ${TRAEFIK_DOCKER_PROXY_IMAGE:?TRAEFIK_DOCKER_PROXY_IMAGE must be pinned by digest in production}
+    container_name: docker-proxy
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./docker-proxy.conf:/etc/nginx/nginx.conf:ro
+    networks:
+      - traefik_internal
+
+  traefik:
+    image: ${TRAEFIK_IMAGE:?TRAEFIK_IMAGE must be pinned by digest in production}
+    container_name: traefik
+    restart: unless-stopped
+    depends_on:
+      - docker-proxy
+    command:
+      # Dashboard (protected by basic auth via labels below).
+      - --api.dashboard=true
+
+      # Docker provider: via version-rewriting proxy (see docker-proxy service).
+      - --providers.docker=true
+      - --providers.docker.exposedByDefault=false
+      - --providers.docker.network=traefik_proxy
+      - --providers.docker.endpoint=http://docker-proxy:2375
+
+      # HTTP entrypoint redirects to HTTPS.
+      - --entryPoints.web.address=:80
+      - --entryPoints.web.http.redirections.entryPoint.to=websecure
+      - --entryPoints.web.http.redirections.entryPoint.scheme=https
+      - --entryPoints.web.http.redirections.entryPoint.permanent=true
+
+      # HTTPS entrypoint with automatic Let's Encrypt certs.
+      - --entryPoints.websecure.address=:443
+      - --certificatesResolvers.letsencrypt.acme.email=${ACME_EMAIL}
+      - --certificatesResolvers.letsencrypt.acme.storage=/acme/acme.json
+      - --certificatesResolvers.letsencrypt.acme.httpChallenge.entryPoint=web
+
+      # DNS-01 challenge resolver: used for wildcard certs when project domains are
+      # 3+ labels deep (e.g. foo.test.example.com). Set DNS_CHALLENGE_PROVIDER and
+      # the matching provider env vars (GODADDY_API_KEY / GODADDY_API_SECRET, etc.)
+      # in deploy/traefik/.env to activate. Projects select it via CERT_RESOLVER=letsencrypt-dns.
+      - --certificatesResolvers.letsencrypt-dns.acme.email=${ACME_EMAIL}
+      - --certificatesResolvers.letsencrypt-dns.acme.storage=/acme/acme.json
+      - --certificatesResolvers.letsencrypt-dns.acme.dnsChallenge.provider=${DNS_CHALLENGE_PROVIDER:-godaddy}
+      - --certificatesResolvers.letsencrypt-dns.acme.dnsChallenge.delayBeforeCheck=30
+
+      # Access logs (helpful when debugging routing).
+      - --accesslog=true
+      - --log.level=INFO
+    ports:
+      - '80:80'
+      - '443:443'
+    environment:
+      # DNS provider credentials for the letsencrypt-dns resolver.
+      # Only needed when DNS_CHALLENGE_PROVIDER is set (deep-subdomain setups).
+      - GODADDY_API_KEY=${GODADDY_API_KEY:-}
+      - GODADDY_API_SECRET=${GODADDY_API_SECRET:-}
+    volumes:
+      - ./acme:/acme
+    networks:
+      - traefik_proxy
+      - traefik_internal
+    labels:
+      - traefik.enable=true
+      # Dashboard router: only enabled if TRAEFIK_DASHBOARD_HOST is set.
+      - traefik.http.routers.traefik.rule=Host(`${TRAEFIK_DASHBOARD_HOST:-traefik.invalid}`)
+      - traefik.http.routers.traefik.entrypoints=websecure
+      - traefik.http.routers.traefik.tls.certresolver=letsencrypt
+      - traefik.http.routers.traefik.service=api@internal
+      - traefik.http.routers.traefik.middlewares=traefik-auth
+      - traefik.http.middlewares.traefik-auth.basicauth.users=${TRAEFIK_DASHBOARD_AUTH:-admin:$$apr1$$invalid}
+
+networks:
+  # Shared bridge created by setup.sh. Project stacks attach to it too.
+  traefik_proxy:
+    external: true
+    name: traefik_proxy
+  # Internal network: docker-proxy ↔ traefik only, not exposed externally.
+  traefik_internal:
+    internal: true

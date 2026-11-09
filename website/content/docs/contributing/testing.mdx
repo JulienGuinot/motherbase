@@ -1,0 +1,115 @@
+---
+title: "Testing & CI"
+description: "How tests are organized per workspace, how to run one, and exactly what CI enforces."
+order: 3
+---
+
+## Per-workspace test setup
+
+| Workspace | Runner | Notes |
+|---|---|---|
+| `apps/server` | Vitest, `environment: node` | `tests/**/*.test.ts`, setup `vitest.setup.ts` |
+| `apps/studio` | Vitest, `environment: jsdom` | `globals: true`, `clearMocks: true`, `@` → `src` alias |
+| `packages/client` | `vitest run --typecheck` | Type-level assertions run with the tests |
+| `packages/ssr`, `packages/ai` | `vitest run` | |
+| `packages/cli` | `node --test` | Node's built-in runner |
+
+```bash
+npm test                       # turbo run test (builds first)
+npm test -w @motherbase/server
+npm test -w studio
+npm run test:watch -w @motherbase/server
+npm test -w @motherbase/server -- <name-filter>
+```
+
+`turbo.json` makes `test` depend on `build`, so tests always run against built packages rather than stale `dist` output.
+
+## Server test conventions
+
+`apps/server/tests` holds ~190 files, split by suffix:
+
+| Suffix | Meaning |
+|---|---|
+| `*.unit.test.ts` | No external services |
+| `*.integration.test.ts` | Needs a real Postgres |
+| `*.test.ts` | Service-level tests |
+| `*.sh` | Smoke tests run against a deployed VPS |
+
+Some import tests skip themselves unless `RUN_IMPORT_VERIFICATION_DB_TESTS=1` is set with a real database available — CI sets it.
+
+Extra suites:
+
+```bash
+npm run test:contracts -w @motherbase/server   # SDK ↔ server contract
+npm test -w @motherbase/server -- sdk-contract # regenerates the compatibility matrix
+```
+
+## Studio mocks
+
+`apps/studio/src/mocks` (`browser.ts`, `handlers.ts`, `fixtures.ts`) backs both the component tests and `npm run studio:mock`, so UI work needs no backend.
+
+## CI
+
+`.github/workflows/ci.yml`, on push to `master`, on every PR, and manually.
+
+The `ci` job runs on `ubuntu-24.04` with a `postgres:16.14-alpine3.23` service and a 15-minute timeout:
+
+1. **Validate deployment Compose files** — `docker compose config --quiet` on `deploy/console/docker-compose.yml`, `deploy/docker-compose.prod.yml` and `deploy/traefik/docker-compose.yml`, with placeholder secrets. A malformed compose file fails before anything is built.
+2. `npm ci`
+3. `npm audit --omit=dev --audit-level=critical` — a critical advisory in a production dependency fails the run
+4. `npm run prisma:generate`
+5. `npm run prisma:deploy`
+6. `npm run lint` — all nine workspaces
+7. `npm run build`
+8. `deno test --allow-all` in `deploy/edge-runtime` — the edge sidecar's own tests
+9. `npm test`
+10. `npm run test:contracts -w @motherbase/server`
+11. Regenerate the SDK compatibility matrix and **fail on drift** in `packages/client/COMPATIBILITY.md`.
+
+<Note>
+Step 11 exists because the supabase-js compatibility matrix is generated, never hand-written. CI regenerates it against its own Postgres and fails if the committed copy differs — a matrix that can lie is exactly what this guards against. If it fails, run `npm run test -w apps/server -- sdk-contract` and commit the result.
+</Note>
+
+## Runtime job
+
+`runtime` ("Production images and restore drill") runs after `ci`, with a 30-minute timeout:
+
+1. On a release tag, `scripts/release-notes.cjs` first checks that the tag matches the root `package.json` version
+   and that `CHANGELOG.md` has a section for it, before anything is built.
+2. `deploy/build-images.sh` builds the production images.
+3. `deploy/verify-runtime.sh` boots the production API from them and verifies a backup restoration.
+4. On any push, it publishes the `api`, `console`, `postgres`, `edge-runtime` and `orchestrator` images to GHCR as
+   `ghcr.io/<owner>/motherbase-<name>:sha-<commit>`, after the restore drill, so an image that cannot boot is never
+   offered. These are what `setup.sh` pulls instead of building.
+5. On a `vX.Y.Z` tag only, it also tags those images `vX.Y.Z` and `latest`, builds the install bundle
+   (`motherbase-deploy.tar.gz`, holding `VERSION`, `setup.sh`, `deploy/` and the orchestrator Dockerfile) and its
+   `.sha256`, signs a build provenance attestation for the bundle, and creates the GitHub release with both files and
+   the changelog section as notes. `install.sh` and `deploy/update.sh` download from `releases/latest`, so only a
+   release changes what an install gets.
+
+Its concurrency group is per ref with `cancel-in-progress: false`, so two pushes never interleave image and release uploads.
+
+### Cutting a release
+
+1. Move the **Unreleased** entries of `CHANGELOG.md` under `## [X.Y.Z] - <date>`, and set `"version": "X.Y.Z"` in the
+   root `package.json`.
+2. Merge that to `master`, then tag the merged commit and push the tag:
+   `git tag vX.Y.Z && git push origin vX.Y.Z`.
+3. Anyone can check a downloaded bundle came from this workflow:
+   `gh attestation verify motherbase-deploy.tar.gz --repo JulienGuinot/motherbase`.
+
+## Deploy job
+
+`deploy-vps` runs only after `ci` and `runtime`, only on a `vX.Y.Z` release tag (a push to `master` is tested and
+never deployed), in the `production` environment, with a 25-minute timeout. It:
+
+- validates the release configuration first (`deploy/validate-release-env.cjs`): `VPS_HOST`, `VPS_SSH_KEY` and
+  `VPS_KNOWN_HOSTS` are required, and `VPS_USER` must be a non-root account;
+- SSHes in with strict host-key checking and runs `deploy/deploy-release.sh` from the tested checkout: it refuses a
+  checkout with files owned by another user, holds a deploy lock, refuses local changes or a missing `.env`, refuses
+  a tag that does not point at the tested commit, refuses when a newer release tag exists (so a queued old job cannot
+  roll back a newer release), detaches onto that exact commit and runs `./setup.sh --yes --skip-dns-check`;
+- runs `apps/server/tests/vps-smoke.sh` and `apps/server/tests/critical-flows-smoke.sh` when the smoke-test variables
+  are configured, and warns loudly when they are not, since that deploy is then not verified.
+
+Concurrency is one `deploy-vps-production` group with `cancel-in-progress: false`, so two deploys never interleave.

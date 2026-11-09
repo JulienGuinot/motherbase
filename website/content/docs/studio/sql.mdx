@@ -1,0 +1,88 @@
+---
+title: "SQL Editor"
+description: "Running SQL from Studio, the read-only mode and how it resists bypasses, and the audit trail."
+order: 3
+---
+
+Route: `/p/:id/sql`. Source: `apps/studio/src/features/sql`, backed by `apps/server/services/admin/sql.service.ts`.
+
+## The workspace
+
+| Component | Role |
+|---|---|
+| `SqlWorkspace` | Editor, run action, result grid |
+| `PaneTab` | Multiple query panes |
+| `SqlLibraryPanel` | Saved snippets: Studio content of type `sql` (`/admin/content`), in folders (`GET`/`POST /admin/content-folders`, `PATCH`/`DELETE /admin/content-folders/:id`). A snippet is its owner's, or shared read-only with the project |
+| `Cell` | Result cell rendering |
+
+Two calls:
+
+```text
+GET  /admin/schema/tables[?schema=…]   schema browser
+POST /admin/sql   { sql }              run
+```
+
+## Enabling it
+
+Two switches, read together as a `SqlMode`:
+
+| Switch | Where | Effect |
+|---|---|---|
+| `CONSOLE_SQL_ENABLED` | environment | `false` → every run returns `403 SQL console is disabled` |
+| **Allow writes from the SQL editor** (`database.sqlEditor`) | **Database → Settings → SQL editor** | on (default) → the editor runs anything; off → only read statements are accepted |
+
+Projects created by the Console ship with `CONSOLE_SQL_ENABLED=true`, and writes are allowed until someone turns
+them off. When they are off, a **Read-only** badge next to **Run** links to the setting. Turning it off or on needs
+the `settings.write` capability, so a developer who can run SQL cannot grant themselves writes.
+
+The setting replaces the former `CONSOLE_SQL_READONLY` environment variable, which is no longer read.
+
+## What counts as a read
+
+`classifyStatement` strips block and line comments, then looks at the first keyword. `SELECT`, `WITH`, `EXPLAIN`, `SHOW`, `VALUES` and `TABLE` are reads; everything else is a write.
+
+That alone is not enough, so `isDisguisedWrite` rejects the classic bypasses on top:
+
+```sql
+-- rejected in read-only mode
+WITH gone AS (DELETE FROM todos RETURNING *) SELECT * FROM gone;
+EXPLAIN ANALYZE INSERT INTO todos …;
+```
+
+The rule: a leading `SELECT`/`SHOW`/`VALUES`/`TABLE` is safe, but a `WITH` or `EXPLAIN` statement is scanned for `INSERT|UPDATE|DELETE|MERGE|TRUNCATE|DROP|ALTER|CREATE|GRANT|REVOKE|COPY|CALL|DO|REINDEX|VACUUM|REFRESH|SET|RESET|LOCK|SELECT … INTO`, and `EXPLAIN ANALYZE` is refused outright because it executes the plan. String literals and quoted identifiers are stripped before that scan, so a row containing the word `delete` does not trip it.
+
+Batches are split on `;` and **every** statement is checked — one write in a batch of reads fails the whole batch with `403 Only read statements are allowed: the SQL editor is read-only`.
+
+<Warning>
+In read-only mode the batch also runs inside a Postgres `READ ONLY` transaction, so a write that slips past the
+static check is refused by the database itself. The AI assistant's queries always take that path
+(`/api/admin/sql/readonly`), whatever the setting says — see [AI assistant](/docs/platform/ai-assistant/). Either way
+the editor connects as the owner role: for a genuinely unprivileged path, give people a role without write grants.
+</Warning>
+
+## Transaction control is skipped
+
+Each statement of a batch runs on its own, on whichever pooled connection the server hands
+out. A typed `BEGIN` would therefore open a transaction on one connection and return it to
+the pool still open, and after its first error every unrelated query drawing that connection
+would fail with `25P02`. So `BEGIN`, `START TRANSACTION`, `COMMIT`, `END`, `ABORT` and
+`ROLLBACK` are dropped from the batch before it runs, and the response carries the warning
+*BEGIN, COMMIT and ROLLBACK were skipped: the editor runs each statement on its own.* A batch
+made only of those answers `400` with the same sentence. `SAVEPOINT` and `ROLLBACK TO` are
+kept. For an atomic change, write a migration (see [Git migrations](/docs/platform/git-migrations/)).
+
+Failures keep Postgres's own `ERROR` / `DETAIL` / `HINT` (see
+[SQL editor hints](/docs/reference/errors/#sql-editor-hints)), and their status follows the
+SQLSTATE: creating a column, table, schema or object that already exists is a `409`.
+
+## After a write
+
+Successful DDL runs through `schema-ddl.ts` and invalidates the REST catalog (`services/rest-api/catalog/`), so a table created here is immediately visible to the auto-generated REST API without a restart.
+
+The response carries `wrote: true` when any statement of the batch wrote, even if the last one was a read. Studio
+then marks every cached screen stale, so a function, type, index, policy, role, grant, publication or row created
+here shows up on its page without a reload. The AI assistant does the same after a turn that ran tools.
+
+## Audit
+
+Every statement is written to the shared log buffer with `source: 'sql'` (`SqlService.audit`), which is why SQL activity appears in **Logs** even though the request logger deliberately skips `/api/admin/*`. See [Observability](/docs/platform/observability/).

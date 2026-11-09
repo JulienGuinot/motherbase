@@ -1,0 +1,343 @@
+name: CI/CD
+
+# A push to master is tested and publishes per-commit images. A vX.Y.Z tag is a
+# release: versioned images, the install bundle, and the production deploy.
+on:
+  push:
+    branches: [master]
+    tags: ['v*.*.*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    name: Build and test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    services:
+      postgres:
+        image: postgres:16.14-alpine3.23
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: app
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/app?schema=public
+      JWT_SECRET: test-secret-at-least-32-characters-long
+      # The import tests that need a real server (dump preamble compatibility,
+      # post-import verification) skip themselves without this. The service above
+      # is the same Postgres a project runs, which is the whole point of them.
+      RUN_IMPORT_VERIFICATION_DB_TESTS: '1'
+
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          # The runtime images (Dockerfile, deploy/deps.Dockerfile) are node:22,
+          # so CI runs 22: a green build on a Node the deploy never runs proves
+          # nothing about the deploy.
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      # Edge functions run in the Deno sidecar (deploy/edge-runtime), and the
+      # server test suite starts one: same major as deploy/edge-runtime.Dockerfile.
+      - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
+        with:
+          deno-version: v2.9.x
+
+      - name: Validate deployment Compose files
+        env:
+          CONSOLE_JWT_SECRET: ci-console-secret-at-least-32-characters
+          CONSOLE_ADMIN_EMAIL: admin@example.com
+          CONSOLE_ADMIN_PASSWORD_HASH_B64: Y2ktaGFzaA==
+          CONSOLE_DOMAIN: console.example.com
+          ORCHESTRATION_SECRET: ci-orchestration-secret-at-least-32-characters
+          MINIO_IMAGE: alpine/minio@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          MINIO_MC_IMAGE: minio/mc@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          DOCKER_CLI_IMAGE: docker@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          TRAEFIK_IMAGE: traefik@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          TRAEFIK_DOCKER_PROXY_IMAGE: nginx@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          COMPOSE_PROJECT_NAME: ci-project
+          POSTGRES_PASSWORD: ci-postgres
+          MINIO_ROOT_USER: ci-minio
+          MINIO_ROOT_PASSWORD: ci-minio-password
+          JWT_SECRET: ci-jwt-secret
+          CONFIG_ENCRYPTION_KEY: ci-encryption-key
+          PLATFORM_SERVICE_TOKEN: ci-platform-token
+          EDGE_RUNTIME_TOKEN: ci-edge-runtime-token
+          PROJECT_DOMAIN: api.example.com
+          STORAGE_DOMAIN: storage.example.com
+        run: |
+          docker compose -f deploy/console/docker-compose.yml config --quiet
+          docker compose -f deploy/docker-compose.prod.yml config --quiet
+          docker compose -f deploy/traefik/docker-compose.yml config --quiet
+
+      - name: Install workspace dependencies
+        run: npm ci
+
+      # Critical only: the remaining highs (awilix chain, @parse/node-apn) have no upstream fix yet.
+      # Raise to high once they ship patched releases.
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=critical
+
+      - name: Generate Prisma client
+        run: npm run prisma:generate
+
+      - name: Apply database migrations
+        run: npm run prisma:deploy
+
+      - name: Lint workspaces
+        run: npm run lint
+
+      - name: Build backend and UI
+        run: npm run build
+
+      - name: Run edge runtime tests
+        working-directory: deploy/edge-runtime
+        run: deno test --allow-all
+
+      - name: Run tests
+        run: npm test
+
+      - name: Run SDK/API contract tests
+        run: npm run test:contracts -w @motherbase/server
+
+      # The supabase-js compatibility matrix is generated, never hand written.
+      # Regenerate it against this job's Postgres and fail if the committed copy
+      # drifted: a matrix that can lie is the thing this guards against.
+      - name: Regenerate the SDK compatibility matrix
+        run: npm run test -w @motherbase/server -- sdk-contract
+
+      - name: Fail on compatibility matrix drift
+        run: |
+          if ! git diff --exit-code packages/client/COMPATIBILITY.md; then
+            echo "::error file=packages/client/COMPATIBILITY.md::COMPATIBILITY.md is out of date. Run 'npm run test -w apps/server -- sdk-contract' and commit the result." >&2
+            exit 1
+          fi
+
+  # The documentation site lives in website/ with its own lockfile, outside the
+  # workspaces. Its tests compare the generated tables against the files this
+  # repository commits, so a stale doc table fails here, next to the change.
+  website:
+    name: Website
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: website
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: website/package-lock.json
+
+      - run: npm ci
+      - run: npm run lint
+      - run: npx tsc --noEmit
+      - run: npm test
+
+      # SITE_URL feeds next-sitemap in `postbuild`; without it the sitemap would
+      # list localhost URLs. CI only needs it set.
+      - name: Build
+        env:
+          SITE_URL: https://www.motherbase.site
+        run: npm run build
+
+  # The workspace installs with its lockfile, which hides a dependency set that
+  # npm cannot resolve from scratch. Install the packed SDK the way an app does.
+  sdk-install:
+    name: SDK installs on npm ${{ matrix.npm }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # npm 10 crashes resolving better-auth 1.6's optional vitest peer
+        # (`reading 'edgesOut'`), with nothing else installed. better-auth 1.7
+        # does not trigger it; add 10 back with that upgrade.
+        npm: [11, 12]
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Build the SDK
+        run: |
+          npm ci
+          npm run build -w @motherbase/client -w @motherbase/ssr
+
+      - name: Use npm ${{ matrix.npm }}
+        run: npm install -g npm@${{ matrix.npm }}
+
+      - name: Install the packed SDK into an empty project
+        run: bash scripts/check-sdk-install.sh
+
+  runtime:
+    name: Production images and restore drill
+    runs-on: ubuntu-24.04
+    needs: ci
+    timeout-minutes: 30
+    # Two pushes must not interleave image pushes or release uploads.
+    concurrency:
+      group: runtime-${{ github.ref }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      packages: write
+      # Signing the bundle's build provenance (actions/attest-build-provenance).
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      # Before the image builds: a tag that disagrees with package.json, or has
+      # no CHANGELOG section, never becomes a release.
+      - name: Check the release tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: node scripts/release-notes.cjs "$GITHUB_REF_NAME" > "$RUNNER_TEMP/release-notes.md"
+
+      - name: Build runtime images
+        run: bash deploy/build-images.sh
+      - name: Boot production API and verify backup restoration
+        run: bash deploy/verify-runtime.sh
+
+      # setup.sh pulls these instead of compiling them on every machine. The tag
+      # is the commit, and setup.sh only pulls the sha its checkout is at, so an
+      # image always matches the compose files and scripts beside it. Published
+      # after the restore drill: an image that cannot boot is never offered.
+      # A release also tags them with its version and as `latest`, which is what
+      # `motherbase init` runs by default: `latest` is the last release, never
+      # the head of master.
+      - name: Publish images to GHCR
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
+        run: |
+          registry="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}"
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          for name in api console postgres edge-runtime orchestrator; do
+            for tag in "sha-$GITHUB_SHA" ${RELEASE:+"$RELEASE" latest}; do
+              docker tag "motherbase-$name:1.0.0" "$registry/motherbase-$name:$tag"
+              docker push "$registry/motherbase-$name:$tag"
+            done
+          done
+
+      # Install without cloning: just what setup.sh needs to pull the images
+      # above. VERSION is the commit whose images exist. install.sh and
+      # update.sh download from releases/latest, which GitHub resolves to the
+      # newest release: only a tag ever changes what a new install gets.
+      - name: Build the install bundle
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          echo "$GITHUB_SHA" > VERSION
+          tar czf motherbase-deploy.tar.gz VERSION setup.sh deploy apps/server/console/Orchestration.Dockerfile
+          # install.sh and update.sh refuse a bundle that does not match this digest.
+          sha256sum motherbase-deploy.tar.gz | awk '{print $1}' > motherbase-deploy.tar.gz.sha256
+
+      # A signed statement that this workflow, at this commit, built the bundle:
+      #   gh attestation verify motherbase-deploy.tar.gz --repo <owner>/<repo>
+      # The digest only proves the download is intact; this proves where it came from.
+      - name: Attest the bundle's build provenance
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: motherbase-deploy.tar.gz
+
+      # Created in one call with both assets, so there is never a release whose
+      # bundle has no digest beside it.
+      - name: Publish the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" \
+            --notes-file "$RUNNER_TEMP/release-notes.md" \
+            motherbase-deploy.tar.gz motherbase-deploy.tar.gz.sha256
+
+  deploy-vps:
+    name: Deploy to VPS
+    runs-on: ubuntu-24.04
+    needs: [ci, runtime]
+    timeout-minutes: 25
+    environment: production
+    # Production moves on releases only. A merge to master, a contributor's
+    # included, is tested and never deployed.
+    if: startsWith(github.ref, 'refs/tags/v')
+    concurrency:
+      group: deploy-vps-production
+      cancel-in-progress: false
+    env:
+      VPS_HOST: ${{ secrets.VPS_HOST }}
+      VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+      VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+      VPS_USER: ${{ vars.VPS_USER || 'motherbase' }}
+      VPS_SSH_PORT: ${{ vars.VPS_SSH_PORT || '22' }}
+      VPS_REMOTE_DIR: ${{ vars.VPS_REMOTE_DIR || 'boilerplate-backend' }}
+      CONSOLE_URL: ${{ vars.CONSOLE_URL }}
+      ADMIN_EMAIL: ${{ secrets.ADMIN_EMAIL }}
+      ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
+      PROJECT: ${{ vars.SMOKE_PROJECT }}
+      PROJECT_URL: ${{ vars.SMOKE_PROJECT_URL }}
+      PROJECT_EMAIL: ${{ secrets.SMOKE_PROJECT_EMAIL }}
+      PROJECT_PASSWORD: ${{ secrets.SMOKE_PROJECT_PASSWORD }}
+      RLS_MODEL: ${{ vars.SMOKE_RLS_MODEL }}
+      PRIVATE_EDGE_ROUTE: ${{ vars.SMOKE_PRIVATE_EDGE_ROUTE }}
+
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 22
+
+      - name: Validate production configuration before touching the VPS
+        id: preflight
+        run: node deploy/validate-release-env.cjs
+
+      - name: Install SSH key
+        run: |
+          umask 077
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "$VPS_KNOWN_HOSTS" > ~/.ssh/known_hosts
+
+      - name: Deploy the release
+        run: |
+          # Arguments are constrained by validate-release-env.cjs; quoting also
+          # preserves them through SSH's remote-shell command serialization.
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=15 \
+            -p "$VPS_SSH_PORT" "$VPS_USER@$VPS_HOST" \
+            "bash -s -- '$VPS_REMOTE_DIR' '$GITHUB_SHA' '$GITHUB_REF_NAME'" < deploy/deploy-release.sh
+
+      # Skipped when no smoke configuration is set (see
+      # deploy/validate-release-env.cjs). The preflight prints a warning in that
+      # case, so a green deploy that verified nothing still says so.
+      - name: Run VPS smoke test
+        if: steps.preflight.outputs.smoke == 'true'
+        run: bash apps/server/tests/vps-smoke.sh
+
+      - name: Run critical end-to-end flows
+        if: steps.preflight.outputs.smoke == 'true'
+        run: bash apps/server/tests/critical-flows-smoke.sh

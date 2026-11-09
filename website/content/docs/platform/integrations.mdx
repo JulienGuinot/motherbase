@@ -1,0 +1,133 @@
+---
+title: "Integrations"
+description: "First-party integration catalogue — connecting one stores secrets and optionally installs prebuilt edge functions."
+order: 24
+---
+
+The Integrations tab is a static catalogue (`apps/server/config/integrations-registry.ts`) built entirely on primitives you already have: **edge-function secrets** plus **prebuilt edge functions**. There is no hidden runtime — connecting an integration saves its secrets and, optionally, installs its function templates.
+
+## Catalogue
+
+| Key | Category | What it gives you |
+|---|---|---|
+| `stripe` | payments | Query customers, receive Stripe webhooks |
+| `shopify` | payments | Read orders from a store |
+| `calendly` | scheduling | List scheduled events, receive booking webhooks |
+| `airtable` | data | Read records from a base |
+| `notion` | data | Query a Notion database |
+| `posthog` | data | Send product analytics events from the backend |
+| `algolia` | data | Search and index records |
+| `hubspot` | data | Read and create CRM contacts |
+| `slack` | messaging | Post messages to a channel via incoming webhook |
+| `discord` | messaging | Post messages to a channel via webhook |
+| `twilio` | messaging | Send SMS |
+| `telegram` | messaging | Send messages from a bot, receive updates |
+| `resend` | email | Transactional email through Resend |
+| `sendgrid` | email | Transactional email through SendGrid |
+| `postmark` | email | Transactional email through Postmark |
+| `openai` | ai | Call chat completions from an edge function |
+| `anthropic` | ai | Call Claude from an edge function |
+| `github` | devtools | List repo issues, receive repo webhooks |
+| `linear` | devtools | Query and create Linear issues |
+| `sentry` | devtools | Read unresolved issues from a project |
+| `cloudflare` | devtools | Purge the CDN cache for a zone |
+
+## Shape of an integration
+
+```ts
+interface Integration {
+  key: string
+  name: string
+  description: string
+  category: 'payments'|'scheduling'|'data'|'messaging'|'email'|'ai'|'devtools'
+  docsUrl: string
+  secrets: { name: string; label: string; placeholder: string; optional?: boolean }[]
+  functions: {
+    name: string; route: string; description: string
+    schedule?: string
+    readiness?: 'production' | 'example'
+    code: string
+  }[]
+}
+```
+
+Secrets are stored as **edge-function secrets**, so inside the sandbox they are read as `env.NAME` — e.g. `env.STRIPE_SECRET_KEY`. See [Edge Functions](/docs/platform/edge-functions/).
+
+<Warning>
+A function template marked `readiness: 'example'` is a starting point, not a finished endpoint. It needs provider verification (signature checks) and your own business logic before it is safe in production. Templates marked `production` are complete as shipped.
+</Warning>
+
+## Connected state
+
+`IntegrationsService.list()` returns, per integration:
+
+- each secret with `set: boolean` — is it stored?
+- each function with `installed: boolean` and its edge-function `id` when installed, matched by **route**
+- `connected: true` when every **non-optional** secret is set
+
+Optional secrets never block the connected state.
+
+## Endpoints
+
+| Method | Path | Action |
+|---|---|---|
+| `GET` | `/api/admin/integrations` | Catalogue with status |
+| `POST` | `/api/admin/integrations/:key/connect` | Store secrets, optionally install functions |
+| `DELETE` | `/api/admin/integrations/:key` | Disconnect |
+
+All three require `adminOnly` (`apps/server/controllers/integrations.controller.ts`).
+
+## Adding your own
+
+There is no plugin loader: the catalogue is a TypeScript array. Adding an entry to `INTEGRATIONS` — with its secrets and its function templates — is the whole extension mechanism. Anything more custom is just an [edge function](/docs/platform/edge-functions/) you write yourself, with secrets you set directly.
+
+## Vault
+
+`/p/:id/integrations/vault`, `apps/server/services/admin/vault.service.ts`. Encrypted secrets stored in the database,
+with Supabase Vault's SQL surface kept to the letter: a `vault` schema with `vault.secrets` (ciphertext only), the
+`vault.decrypted_secrets` view, and `vault.create_secret` / `vault.update_secret` with Supabase's signatures, so SQL
+written against Supabase's Vault runs unchanged.
+
+Supabase's Vault sits on pgsodium, which this image does not ship. Here the encryption is pgcrypto's
+`pgp_sym_encrypt` (AES-256), and the key never lives in the database: it is derived from the server's
+`CONFIG_ENCRYPTION_KEY` (HKDF, purpose `vault`) and handed to Postgres per transaction in the `vault.key` setting,
+with `SET LOCAL` semantics. A dump, a backup, a replica or a stolen volume holds ciphertext and no key. The cost: a
+session the server did not open (psql, a `pg_cron` job) cannot decrypt, and `vault.decrypted_secrets` raises there
+with a hint. Secrets are read and written through Studio, the CLI and the admin API. Statement logging is switched
+off inside those transactions, so `log_statement = all` does not write the key or a plaintext either.
+
+| Action | Endpoint |
+|---|---|
+| Status and secrets | `GET /admin/vault` |
+| Enable (create the `vault` schema) | `POST /admin/vault/enable` |
+| Create | `POST /admin/vault/secrets` |
+| Reveal | `GET /admin/vault/secrets/:id/reveal` |
+| Update | `PATCH /admin/vault/secrets/:id` |
+| Delete | `DELETE /admin/vault/secrets/:id` |
+
+A secret encrypted under a key this server no longer derives (after a root key rotation) is listed with
+`keyMatches: false` and cannot be revealed. Every write needs the `secrets.manage` capability.
+
+## Wrappers
+
+`/p/:id/integrations/wrappers`, `apps/server/services/admin/wrapper.service.ts`. Foreign data wrappers, on the ones
+Postgres itself ships: `postgres_fdw` (another Postgres, reached as local tables) and `file_fdw` (a CSV or text file
+on the database server). Supabase's Rust wrappers (Stripe, Firebase, S3…) are not in this image. The management model
+is Supabase's: enable a wrapper, create a server with its options and credentials, then bring tables in with
+`IMPORT FOREIGN SCHEMA`, or, for a file, a foreign table with its columns.
+
+| Action | Endpoint |
+|---|---|
+| Wrappers, servers and foreign tables | `GET /admin/wrappers` |
+| Enable a wrapper | `POST /admin/wrappers/:wrapper/enable` (`postgres_fdw` or `file_fdw`) |
+| Create a server | `POST /admin/wrappers/servers` |
+| Set credentials | `PUT /admin/wrappers/servers/:name/credentials` with `{ user, password }` |
+| Import a foreign schema | `POST /admin/wrappers/servers/:name/import` |
+| Drop a server | `DELETE /admin/wrappers/servers/:name` |
+| Create a file table | `POST /admin/wrappers/tables` with `{ name, columns, options }` |
+| Drop a foreign table | `DELETE /admin/wrappers/tables/:schema/:name` |
+
+A server's password is stored as the Vault secret `fdw_<server>`, and also in the user mapping, because
+`postgres_fdw` cannot read a Vault (Postgres keeps it in `pg_user_mapping`, readable by superusers only); setting
+credentials writes both at once. The mapping is for the role the API connects as and no other. Foreign tables carry
+no row level security, so the REST API never serves them: query them from SQL.

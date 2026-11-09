@@ -1,0 +1,108 @@
+---
+title: "Storage Screen"
+description: "Buckets, objects, CORS, scoped tokens, per-bucket webhooks, and resumable force-deletion."
+order: 6
+---
+
+Route: `/p/:id/storage`. Source: `apps/studio/src/features/storage`, backed by `apps/server/controllers/admin-storage.controller.ts`.
+
+## Buckets
+
+| Action | Endpoint |
+|---|---|
+| List | `GET /admin/storage/buckets` |
+| Create | `POST /admin/storage/buckets` |
+| Delete | `DELETE /admin/storage/buckets/:slug?force=<bool>` |
+| Unfinished deletions (picked back up after a reload) | `GET /admin/storage/bucket-deletions` |
+| Deletion job status | `GET /admin/storage/bucket-deletions/:id` |
+
+Deleting a non-empty bucket needs `force`. That does not run inline: it creates a `BucketDeletionJob` that the deletion scheduler drains with a lease, tracking `totalObjects` / `deletedObjects` / `attempts`. The screen polls the job id for progress, and the job survives a restart — see the [data model](/docs/architecture/data-model/).
+
+## Objects
+
+| Action | Endpoint |
+|---|---|
+| List (paged) | `GET /admin/storage/buckets/:bucket/files?…` → `{ rows, total }` |
+| Upload | `POST /admin/storage/files` (multipart) |
+| Signed URL | `GET /admin/storage/files/:id/url` |
+| Delete | `DELETE /admin/storage/files/:id` |
+| Rendered image (transform preview) | `GET /admin/storage/files/:id/render?width=&height=&…` |
+
+Objects are also addressable by key, as `motherbase storage ls\|cp\|mv\|rm` does with `ss:///bucket/key`: `GET /admin/storage/buckets/:slug/objects` (list), `GET` / `DELETE /admin/storage/buckets/:slug/objects/*`, and `POST /admin/storage/buckets/:slug/copy` / `POST /admin/storage/buckets/:slug/move` with both keys in the body, since each can contain slashes.
+
+Upload limits come from `MAX_UPLOAD_MB` (default 25) and the `storage.limits` settings group; per-bucket limits are clamped to the global ceiling.
+
+## CORS
+
+```text
+GET    /admin/storage/buckets/:bucket/cors
+PUT    /admin/storage/buckets/:bucket/cors
+DELETE /admin/storage/buckets/:bucket/cors
+```
+
+A `BucketCors` row holds `allowedOrigins`, `allowedMethods`, `allowedHeaders` and `maxAgeSec` (default 3600). It is enforced by `middlewares/bucketCors.middleware.ts` on the public storage routes — independent of the project-wide `server.cors` group, which is edited in one place only: Project Settings → Security.
+
+## Scoped tokens
+
+```text
+GET    /admin/storage/buckets/:bucket/tokens
+POST   /admin/storage/buckets/:bucket/tokens
+DELETE /admin/storage/buckets/:bucket/tokens/:id
+```
+
+A `BucketToken` carries `permissions[]` (`read`, `write`, `delete`) and an optional `expiresAt`. It authenticates the public storage API (`bucketTokenGuard`) without a user session:
+
+```text
+POST   /api/storage/:slug/upload      requires write
+GET    /api/storage/:slug/files/:id
+DELETE /api/storage/:slug/files/:id   requires delete
+```
+
+<Warning>
+Bucket tokens are bearer credentials scoped to one bucket. Through the Console proxy, listing or creating them requires `secrets.manage`. Prefer short `expiresAt` values for anything handed to a client.
+</Warning>
+
+## Per-bucket webhooks
+
+```text
+GET    /admin/storage/buckets/:bucket/webhooks
+POST   /admin/storage/buckets/:bucket/webhooks
+DELETE /admin/storage/buckets/:bucket/webhooks/:id
+```
+
+`BucketWebhook` rows are `url` + `events[]`, separate from project-level [event webhooks](/docs/platform/events-and-webhooks/).
+
+## Public vs private
+
+Only the public bucket (`S3_PUBLIC_BUCKET`) is served statically. Private objects are reachable only through the authenticated file endpoints — there is no guessable static URL for them. Backend, drivers (`local` / `s3`) and configuration: [Storage](/docs/platform/storage/).
+
+## Protocol and image endpoints
+
+The project storage service also exposes the S3-compatible protocol when S3 support is
+configured, and resumable uploads through TUS 1.0.0. These are data-plane interfaces, not
+additional Studio bucket records; quotas, visibility and bucket policies still come from
+the same project configuration.
+
+The S3 protocol is path-style at `/storage/v1/s3` (`services/storage/s3-protocol.service.ts`). S3 buckets are Motherbase
+buckets and every write goes through the same storage service, so an object put over S3 has the same limits, quota and
+webhooks as one uploaded through the SDK. Supported: ListBuckets, CreateBucket, DeleteBucket, HeadBucket,
+GetBucketLocation, ListObjects v1 and v2 (prefix, delimiter, pagination, `encoding-type=url`), GetObject with `Range`,
+HeadObject, PutObject, CopyObject, DeleteObject, DeleteObjects and multipart uploads (Create, UploadPart, ListParts,
+Complete, Abort); anything else answers `NotImplemented`. The `storage.s3` group turns it off: every S3 request is then
+refused, and access keys are kept for when it comes back on.
+
+**Storage → Shared settings → S3 connection** shows the endpoint to point an S3 client at and manages its access keys:
+
+| Action | Endpoint |
+|---|---|
+| Endpoint and suggested region | `GET /admin/storage/s3` |
+| List keys | `GET /admin/storage/s3/keys` |
+| Create a key | `POST /admin/storage/s3/keys` — the only response that ever carries the secret |
+| Revoke a key | `DELETE /admin/storage/s3/keys/:id` |
+
+A key signs as the project, so through the Console proxy the whole `/storage/s3` surface needs `secrets.manage`. The
+secret is stored encrypted, not hashed, because SigV4 needs it to recompute signatures.
+
+Image transforms are served by `/storage/v1/render/image`. The SDK can request dimensions,
+resize mode, quality and output format through `download`, `getPublicUrl`, or
+`createSignedUrl`; SVG inputs are not transformable and transformed signed URLs expire.

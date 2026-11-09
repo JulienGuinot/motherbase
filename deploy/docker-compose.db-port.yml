@@ -1,0 +1,29 @@
+# Publishes each project's PostgreSQL port on the host, so an ORM, psql, a
+# migration tool or a BI client can connect to the project database the way they
+# would to any Postgres. Without this, `db` is reachable only from inside the
+# project's `internal` network and every external tool is locked out.
+#
+# Merged into every project stack by `composeContextArgs` (console/lib/compose.ts),
+# unconditionally. The behaviour is decided by two variables in the project's
+# .env.prod:
+#
+#   DB_PORT   The host port. Written by the Console at project creation and
+#             stable for the life of the project, which is what makes a saved
+#             connection string keep working across a recreate. Projects created
+#             before this file existed have no DB_PORT: the mapping then falls
+#             back to an empty host port, so Docker picks a free one at random.
+#             That is deliberately harmless rather than an error, and
+#             `docker compose -p <project> port db 5432` reveals it.
+#
+#   DB_BIND   The interface. Defaults to 127.0.0.1, so the port is reachable only
+#             from the host itself and an operator gets to it over an SSH tunnel:
+#
+#                 ssh -L 5432:localhost:<DB_PORT> user@your-vps
+#
+#             Set it to 0.0.0.0 to publish the database on the public internet.
+#             Do that only behind a firewall allowlist: Postgres authentication
+#             is then the single thing between the world and the whole project.
+services:
+  db:
+    ports:
+      - "${DB_BIND:-127.0.0.1}:${DB_PORT:-}:5432"

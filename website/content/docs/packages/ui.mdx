@@ -1,0 +1,98 @@
+---
+title: "@motherbase/ui"
+description: "Configurable React components for Motherbase authentication, accounts and uploads."
+order: 6
+---
+
+`@motherbase/ui` provides ready-to-use React components for the common account flows. It
+accepts an `@motherbase/client` instance; Next.js applications can create that instance
+with [`@motherbase/ssr`](/docs/packages/ssr/).
+
+## Install
+
+```bash
+npm install @motherbase/client @motherbase/ui
+# Next.js apps also need @motherbase/ssr
+```
+
+Import the stylesheet once:
+
+```tsx
+import '@motherbase/ui/styles.css'
+```
+
+## Authentication
+
+The package exports complete pages and composable forms:
+
+| Flow | Components |
+|---|---|
+| Sign in | `LoginPage`, `LoginForm`, `OAuthButtons`, `PasskeyButton`, `MfaChallenge`, `AuthCallback` |
+| Credentials | `SignUpForm`, `ForgotPasswordForm`, `ResetPasswordForm` |
+| Session | `MotherbaseProvider`, `useAuth`, `useUser`, `useMotherbaseClient`, `SignedIn`, `SignedOut`, `AuthLoading`, `SignOutButton` |
+| Account | `UserButton`, `UserProfileForm`, `PasskeyManager`, `MfaSettings`, `SecurityPanel` |
+
+Pass a `client` to standalone components, or wrap the tree in `MotherbaseProvider`:
+
+```tsx
+'use client'
+
+import { LoginPage } from '@motherbase/ui'
+import { createBrowserClient } from '@motherbase/ssr'
+
+const client = createBrowserClient(
+  process.env.NEXT_PUBLIC_MOTHERBASE_URL!,
+  process.env.NEXT_PUBLIC_MOTHERBASE_KEY!,
+)
+
+export default function Login() {
+  return (
+    <LoginPage
+      client={client}
+      providers={['google', 'github']}
+      passkeys
+      oauthRedirectTo="https://app.example.com/auth/callback"
+      onSuccess={() => window.location.assign('/app')}
+    />
+  )
+}
+```
+
+The component only displays password, OAuth and passkey methods that you enable through
+its props. The corresponding methods must also be enabled in the project's Auth settings.
+MFA is controlled by the backend: when sign-in returns `twoFactorRedirect`, the challenge
+is shown and cannot be bypassed by changing UI props. Whether a one-time second-factor code
+goes out by email or SMS is the project's setting, not a prop.
+
+`AuthCallback` completes both implicit OAuth redirects and PKCE code exchanges. Render it
+on the callback route after configuring the provider redirect URL in Auth settings.
+
+## Accounts, avatars and uploads
+
+`UserAvatar` and `UserButton` provide user identity display with a generated fallback.
+`UserProfileForm` edits the user's name and can include `AvatarUpload`. The avatar uploader
+stores the replacement image in a public bucket (the default bucket is `avatars`) and saves
+the resulting URL to the user's `image`; create the bucket and grant signed-in users write
+access before enabling it.
+
+`FileUpload` uploads one file and `FilesUpload` uploads several files through
+`client.storage`. Both validate `accept` and `maxSize` before sending and support custom
+paths, `upsert`, labels and class names.
+
+## Styling and preview
+
+Components accept `className`, component-specific `classNames`, and `labels` where
+appropriate. The stylesheet exposes `--mbui-*` variables on `.mbui`, so applications can
+override the visual theme or omit the stylesheet and provide their own classes.
+
+The backend repository includes a local gallery for the package:
+
+```bash
+npm run ui:preview
+```
+
+It runs at `http://127.0.0.1:5174` in mock mode by default. To test against a real project,
+set `VITE_MOTHERBASE_URL` and the publishable `VITE_MOTHERBASE_KEY`; never put a secret or
+admin key in browser-visible variables. Allow the preview origin in CORS and Auth redirect
+settings.
+

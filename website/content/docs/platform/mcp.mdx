@@ -1,0 +1,157 @@
+---
+title: "MCP Server"
+description: "Expose a project and its console to an AI agent over the Model Context Protocol: schema, policy lint, RLS simulator, real DDL, functions, branches and projects."
+order: 11
+---
+
+`motherbase mcp` exposes the linked project, and the console's organizations and
+projects, to an AI agent over the Model Context Protocol. The agent can read your
+schema, lint your policies, simulate row level security as a given user, and — when
+you allow it — apply migrations, deploy functions and manage branches and projects.
+
+DDL is included: `CREATE`, `ALTER` and `DROP` go through the same admin API the SQL
+editor uses, behind the `--write` flag.
+
+## Setup
+
+The server speaks stdio, so an MCP client launches it as a subprocess. Point the
+client at the CLI from a directory linked to a project (`motherbase link`):
+
+```json
+{
+  "mcpServers": {
+    "motherbase": {
+      "command": "npx",
+      "args": ["-y", "@motherbase/cli", "mcp"],
+      "cwd": "/path/to/your/project"
+    }
+  }
+}
+```
+
+Claude Code:
+
+```bash
+claude mcp add motherbase -- npx -y @motherbase/cli mcp
+```
+
+Authentication is the CLI's own: the console session from `motherbase login` plus
+the project from `motherbase link`, or `MOTHERBASE_URL` + `MOTHERBASE_ADMIN_TOKEN`
+for direct mode. There is no separate token to manage, and an MCP session can
+reach exactly what a `motherbase` command could, no more.
+
+## Tools
+
+What a session gets depends on what it reaches, resolved when it starts: the project tools need a linked
+project (`motherbase link`, or `MOTHERBASE_URL` + `MOTHERBASE_ADMIN_TOKEN`), the account tools a console login
+(`motherbase login`). A tool that could only fail is left out rather than offered, and the server prints on stderr
+how many tools it serves and what it reached. With neither, `motherbase mcp` refuses to start.
+
+### Project, read-only
+
+Always served when a project is reachable:
+
+| Tool | What it does |
+|------|--------------|
+| `list_tables` | List the tables in the project database, with their columns and row counts. |
+| `describe_table` | Columns, types, nullability, defaults, primary key and indexes of one table. |
+| `list_policies` | Row level security state for every table: whether RLS is on, and the policies attached with their USING and WITH CHECK expressions. |
+| `simulate_rls` | Run a SELECT as a given caller and report the rows they can see plus the policies that decided. The statement really executes, inside a transaction that is always rolled back. |
+| `get_advisors` | Lint the schema and policies: tables exposed with RLS off, RLS on with no policy, policies that leak through a join, SECURITY DEFINER functions anon can call, unindexed policy columns. |
+| `get_logs` | Recent log entries of one service, or of all of them. |
+| `generate_types` | TypeScript types for the whole schema, in the supabase-js Database shape. The same output as `motherbase gen types typescript`. |
+| `execute_sql` | Run a read-only SQL query. Statements that write are refused: use apply_migration for those. |
+| `list_indexes` | Every index in a schema, with its table, access method, key columns, uniqueness, size and definition. |
+| `list_enum_types` | Enumerated types in a schema, with their values in order and the columns that use each one. |
+| `list_roles` | Postgres roles with their attributes (login, superuser, bypassrls, connection limit), live connections and memberships. Reserved platform roles carry the reason they cannot be changed. |
+| `list_column_privileges` | For one table, which columns each role may SELECT, INSERT, UPDATE or REFERENCE. |
+| `list_publications` | Logical-replication publications, their tables and published actions, and wal_level. Motherbase Realtime does not use publications. |
+| `get_postgres_config` | Managed Postgres settings (statement_timeout, work_mem, max_connections, ...) with current values, allowed scopes and every database, role or system override. |
+| `get_project_url` | The API URL (and realtime URL) a client app uses to reach this project. |
+| `get_publishable_keys` | The publishable API keys a client app ships with. Safe to embed: row level security decides what they reach. Secret keys are never returned. |
+| `list_extensions` | Postgres extensions available in the project database, and which are installed. |
+| `list_migrations` | Schema migrations recorded for the project, with their status and when they were applied. |
+| `list_edge_functions` | Deployed edge functions: name, route, whether enabled, and limits. get_edge_function returns the source. |
+| `get_edge_function` | One deployed edge function with its source code. |
+| `list_storage_buckets` | Storage buckets with their visibility, quota and usage. |
+| `list_branches` | The preview branches of the linked project, main first, with status (creating, seeding, active, failed) and whether each is running. |
+| `list_queues` | List the message queues (pgmq) with their depth, type and whether RLS is on. Empty when queues are not enabled. |
+| `list_vault_secrets` | List the Vault secrets: id, name, description and dates. Never returns a secret value. |
+| `list_wrappers` | List the foreign data wrappers, foreign servers (never their passwords) and foreign tables. |
+| `advise_indexes` | Suggest indexes for one SELECT/UPDATE/DELETE statement: the CREATE INDEX statements and the estimated cost drop. The statement is only planned over hypothetical indexes, never run. |
+| `get_auth_config` | Every auth.* settings group (sign-in methods, URL configuration, rate limits, attack protection, third-party auth, hooks...) with its current values. Secrets are masked. |
+| `get_auth_audit_logs` | Auth audit trail (auth.audit_log_entries), newest first: sign-ins, sign-ups, token refreshes, recoveries, admin changes. Same data as the Studio Audit Logs page. |
+| `get_storage_config` | Storage configuration: the global upload size limit and allowed MIME types, image transformations, whether PostgreSQL policies authorize storage access, and the S3 protocol endpoint. Per-bucket limits are on list_storage_buckets. |
+
+### Account, read-only
+
+Served when the CLI is logged in to a console:
+
+| Tool | What it does |
+|------|--------------|
+| `list_organizations` | List the organizations the logged-in operator belongs to, with their role and project count. |
+| `get_organization` | Details of one organization: name, members count and settings. |
+| `list_projects` | List the projects on this console the operator can see, with their status and domain. |
+| `get_project` | Details of one project: status, domain and organization. |
+
+## Letting an agent write
+
+```bash
+motherbase mcp --write
+```
+
+Adds these project tools:
+
+| Tool | What it does |
+|------|--------------|
+| `apply_migration` | Create a named migration from DDL and apply it. This is the tool for CREATE TABLE, ALTER TABLE, CREATE POLICY and every other schema change. The migration is recorded, so it can be rolled back. |
+| `execute_sql_write` | Run arbitrary SQL, including writes. Prefer apply_migration for schema changes: this leaves no record and cannot be rolled back. |
+| `update_postgres_config` | Set or reset (value null) managed Postgres settings. Without scope, a session setting such as statement_timeout is pinned on the database; server-wide ones use ALTER SYSTEM and may need a restart, which the result reports. |
+| `deploy_edge_function` | Deploy an edge function, creating it or replacing the one at the same route. The name is also its route. The code runs on Deno with the Web platform; export a default handler (req: Request) => Response. |
+| `create_branch` | Create a preview branch: an isolated copy of the project with its own database, cut from its applied migrations (or its data with withData). Takes minutes; poll list_branches until it is active. |
+| `delete_branch` | Delete a preview branch and its whole stack. |
+| `merge_branch` | Apply the branch's new migrations to the main project. Refused while the branch is behind main: rebase_branch first. |
+| `rebase_branch` | Apply the main project's newer migrations to the branch. |
+| `reset_branch` | Recreate the branch from the main project as it is now. Everything done on the branch is lost. |
+| `create_queue` | Create a message queue (pgmq). |
+| `drop_queue` | Drop a queue and every message in it. Cannot be undone. |
+| `send_queue_message` | Send a JSON message to a queue. |
+| `read_queue_messages` | Read messages from a queue. A write, because it hides them from other readers for the visibility timeout. |
+| `create_vault_secret` | Store an encrypted secret in the Vault. There is no tool that reads a value back. |
+| `delete_vault_secret` | Delete a Vault secret by id. Cannot be undone. |
+| `update_storage_config` | Change the global storage configuration. Only the fields you pass change. Per-bucket size limits and MIME types are edited on the bucket itself. |
+
+and, with a console login, these account tools:
+
+| Tool | What it does |
+|------|--------------|
+| `create_project` | Create a project: a new, isolated stack (database, auth, storage, functions). Provisioning takes a while; poll get_project for its status. |
+| `pause_project` | Stop a project's containers. Its data is kept; restore_project starts it again. |
+| `restore_project` | Start a paused project again. |
+
+Write is off by default and there is no setting that turns it on globally: handing
+an agent DDL is a decision you take per session, on the command line, where you
+can see it.
+
+Note also that `execute_sql` stays on the read-only endpoint even in write mode.
+The tool a model reaches for by default cannot write, whatever it believed it was
+doing; writing means naming `apply_migration`.
+
+<Warning>
+An agent with `--write` pointed at production can drop a table. Prefer a preview
+or staging project, and prefer `apply_migration` over `execute_sql_write` so there
+is something to roll back.
+</Warning>
+
+## Implementation note
+
+The protocol layer (`packages/cli/src/mcp/protocol.js`) is about 150 lines of JSON-RPC over stdin and stdout, with no
+dependencies. The official MCP SDK pulls express, hono, cors, ajv and a dozen more
+packages, and the CLI is deliberately zero-dependency: making
+`npx @motherbase/cli` install a web framework so one subcommand can read stdin is
+not a trade worth making.
+
+The ceiling that buys is worth knowing: stdio transport and the tools capability
+only. No resources, no prompts, no sampling, no HTTP or SSE transport. If any of
+those is ever needed, the right move is to adopt the SDK rather than grow the
+hand-rolled server into a second one.

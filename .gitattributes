@@ -1,0 +1,21 @@
+# One line ending in the repository: LF. Several tests compare file contents
+# byte for byte (the typegen golden, the compose files), so a CRLF checkout on
+# Windows turns them red.
+* text=auto eol=lf
+
+# Shell scripts must keep LF endings so they run on Linux even when checked out
+# on Windows (CRLF in a shebang line breaks execution).
+*.sh text eol=lf
+
+# Prisma stores a checksum of each applied migration. The first migrations were
+# committed with CRLF; normalising them would make `migrate deploy` report them
+# as modified on every database that already ran them. Leave their bytes alone.
+apps/server/prisma/migrations/**/*.sql -text
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary

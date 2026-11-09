@@ -1,0 +1,265 @@
+---
+title: "Edge Runtime"
+description: "The private Deno sidecar, the worker pool that isolates one function per process, the compatibility bootstrap and the egress guard."
+order: 7
+---
+
+Edge functions run untrusted operator code. The runtime is a **private Deno sidecar**
+(`deploy/edge-runtime`) that the API talks to over HTTP. The API side of the seam is
+`apps/server/services/admin/edge-sandbox.ts`, which the rest of the server calls, and
+`edge-runtime-client.ts`, which speaks to the sidecar.
+
+<Note>
+This replaced an in-process `isolated-vm` sandbox. The boundary type (`SandboxResult`) was
+kept identical on purpose, so nothing above the sandbox seam — the invoke route, the
+scheduler, the logs — notices which runtime is underneath.
+</Note>
+
+## The two processes
+
+```text
+API (node)                                  sidecar (deno)              worker (deno)
+  runInSandbox(code, context, env)
+    → toDenoSpecifiers(code)
+    → POST {EDGE_RUNTIME_URL}/invoke   →   parseJob()
+         x-edge-runtime-token                 → pool.lease(sha256(code))  →  spawn / reuse
+                                              → write job as one JSON line →  runner.ts
+                                              ← read one JSON line         ←  EdgeResult
+    ←  SandboxResult                   ←   Response.json(result)
+```
+
+| Setting | Default | What it is |
+|---|---|---|
+| `EDGE_RUNTIME_URL` | `http://edge-runtime:9000` | Where the API reaches the sidecar |
+| `EDGE_RUNTIME_TOKEN` | — | Shared secret, sent as `x-edge-runtime-token` and compared in constant time |
+| `EDGE_RUNTIME_CALLBACK_URL` | `http://api:5001` | How the sidecar reaches *back* for `sendMail()` |
+
+The sidecar answers two routes only: `GET /health` and `POST /invoke`. Everything else is a
+404, and an `/invoke` without the token is a 401.
+
+`EdgeRuntimeClient.run()` **never throws**. An unreachable sidecar comes back as an ordinary
+`SandboxResult` error ("The edge runtime is not reachable at …"), so a runtime outage lands in
+the invocation log like any other function failure instead of 500-ing the route.
+
+## Isolation: one process per function
+
+`pool.ts` leases a worker process keyed by the sha256 of the function's code (and its file
+set, for an imported multi-file function).
+
+- **Two different functions never share a process.** That is the property the old isolate gave
+  for free, and the one worth keeping. It is also the *only* isolation guarantee: everything in
+  `bootstrap.ts` is a compatibility surface, not a boundary.
+- **The same function reuses its process**, so it pays Deno's cold start once rather than on
+  every call.
+- A worker is retired after `EDGE_WORKER_IDLE_TTL_MS` (default `300000`) idle or
+  `EDGE_WORKER_MAX_INVOCATIONS` (default `500`) calls, so a long-lived worker cannot accumulate
+  state indefinitely.
+- `EDGE_MAX_WORKERS` (default `16`) is a **soft** cap, evicted least-recently-leased first and
+  never while a worker is running a call. When every worker is busy the pool goes over the cap
+  rather than failing a call.
+- A concurrent call to a function whose worker is busy gets an **ephemeral** process for that one
+  call, killed afterwards. A burst of webhooks on one function must not fail the call in flight.
+- Any failure reading a worker's answer retires it: a worker in an unknown state is never reused.
+
+A limit change is treated as a redeploy of the limits — the memory flag is baked into the
+process, so the old worker cannot honour a new number and is destroyed.
+
+## What the worker process may do
+
+```text
+deno run --allow-net --no-prompt --no-config --no-lock
+         --allow-env=EDGE_ALLOWED_INTERNAL_ORIGINS,EDGE_WORKER_DIR
+         --allow-read=<workDir> --allow-write=<workDir>
+         --v8-flags=--max-old-space-size=<memoryLimitMb>
+         runner.ts
+```
+
+with `clearEnv: true`, so nothing of the host environment leaks in beyond the two variables
+named above, `DENO_DIR`, and the host's outbound proxy settings when the sidecar has them
+(`HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY` and their lowercase forms, and `DENO_CERT` for a
+proxy's own CA). Deno reads those itself, for module downloads and `fetch`; operator code
+cannot, since `--allow-env` names only the two variables above. The `fetch` guard still checks
+the destination a function asked for, so a proxy changes the route, never what is allowed.
+
+- `--no-config` / `--no-lock`: operator code must not resolve through, or write into, the
+  sidecar's own `deno.json` / `deno.lock`. One function's dependency graph would otherwise pin
+  another's.
+- Filesystem access is scoped to a per-worker temp directory, which is also where an imported
+  multi-file function's sources are written.
+
+## Memory, and why a process rather than a Web Worker
+
+Deno cannot cap memory per Web Worker, and the `memoryLimitMb` column has to keep meaning
+something — hence an OS process.
+
+`--max-old-space-size` caps the **V8 heap only**. `ArrayBuffer`s live outside it, so a function
+filling `Uint8Array`s grew until the container itself was killed. A watchdog therefore polls the
+process's resident size every 50 ms and kills it past
+`memoryLimitMb + EDGE_WORKER_BASE_RSS_MB` (default `96`, an allowance for Deno itself — an idle
+worker is around 56 MB; a calibration knob, not a precise number).
+
+The watchdog reads `/proc`, so on Linux the pool refuses to start when it cannot
+(`/proc/self/status` is read at construction): a watchdog that silently enforces nothing is
+worse than a startup failure.
+
+A typed-array allocation past the cap throws a catchable `RangeError` rather than taking the
+process down. The pool recognises those messages and still reports them as the memory limit,
+not as a raw V8 allocation failure.
+
+## Timeouts
+
+The pool reads one newline-delimited JSON line from the worker with a deadline of the
+function's `timeoutMs`, and kills the process when it passes. The API's own request to the
+sidecar carries `AbortSignal.timeout(timeoutMs + 10_000)`, which covers only the case of a
+sidecar that stopped answering altogether.
+
+## Imports
+
+Deno resolves `npm:`, `jsr:`, `node:` and URL specifiers itself, so there is no deploy-time
+inlining of dependencies. It does *not* resolve a bare package name, and functions written for
+the old runtime import `'zod'` the Node way, so `toDenoSpecifiers()` rewrites a bare specifier
+to `npm:` — or `node:` when it names a Node builtin — rather than breaking every one of them.
+
+`checkEdgeCode()` is the deploy-time gate: the same job with `check: true` loads the module,
+resolving every import, without calling the handler.
+
+`services/admin/edge-bundler.ts` is still used, for one job: an **imported Supabase function**
+arrives as a module graph (`index.ts` plus `_shared/*`) in an eszip, and a function row holds
+one source. The graph is flattened in memory, inlining every relative specifier it carries and
+leaving `https://…`, `npm:…` and `jsr:…` for Deno. A multi-file source can also be sent as-is
+(`EdgeSource`: an entrypoint plus base64 files, at most 256 files and 20 MB) and is written into
+the worker's temp directory.
+
+## The compatibility bootstrap
+
+`bootstrap.ts` installs the surface both authoring styles expect, then restores it when the job
+ends.
+
+| Replaced | Becomes |
+|---|---|
+| `console.log/warn/error` | Captured into the invocation's `stdout` (`[warn]` / `[error]` prefixed) |
+| `Deno.env` | The function's injected secrets: `get`, `has`, `toObject`. `set` and `delete` throw with the reason |
+| `globalThis.env` | A frozen copy of the same secrets |
+| `globalThis.context` | A frozen copy of the invocation payload |
+| `Deno.serve(handler)` | Records the handler instead of binding a port, and returns a plausible server object |
+| `globalThis.sendMail` | Posts to the API's mail callback. See below |
+| `globalThis.fetch` | The guarded fetch. See below |
+
+<Warning>
+None of this is a security boundary. Operator code shares the worker's realm: it can hold a
+timer or an unawaited promise past the end of its job, and it can wrap `Object.defineProperty`
+to observe what a *later* job installs, including that job's secrets. The isolation guarantee is
+the pool's one-process-per-function rule, and nothing here substitutes for it.
+</Warning>
+
+`restore()` deliberately deletes `env`, `context` and `sendMail` when they were absent before,
+rather than leaving them set: handing the next job the previous one's secrets through a global it
+never set is exactly the leak the rule above exists to prevent.
+
+## Entry point resolution
+
+`export default` wins over a handler captured from `Deno.serve`. A module doing both is
+ambiguous, and preferring the explicit export is the deliberate choice rather than an accident of
+ordering. With neither:
+
+```text
+The function has no entry point. Add `export default (req) => ...` or call `Deno.serve(handler)`.
+```
+
+The handler is called with a real `Request` built from the job (a scheduled run has no HTTP
+request of its own, so it gets `POST http://edge.local/`). A returned `Response` becomes the
+invocation's `response` — status, headers and body verbatim, so a webhook handler answering 400
+reaches the sender as a 400.
+
+Any other returned value lands in `SandboxResult.value`, and it crosses a **JSON** wire between
+two processes where the old isolate handed back a structured clone in-process. That is a real,
+accepted behaviour change: a returned `Date` arrives as an ISO string and a `Map` as `{}`. A
+value JSON cannot represent at all (a `BigInt`) is reported as `Return value could not be
+serialized` rather than silently dropped — which is what the isolate did too.
+
+Legacy expression functions predate the module shape and are still wrapped to their original
+semantics:
+
+```ts
+export const __legacyExpression = true;
+export default async () => (<code>);
+```
+
+Statement-shaped legacy code (`const a = 1; a + 1`) cannot live inside those parentheses, so the
+wrapper is retried unwrapped when — and only when — the first import fails with a syntax error.
+Letting the parser decide is exact; pattern-matching for that shape is not.
+
+## Module identity and error text
+
+Operator code is imported as a `data:application/typescript;base64,…` module whose source
+carries a per-invocation nonce in a trailing comment. The nonce is load-bearing: the ES module
+registry caches by specifier and one worker serves many invocations of the same function, so a
+stable specifier would evaluate the module once and never again — a `Deno.serve` handler would be
+captured on the first call and lost on every later one, and a module-scope `Deno.env.get()` would
+freeze the first invocation's secrets.
+
+Errors reaching the operator are the message alone. The stack is dropped because it carries host
+filesystem paths, and the `data:` specifier is replaced with `<edge function module>`; both would
+leak host detail into a log the operator reads.
+
+## The `fetch` guard
+
+Two barriers, because neither is sufficient alone:
+
+1. **Docker.** The sidecar sits on its own network with no route to Postgres or Redis.
+2. **`fetch_guard.ts`**, because barrier 1 does not exist at all in a bare-metal single-host
+   deployment.
+
+The guard refuses a non-absolute URL, any scheme but `http:`/`https:`, `localhost`, and any
+hostname resolving to a private or reserved address — the same range table as
+`apps/server/helpers/ssrf.helper.ts`, duplicated because that Node module cannot run under Deno,
+with the tests duplicated on both sides so a range added to one and not the other fails a test.
+A hostname that does not resolve is refused rather than guessed at.
+
+Redirects are refused for **every** origin, allowlisted ones included: an open redirect on the
+project's own API would otherwise launder a request to any destination.
+
+`EDGE_ALLOWED_INTERNAL_ORIGINS` is a comma-separated list of exact `URL.origin` strings
+(scheme + host + port) exempt from the *address* check only. It exists for the project's own API:
+in Docker `api:5001` resolves to a private address, so without it the guard would refuse exactly
+the self-call the Docker network was configured to allow. Matching is exact rather than by
+suffix, so `api.evil.com` cannot impersonate `api`.
+
+<Note>
+**Known residual risk**, named rather than papered over: the Node client pinned a resolved
+address by overriding the socket lookup, so the address it checked was the address it connected
+to. Deno's `fetch` exposes no such hook, so a window remains between the check and the connect
+in which DNS could change (a rebinding attack). Barrier 1 is what covers that window — do not
+remove the Docker network segregation on the assumption that the guard is sufficient by itself.
+</Note>
+
+## The `sendMail` bridge
+
+An edge function has no SMTP of its own, so `sendMail()` posts to
+`POST /internal/edge-runtime/mail` on the API, carrying an `x-edge-mail-token` the host minted
+for **this invocation only** — the token is registered before the run and deleted in a `finally`,
+so one that leaks out of a function is dead by the time anyone could replay it. An unknown token
+is a 401 (`sendMail: this invocation is over`).
+
+The API hands the payload to the same `TransporterService` the auth emails use, so a function
+inherits whatever `email.smtp` the project already has configured. The recipient, the subject and
+the presence of `text` or `html` are validated **on the host**: operator code is the untrusted
+side of that boundary and can rewrite anything the in-worker wrapper defines.
+
+The host handler never rejects. It answers `{ ok: false, error }` and the worker-side wrapper
+turns that into a `throw`, so a failed send is an error operator code can catch rather than an
+unhandled rejection in the API process.
+
+This one call deliberately uses the **unguarded** fetch: the API is a private address by design,
+and the URL comes from the host rather than from operator code.
+
+## Limits resolution
+
+```ts
+resolveLimits({ memoryLimitMb, timeoutMs })
+// memory  → clamp(floor(v || 128), 8, EDGE_MAX_MEMORY_MB ?? 512)
+// timeout → clamp(floor(v || 5000), 100, EDGE_MAX_TIMEOUT_MS ?? 60000)
+```
+
+Per-function limits live on the `EdgeFunction` row; the ceilings are host policy. See
+[Edge functions](/docs/platform/edge-functions/).

@@ -1,0 +1,111 @@
+---
+title: "Traefik & TLS"
+description: Configure Motherbase host routing, HTTP redirects, ACME certificate resolvers, and access middlewares.
+order: 4
+---
+
+Traefik runs once per local machine or VPS. Project and Console containers attach to the external `traefik_proxy` network and declare their routes through labels in the Compose files.
+
+## Local routing
+
+`deploy/traefik/docker-compose.dev.yml` enables the Docker provider, disables exposure by default, and defines only the `web` entrypoint on host port `80`. It has no ACME resolver and no TLS configuration.
+
+The local Console is published directly at `http://localhost:5500`. Projects created through it use the defaults from `apps/server/console/lib/manifest.ts`:
+
+| Surface | Host rule | Target |
+|---------|-----------|--------|
+| Project API and Studio | `<name>.localhost` | API port `5001` |
+| WebSocket | `<name>.localhost` plus `PathPrefix('/ws')` | API port `5001` |
+| Object storage | `<name>-storage.localhost` | MinIO port `9000` |
+| MinIO Console | `<name>-minio.localhost` | MinIO port `9001` |
+
+The dev Traefik dashboard is deliberately insecure and published at `http://localhost:8080`; the file says not to expose this stack to the internet.
+
+## Production entrypoints
+
+`deploy/traefik/docker-compose.yml` publishes:
+
+| Entrypoint | Host port | Behavior |
+|------------|-----------|----------|
+| `web` | `80` | Permanently redirects every request to `websecure` using HTTPS. |
+| `websecure` | `443` | Terminates TLS and forwards to Console, API, WebSocket, MinIO API, or MinIO Console. |
+
+The Docker provider is configured with `exposedByDefault=false` and network `traefik_proxy`. Traefik does not mount the Docker socket directly in production. It queries `docker-proxy:2375` over the internal `traefik_internal` network.
+
+`deploy/traefik/docker-proxy.conf` forwards requests to the Unix socket and rewrites versioned Docker API paths to `/v1.45/`. The Compose comment identifies this as compatibility for Docker 29+, which dropped older API versions used by Traefik's embedded client.
+
+## Production host mapping
+
+The production labels map:
+
+| Surface | Rule | Priority | Target |
+|---------|------|----------|--------|
+| Platform Console | `Host(CONSOLE_DOMAIN)` | `1000` | Console `5500` |
+| Project restricted paths | Project host plus `/api/admin`, `/console`, or `/admin` | `200` | API `5001` through the deny middleware |
+| Project WebSocket | Project host plus `/ws` | `150` | API `5001` |
+| Project API and Studio | Project host | `100` | API `5001` |
+| Object storage | `STORAGE_DOMAIN` | default | MinIO `9000` |
+| MinIO Console | `MINIO_CONSOLE_DOMAIN` | default | MinIO `9001` |
+| Traefik dashboard | `TRAEFIK_DASHBOARD_HOST` | default | `api@internal` |
+
+The Console-generated defaults are `<name>.<DOMAIN>`, `<name>-storage.<DOMAIN>`, and `<name>-minio.<DOMAIN>`. An explicitly supplied project domain changes the derived storage suffix according to `apps/server/console/lib/manifest.ts`.
+
+
+## HTTP-01 certificates
+
+The `letsencrypt` resolver is configured in `deploy/traefik/docker-compose.yml` with:
+
+- `ACME_EMAIL` from `deploy/traefik/.env`;
+- HTTP-01 on the `web` entrypoint;
+- ACME state at `/acme/acme.json`, backed by the host directory `deploy/traefik/acme`.
+
+The production Console router always selects `letsencrypt`. Project routers in `deploy/docker-compose.prod.yml` select `CERT_RESOLVER`, default `letsencrypt`. The single-project file hard-codes `letsencrypt`.
+
+No staging ACME server is configured in the source. Certificates issued by the production stack therefore use Traefik's default ACME CA configuration.
+
+## DNS-01 for deep subdomains
+
+When `DOMAIN` contains at least two dots, `setup.sh` offers DNS-01 because project hosts add another label. Accepting the prompt sets:
+
+```env
+DNS_CHALLENGE_PROVIDER=godaddy
+CERT_RESOLVER=letsencrypt-dns
+GODADDY_API_KEY=<key>
+GODADDY_API_SECRET=<secret>
+```
+
+The `letsencrypt-dns` resolver shares `/acme/acme.json`, uses the configured provider, and waits 30 seconds before checking the DNS challenge. Only GoDaddy is collected by `setup.sh`; the Traefik Compose file passes only `GODADDY_API_KEY` and `GODADDY_API_SECRET` into the container.
+
+<Warning>
+If the DNS-01 prompt is declined for a deep base domain, `setup.sh` warns that project certificates may remain self-signed until DNS-01 is configured. It does not abort the installation.
+</Warning>
+
+## Local versus production certificates
+
+Local mode has no certificate files, ACME storage, HTTPS entrypoint, or redirect. Production persists ACME state under `deploy/traefik/acme`; normal setup reruns keep that directory. `deploy/reset.sh` brings Traefik down with `-v`, but it does not remove the bind-mounted `deploy/traefik/acme` directory.
+
+## Middlewares
+
+Two middleware families exist in the Compose source:
+
+- Each project's deny router uses an `ipAllowList` with only `127.0.0.1/32`. In production it covers `/api/admin`, `/console`, and `/admin`; local dev covers `/api/admin` and `/console`.
+- The optional Traefik dashboard uses HTTP basic authentication from `TRAEFIK_DASHBOARD_AUTH`.
+
+There is no headers, compression, retry, forward-auth, or rate-limit middleware declared in `deploy/traefik/`.
+
+## Optional dashboard
+
+`deploy/traefik/.env.example` leaves `TRAEFIK_DASHBOARD_HOST` and `TRAEFIK_DASHBOARD_AUTH` empty. With no host, the router rule falls back to `traefik.invalid`; with no credentials, the basic-auth fallback is deliberately invalid.
+
+To enable it, set both values in `deploy/traefik/.env` and recreate Traefik. The example generates the credential with:
+
+```bash
+htpasswd -nbB admin 'your-password' | sed -e 's/$/escaped-dollar-signs/g'
+```
+
+Replace the illustrative sed expression with the exact dollar-doubling command shown in `deploy/traefik/.env.example`; Docker Compose requires doubled dollar signs.
+
+## Related
+
+- [Console monitoring](/docs/console/monitoring/) — DNS and TCP diagnostics for a domain that is not resolving.
+- [Docker topology](/docs/self-hosting/docker-topology/) — which stack publishes which service.

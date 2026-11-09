@@ -1,0 +1,51 @@
+---
+title: "OpenAPI Spec"
+description: "Where the spec lives, what it covers, how it is served and how to regenerate openapi.json."
+order: 22
+---
+
+The project API ships a hand-maintained OpenAPI 3.0.3 document.
+
+| Thing | Where |
+|---|---|
+| Source | `apps/server/config/openapi.ts` (`openapiSpec`) |
+| Served at | `GET /api/docs` — Swagger UI, mounted in `apps/server/app.ts` |
+| Exported to | `apps/server/openapi.json` |
+| Generator | `apps/server/swagger.ts` |
+
+## Regenerate
+
+```bash
+npm run swagger                    # from the repo root
+# → ✅ OpenAPI spec written to apps/server/openapi.json
+```
+
+The script (`ts-node ./swagger.ts`) simply serializes `openapiSpec` to disk. Editing the spec means editing `config/openapi.ts` — there is no decorator scanning or runtime introspection step.
+
+## What it covers
+
+`servers` is `http://${BASE_HOST}`, the title is `${APP_NAME} API`, and the only security scheme is HTTP bearer with `bearerFormat: JWT`.
+
+Auth paths are taken from `@motherbase/contracts` (`HTTP_ROUTES`) rather than written as string literals, so the spec cannot drift from the routes the SDK calls.
+
+Documented paths:
+
+| Group | Paths |
+|---|---|
+| Health | `/api/health-check` |
+| Auth | `sign-up/email`, `sign-in/email`, `get-session`, `sign-out`, `token`, `jwks`, the `email-otp` routes, `sign-in/social`, and the password-reset pair (`request-password-reset`, `reset-password`) |
+| Files | `/api/files`, `/api/files/presign`, `/api/files/{id}/finalize`, `/api/files/{id}/url` |
+| Devices | `/api/devices` |
+| Notifications | `/api/notifications/send`, `/api/notifications/test` |
+
+<Warning>
+The spec is hand-maintained and covers a subset of the API. It is **not** the source of truth for the admin surface, the auto-generated REST routes, or Better Auth's own endpoints. For those use the [Admin & HTTP API reference](/docs/reference/admin-api/) (extracted from the controllers), the [REST API](/docs/reference/rest-api/), and [Auth](/docs/platform/auth/).
+</Warning>
+
+## Client generation
+
+`openapi.json` is a normal OpenAPI document, so any generator works against it. For TypeScript, prefer the first-party path instead: `motherbase gen types typescript` produces a `Database` type from your live schema, and passing it to `createClient<Database>(…)` types rows, inserts, updates and RPC calls. See the [CLI](/docs/cli/commands/) and the [SDK reference](/docs/reference/sdk/).
+
+## Related
+
+- [Contributing · development](/docs/contributing/development/) — where `npm run swagger` sits among the other generated files.

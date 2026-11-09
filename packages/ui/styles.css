@@ -1,0 +1,145 @@
+/*
+ * Every value below reads the app's own design tokens first (the shadcn/ui
+ * names most `globals.css` files define: --primary, --border, --radius...) and
+ * falls back to a built-in palette. Tokens must be complete colours, not bare
+ * HSL triplets. Override a single component token with --mbui-* on `.mbui`.
+ *
+ * Rules live in the `components` layer, declared in Tailwind v4's order, so
+ * Tailwind utilities passed through `classNames` and any unlayered app CSS win
+ * over them without !important, whichever stylesheet is imported first.
+ */
+@layer theme, base, components, utilities;
+
+@layer components {
+  .mbui {
+    --mbui-bg: var(--background, oklch(98.4% .004 190));
+    --mbui-surface: var(--card, oklch(100% 0 0));
+    --mbui-sunken: var(--muted, oklch(96.4% .006 190));
+    --mbui-ink: var(--foreground, oklch(24% .02 200));
+    --mbui-muted: var(--muted-foreground, oklch(52% .02 200));
+    --mbui-line: var(--border, oklch(91% .008 195));
+    --mbui-line-strong: var(--input, oklch(84% .012 195));
+    --mbui-accent: var(--primary, oklch(52% .115 190));
+    --mbui-accent-hover: color-mix(in oklch, var(--mbui-accent), var(--mbui-ink) 15%);
+    --mbui-accent-ink: var(--primary-foreground, oklch(99% 0 0));
+    --mbui-ring: var(--ring, var(--mbui-accent));
+    --mbui-danger: var(--destructive, oklch(52% .17 22));
+    --mbui-radius: var(--radius, .75rem);
+    --mbui-shadow: 0 0 0 1px oklch(24% .02 200 / .04), 0 1px 2px oklch(24% .02 200 / .05), 0 12px 32px -12px oklch(24% .02 200 / .12);
+    color: var(--mbui-ink);
+    font-family: var(--mbui-font, inherit);
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    .mbui:not([data-theme="light"]) {
+      color-scheme: dark;
+      --mbui-bg: var(--background, oklch(17.5% .012 200));
+      --mbui-surface: var(--card, oklch(21.5% .013 200));
+      --mbui-sunken: var(--muted, oklch(18.5% .012 200));
+      --mbui-ink: var(--foreground, oklch(94% .006 195));
+      --mbui-muted: var(--muted-foreground, oklch(70% .015 195));
+      --mbui-line: var(--border, oklch(30% .012 200));
+      --mbui-line-strong: var(--input, oklch(38% .014 200));
+      --mbui-accent: var(--primary, oklch(72% .12 190));
+      --mbui-accent-ink: var(--primary-foreground, oklch(18% .02 200));
+      --mbui-danger: var(--destructive, oklch(72% .15 22));
+      --mbui-shadow: 0 0 0 1px oklch(100% 0 0 / .04), 0 16px 40px -16px oklch(0% 0 0 / .6);
+    }
+  }
+
+  .mbui *, .mbui *::before, .mbui *::after { box-sizing: border-box; }
+  .mbui button, .mbui input { font: inherit; }
+  .mbui button { cursor: pointer; }
+  .mbui button:disabled { cursor: not-allowed; opacity: .55; }
+  .mbui :is(button, input, a, summary):focus-visible { outline: 2px solid var(--mbui-ring); outline-offset: 2px; }
+
+  .mbui-page {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: clamp(2rem, 6vw, 7rem);
+    min-height: 100svh;
+    padding: 2rem;
+    background: radial-gradient(60rem 30rem at 50% -10%, color-mix(in oklch, var(--mbui-accent) 9%, transparent), transparent), var(--mbui-bg);
+  }
+
+  .mbui-page > .mbui-card { width: min(100%, 26rem); }
+  .mbui-aside { max-width: 24rem; color: var(--mbui-muted); }
+
+  .mbui-card {
+    width: min(100%, 26rem);
+    padding: clamp(1.5rem, 4vw, 2rem);
+    background: var(--mbui-surface);
+    border-radius: calc(var(--mbui-radius) + .25rem);
+    box-shadow: var(--mbui-shadow);
+  }
+
+  .mbui-header { margin-bottom: 1.5rem; }
+  .mbui-title { margin: 0; font-size: clamp(1.35rem, 3vw, 1.5rem); line-height: 1.2; font-weight: 600; letter-spacing: -.02em; text-wrap: balance; }
+  .mbui-description { margin: .4rem 0 0; color: var(--mbui-muted); font-size: .9rem; text-wrap: pretty; }
+  .mbui-logo { margin-bottom: 1.5rem; }
+  .mbui-form, .mbui-provider-list, .mbui-stack { display: grid; gap: 1rem; }
+  .mbui-field { display: grid; gap: .4rem; font-size: .84rem; font-weight: 500; }
+  .mbui-input { width: 100%; min-height: 2.6rem; padding: .55rem .8rem; color: var(--mbui-ink); background: var(--mbui-surface); border: 1px solid var(--mbui-line-strong); border-radius: var(--mbui-radius); box-shadow: 0 1px 1px oklch(24% .02 200 / .04); }
+  .mbui-input::placeholder { color: var(--mbui-muted); opacity: .7; }
+  .mbui-input:hover { border-color: var(--mbui-muted); }
+  .mbui-input:focus-visible { outline: 0; border-color: var(--mbui-ring); box-shadow: 0 0 0 3px color-mix(in oklch, var(--mbui-ring) 22%, transparent); }
+  .mbui-button { display: inline-flex; align-items: center; justify-content: center; gap: .55rem; width: 100%; min-height: 2.6rem; padding: .55rem .9rem; border-radius: var(--mbui-radius); font-size: .9rem; font-weight: 550; text-align: center; }
+  .mbui-button-primary { color: var(--mbui-accent-ink); background: var(--mbui-accent); border: 1px solid transparent; box-shadow: inset 0 1px 0 oklch(100% 0 0 / .18), 0 1px 2px oklch(24% .02 200 / .2); }
+  .mbui-button-primary:hover:not(:disabled) { background: var(--mbui-accent-hover); }
+  .mbui-button-primary:active:not(:disabled) { transform: translateY(1px); }
+  .mbui-button-secondary { color: var(--mbui-ink); background: var(--mbui-surface); border: 1px solid var(--mbui-line-strong); box-shadow: 0 1px 1px oklch(24% .02 200 / .04); }
+  .mbui-button-secondary:hover:not(:disabled) { background: var(--mbui-sunken); }
+  .mbui-text-button { display: inline-flex; justify-content: center; align-items: center; min-height: 2rem; padding: 0; color: var(--mbui-accent); background: none; border: 0; font-weight: 550; text-underline-offset: .2em; }
+  .mbui-text-button:hover { text-decoration: underline; }
+  .mbui-notice { margin: 0; color: var(--mbui-accent); font-size: .85rem; overflow-wrap: anywhere; }
+  .mbui-notice-error { padding: .6rem .8rem; color: var(--mbui-danger); background: color-mix(in oklch, var(--mbui-danger) 9%, var(--mbui-surface)); border-radius: calc(var(--mbui-radius) - .2rem); }
+  .mbui-footer { margin-top: 1.5rem; padding-top: 1.2rem; border-top: 1px solid var(--mbui-line); color: var(--mbui-muted); font-size: .84rem; }
+  .mbui-footer a, .mbui-footer .mbui-text-button { color: var(--mbui-ink); font-weight: 550; }
+  .mbui-alternatives { display: grid; gap: .75rem; margin-top: 1.25rem; }
+  .mbui-divider { display: flex; align-items: center; gap: .75rem; color: var(--mbui-muted); font-size: .78rem; }
+  .mbui-divider::before, .mbui-divider::after { content: ''; flex: 1; border-top: 1px solid var(--mbui-line); }
+  .mbui-methods { display: flex; flex-wrap: wrap; gap: .25rem; margin-bottom: 1.25rem; padding: .25rem; background: var(--mbui-sunken); border-radius: calc(var(--mbui-radius) + .1rem); }
+  .mbui-method { flex: 1; padding: .4rem .65rem; color: var(--mbui-muted); background: none; border: 0; border-radius: var(--mbui-radius); font-size: .84rem; font-weight: 500; }
+  .mbui-method:hover { color: var(--mbui-ink); }
+  .mbui-method[aria-pressed="true"] { color: var(--mbui-ink); background: var(--mbui-surface); box-shadow: 0 1px 2px oklch(24% .02 200 / .12), 0 0 0 1px oklch(24% .02 200 / .04); }
+
+  .mbui-user-menu { position: relative; display: inline-block; }
+  .mbui-user-trigger { display: inline-flex; align-items: center; gap: .6rem; padding: .25rem .7rem .25rem .25rem; cursor: pointer; border: 1px solid var(--mbui-line); border-radius: 999px; background: var(--mbui-surface); font-size: .84rem; }
+  .mbui-user-trigger:hover { background: var(--mbui-sunken); }
+  .mbui-user-trigger::marker { content: ''; }
+  .mbui-avatar { display: inline-grid; flex: none; place-items: center; width: 1.75rem; height: 1.75rem; font-size: .8rem; font-weight: 600; }
+  .mbui-avatar > :is(img, svg) { width: 100%; height: 100%; }
+  .mbui-avatar-photo { object-fit: cover; border-radius: var(--mbui-avatar-radius, 50%); }
+  .mbui-menu-panel { position: absolute; z-index: 20; right: 0; top: calc(100% + .5rem); display: grid; min-width: 12rem; padding: .35rem; background: var(--mbui-surface); border-radius: var(--mbui-radius); box-shadow: var(--mbui-shadow); }
+  .mbui-menu-panel :is(a, button) { display: block; padding: .5rem .65rem; color: var(--mbui-ink); background: none; border: 0; border-radius: calc(var(--mbui-radius) - .2rem); text-align: left; text-decoration: none; font-size: .86rem; }
+  .mbui-menu-panel :is(a, button):hover { background: var(--mbui-sunken); }
+  .mbui-menu-panel :is(a, button):has(> svg, > img) { display: flex; align-items: center; gap: .5rem; }
+  .mbui-visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .mbui-dropzone { display: grid; place-items: center; min-height: 6rem; padding: 1rem; color: var(--mbui-muted); text-align: center; font-size: .88rem; cursor: pointer; border: 1.5px dashed var(--mbui-line-strong); border-radius: var(--mbui-radius); }
+  .mbui-dropzone:is(:hover, [data-over]) { color: var(--mbui-ink); border-color: var(--mbui-accent); background: color-mix(in oklch, var(--mbui-accent) 6%, transparent); }
+  .mbui-dropzone:focus-within { outline: 2px solid var(--mbui-ring); outline-offset: 2px; }
+  .mbui-dropzone[data-disabled] { opacity: .6; cursor: progress; }
+  .mbui-avatar-upload-trigger { display: inline-flex; flex-direction: column; gap: .5rem; min-height: 0; padding: 0; border: 0; background: none; }
+  .mbui-menu-email { margin: .25rem .65rem .55rem; color: var(--mbui-muted); font-size: .78rem; overflow-wrap: anywhere; }
+  .mbui-item-list, .mbui-code-list { list-style: none; margin: 0; padding: 0; }
+  .mbui-item-list li { display: flex; justify-content: space-between; align-items: center; gap: 1rem; padding: .65rem 0; border-bottom: 1px solid var(--mbui-line); }
+  .mbui-item-list li:last-child { border-bottom: 0; }
+  .mbui-item-list button, .mbui-item-actions button { color: var(--mbui-accent); background: none; border: 0; font-size: .84rem; font-weight: 500; }
+  .mbui-item-actions { display: flex; flex-wrap: wrap; gap: .35rem; }
+  .mbui-secret { display: block; padding: .7rem; overflow-wrap: anywhere; background: var(--mbui-sunken); border-radius: calc(var(--mbui-radius) - .2rem); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .82rem; }
+  .mbui-code-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .5rem; }
+  .mbui-code-list li { padding: .5rem .65rem; background: var(--mbui-sunken); border-radius: calc(var(--mbui-radius) - .25rem); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .8rem; overflow-wrap: anywhere; }
+
+  @media (max-width: 700px) {
+    .mbui-page { flex-direction: column; align-items: stretch; padding: 1.25rem; }
+    .mbui-page > .mbui-card { margin: auto; }
+    .mbui-aside { width: min(100%, 26rem); margin: 0 auto; }
+  }
+
+  @media (prefers-reduced-motion: no-preference) {
+    .mbui-button, .mbui-input, .mbui-method, .mbui-user-trigger { transition: background-color .15s cubic-bezier(.25, 1, .5, 1), border-color .15s cubic-bezier(.25, 1, .5, 1), box-shadow .15s cubic-bezier(.25, 1, .5, 1), color .15s cubic-bezier(.25, 1, .5, 1); }
+  }
+}

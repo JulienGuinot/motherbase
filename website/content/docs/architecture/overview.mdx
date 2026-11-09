@@ -1,0 +1,108 @@
+---
+title: "Architecture Overview"
+description: "The three planes of Motherbase — Platform Console, per-project API server, and Studio — and how the monorepo maps onto them."
+order: 1
+---
+
+Motherbase is a monorepo that builds **one platform process** and **N project processes**. Everything else — Studio, the SDK, the CLI — talks to those two over HTTP.
+
+## The three planes
+
+| Plane | What it is | Where it runs | Code |
+|---|---|---|---|
+| **Platform Console** | Creates, updates, starts, stops and backs up projects. Holds the project registry, orgs, platform users, audit log. | One container, `console.<domain>` | `apps/server/console/**` |
+| **Project API** | One Express process per project: auth, REST, storage, realtime, edge functions, cron, admin API. | One container per project, `<project>.<domain>` | `apps/server/**` (excluding `console/`) |
+| **Studio** | The Next.js admin app: the Console screens and the per-project screens, from one build. | Mounted by the Console process at `/studio` | `apps/studio/**` |
+
+Studio is served by the Console alone (`apps/server/console/server.ts`), under the fixed `/studio` basePath, with an `mb_product=console` cookie. The per-project screens call the project's admin API through the Console proxy (`/api/projects/:id/admin/*`), so a project API (`apps/server/app.ts`) serves no UI of its own, and its Docker image does not include the Studio build.
+
+<Note>
+On the Console, `/console/*` and every other unmatched path `308`-redirect under `/studio`, so links from when the app lived at `/console` keep working.
+</Note>
+
+## Workspaces
+
+Root `package.json` declares `workspaces: ["apps/*", "packages/*"]`, driven by Turborepo (`turbo.json`).
+
+| Workspace | Package name | Role |
+|---|---|---|
+| `apps/server` | `@motherbase/server` | Project API **and** Platform Console (two entrypoints, one codebase) |
+| `apps/studio` | `studio` | Next.js 15 + React 19 admin app |
+| `packages/client` | `@motherbase/client` | Supabase-compatible TypeScript SDK |
+| `packages/ssr` | `@motherbase/ssr` | Cookie-based SSR helpers for the SDK |
+| `packages/cli` | `@motherbase/cli` | Operator CLI (`motherbase`) |
+| `packages/ai` | `@motherbase/ai` | Provider-agnostic agent loop used by the Studio assistant |
+| `packages/contracts` | `@motherbase/contracts` | Shared types between console, server and Studio |
+
+Root scripts worth knowing (all defined in `package.json`):
+
+```bash
+npm run dev            # project API (apps/server)
+npm run console:dev    # Platform Console
+npm run studio:dev     # Studio against a live API
+npm run studio:mock    # Studio against MSW-mocked data
+npm run build          # turbo run build
+npm run test           # turbo run test
+npm run cli -- <args>  # packages/cli/bin/motherbase.js
+```
+
+## Runtime topology
+
+```text
+                    ┌──────────── Traefik ────────────┐
+  *.example.com ───▶│  routes by Host header, TLS      │
+                    └───┬───────────────────────┬──────┘
+                        │                       │
+             console.example.com        client-a.example.com
+                        │                       │
+              ┌─────────▼────────┐     ┌────────▼─────────┐
+              │ Platform Console │     │  Project API     │
+              │ + Studio bundle  │     │  REST, auth, ... │
+              └─────────┬────────┘     └────────┬─────────┘
+                        │                       │
+                 platform Postgres        project Postgres
+                 project registry         project storage volume
+```
+
+Traefik configuration lives in `deploy/traefik`; the compose files that define the containers are `deploy/docker-compose.{dev-multi,prod}.yml`, plus the root `docker-compose.yml` for one project without the Console.
+
+## Inside the project API
+
+`apps/server/app.ts` is the composition root. It wires, in order: process-safety guards, CORS validation, Socket.IO, the DI container, rate limiting, Better Auth routes, body parsing, the public-bucket static route, controllers, health check, Swagger UI, and the error handler.
+
+Dependency injection is Awilix (`apps/server/container.ts`), with two registries:
+
+- `apps/server/services/index.ts` — every service singleton (storage, realtime, admin, backup, RLS, AI, …).
+- `apps/server/models/index.ts` — the Prisma client and the shared in-memory `LogBuffer`.
+
+Controllers are auto-mounted by `awilix-express`:
+
+```ts
+app.use(loadControllers('controllers/*.ts', { cwd: __dirname }));
+app.use(loadControllers('controllers/*.js', { cwd: __dirname }));
+```
+
+Any file matching `apps/server/controllers/*.controller.ts` is therefore a route module — no central router file to edit.
+
+## Background workers
+
+Five schedulers start in-process on boot (skipped when `NODE_ENV=test`), plus the realtime outbox drain and the cron helper:
+
+| Scheduler | Service | Purpose |
+|---|---|---|
+| Backups | `BackupSchedulerService` | Scheduled `pg_dump` per the `backup.schedule` settings group |
+| Edge functions | `EdgeFunctionSchedulerService` | Timer-triggered edge function runs |
+| Storage cleanup | `StorageCleanupSchedulerService` | Removes orphaned objects |
+| Bucket deletion | `BucketDeletionSchedulerService` | Deferred, resumable bucket drops |
+| Data retention | `DataRetentionSchedulerService` | Applies retention windows |
+| Realtime outbox | `RealtimeOutboxSchedulerService` | Drains DB change events to Socket.IO |
+| Cron | `initCron` (`helpers/cron.helper.ts`) | Application cron jobs |
+
+## Where to go next
+
+- [Request lifecycle](/docs/architecture/request-lifecycle/) — every middleware, in order.
+- [Settings system](/docs/architecture/settings-system/) — why almost nothing needs a restart.
+- [Data model](/docs/architecture/data-model/) — the Prisma schema.
+- [Security model](/docs/architecture/security-model/) — trust boundaries and keys.
+
+New to the project? Start with the [product overview](/docs/getting-started/overview/) instead.

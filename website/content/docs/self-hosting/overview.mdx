@@ -1,0 +1,90 @@
+---
+title: "Self-hosting Overview"
+description: Choose the Motherbase topology and prepare its host, DNS, and persistent storage.
+order: 1
+---
+
+Motherbase installs a Platform Console and lets that Console provision isolated project stacks. On a VPS, `curl -fsSL https://www.motherbase.site/install.sh | bash` downloads the verified deploy bundle and runs `setup.sh`. From a source checkout, run `./setup.sh` directly. `deploy/README.md` treats the files under `deploy/` as implementation and maintenance helpers.
+
+## Topologies
+
+| Topology | Selected by | Project Compose file | Routing |
+|----------|-------------|----------------------|---------|
+| Local multi-project | `./setup.sh`, then choose `Local` | `deploy/docker-compose.dev-multi.yml` | HTTP at `<name>.localhost` |
+| Production multi-project | `./setup.sh`, then choose `VPS`, or use `DOMAIN=... ./setup.sh --yes --prod` | `deploy/docker-compose.prod.yml` | HTTPS at `<name>.<base-domain>` |
+| Root development stack | `docker compose up` in the repository root | `docker-compose.yml` | Loopback ports only, no proxy |
+
+Local mode starts `deploy/traefik/docker-compose.dev.yml` and `deploy/console/docker-compose.dev.yml`. Production starts `deploy/traefik/docker-compose.yml` and `deploy/console/docker-compose.yml`. In both modes, the Console creates projects afterwards; `setup.sh` does not create a default project.
+
+<Note>
+The root `docker-compose.yml` is a single-stack development convenience, not a supported
+production topology: `setup.sh` never starts it. Use the Console-managed production
+topology for a normal installation. See [Docker topology](/docs/self-hosting/docker-topology/).
+</Note>
+
+## Host requirements
+
+The checks in `setup.sh` require:
+
+- Bash, because the setup must be executed as `./setup.sh` and refuses to be sourced.
+- A working Docker daemon and either `docker compose` or the legacy `docker-compose` command.
+- Access to `/var/run/docker.sock`; only the internal orchestration daemon receives the socket in the Console stacks.
+- Host ports `80` and `443` in VPS mode. The script opens them through active `ufw`, or inserts `iptables` accept rules when available.
+- Outbound HTTPS access to pull images, resolve their immutable repository digests, query `https://ifconfig.me`, and complete ACME challenges.
+
+If Docker is absent on Linux, `setup.sh` runs the installer from `https://get.docker.com`. On macOS and other systems it stops and asks you to install Docker manually. No Node.js installation is required for `setup.sh`: `deploy/deps.Dockerfile` builds with `node:22-bookworm-slim`. A manual host build is separate and is guarded by `scripts/check-node-version.cjs`, which requires Node `22.12.0` or newer.
+
+The repository does not enforce a CPU, RAM, disk, or Linux-distribution minimum. Production project defaults in `apps/server/console/lib/manifest.ts` limit API and Postgres to `0.5` CPU and `512M` each, MinIO to `0.25` CPU and `256M`, and the edge runtime to `0.5` CPU and `768M`.
+
+For sizing, those are **ceilings, not reservations**: a project at its default limits can use up
+to 1.75 CPU and about 2 GB of RAM, but an idle one uses far less. Budget the Console and
+Traefik on top, and adjust per project under [resource limits](/docs/console/projects/#resource-limits).
+
+## DNS
+
+For `DOMAIN=example.com`, create one wildcard record pointing to the VPS:
+
+```dns
+Type: A
+Name: *
+Value: <VPS_IP>
+```
+
+The generated project defaults in `apps/server/console/lib/manifest.ts` use:
+
+```text
+console.example.com
+<name>.example.com
+<name>-storage.example.com
+<name>-minio.example.com
+```
+
+`*.example.com` does not cover the apex `example.com`. If `CONSOLE_DOMAIN` is outside `DOMAIN`, `setup.sh` prints and checks a second explicit record. A custom project domain outside the wildcard also needs its own DNS record.
+
+When the base domain already contains at least two dots, for example `test.example.com`, `setup.sh` treats the resulting project hosts as deep subdomains and offers the GoDaddy DNS-01 configuration. See [Traefik and TLS](/docs/self-hosting/traefik-and-tls).
+
+## What is installed where
+
+| Location | Contents | Persistence |
+|----------|----------|-------------|
+| Repository root `.env` | Local project environment, or the VPS install marker with `BASE_HOST`, `CONSOLE_DOMAIN`, and `ACME_EMAIL` | Kept on normal reruns; removed by reset |
+| `deploy/console/.env` | Console credentials, orchestration bearer, image references, domain suffix, and resolver | Mode `600`; kept and repaired on normal reruns |
+| `deploy/traefik/.env` | ACME email, pinned proxy images, optional dashboard and DNS-01 values | Kept on normal reruns |
+| `/srv/projects/<name>/.env.prod` | One production project's generated configuration and secrets | Mode `600`; kept by stop/update, deleted by project destruction |
+| `/srv/projects/<name>/manifest.json` | Non-secret project manifest | Kept by stop/update, deleted by project destruction |
+| `console_projects` volume | Local-mode Console project directory mounted at `/srv/projects` | Kept by normal recreation |
+| Per-project `db_data` and `minio_data` volumes | PostgreSQL and MinIO data | Kept by stop/update; deleted by destroy/reset |
+| Per-project `api_backups` and `api_data` volumes | Production SQL dumps and assistant SQLite data | Kept by stop/update; deleted by destroy/reset |
+| `deploy/traefik/acme/` | Traefik ACME state, including `acme.json` | Bind-mounted into the production Traefik container |
+| `traefik_proxy` | External Docker network shared by Traefik, Console, APIs, and MinIO | Created by setup when missing |
+
+<Warning>
+Project **Destroy**, `./setup.sh --reset`, and `./deploy/reset.sh` remove Docker volumes. A normal stop, restart, setup rerun, or project update does not.
+</Warning>
+
+## Next steps
+
+- Follow [Setup script](/docs/self-hosting/setup-script) for interactive and unattended installs.
+- Use [Docker topology](/docs/self-hosting/docker-topology) to identify the service and volume involved in an incident.
+- Read [Backups and restore](/docs/self-hosting/backups-and-restore) before the first production upgrade.
+- Keep [Operations](/docs/self-hosting/operations/) at hand for the day-to-day start/stop/logs/reset runbook.

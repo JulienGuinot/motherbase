@@ -1,0 +1,217 @@
+---
+title: "Todo App"
+description: "A Supabase-style walkthrough with SQL, RLS policies, the REST API, SDK, and Realtime."
+order: 1
+---
+
+This guide builds a todo app from Project Studio: create a table with SQL, add an owner-scoped RLS policy, copy connection values, then use the Supabase-compatible SDK. Each user sees, edits, and deletes **only their own** todos.
+
+A live demo running against a backend is available on the [Example page](/example).
+
+## 1. Create the table
+
+Open the project from the **Platform Console**, then run this in **Project Studio → SQL Editor**:
+
+```sql
+CREATE TABLE todo (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  title text NOT NULL,
+  done boolean NOT NULL DEFAULT false,
+  user_id text NOT NULL DEFAULT auth.uid(),
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+ALTER TABLE todo ENABLE ROW LEVEL SECURITY;
+```
+
+`user_id` defaults to `auth.uid()` — the JWT `sub` claim of the caller — so a row is stamped with its owner automatically on insert; the client never sends `user_id`. Making it `NOT NULL` guarantees every row has an owner, which the policy below relies on.
+
+Motherbase discovers the table and exposes:
+
+```http
+GET    /rest/v1/todo
+POST   /rest/v1/todo
+PATCH  /rest/v1/todo?id=eq.<id>
+DELETE /rest/v1/todo?id=eq.<id>
+```
+
+## 2. Add an owner-scoped policy
+
+Open **Project Studio → SQL Editor** and create a real PostgreSQL RLS policy. One `FOR ALL` policy covers read, insert, update, and delete:
+
+```sql
+CREATE POLICY "todo owner access"
+ON todo
+FOR ALL
+TO authenticated
+USING (auth.uid() = user_id)
+WITH CHECK (auth.uid() = user_id);
+```
+
+- `TO authenticated` restricts the policy to signed-in requests. There is deliberately **no `anon` policy**, so a signed-out request matches no policy and RLS blocks it — no reads, no writes.
+- `USING (auth.uid() = user_id)` gates the rows a caller can **see, update, or delete** — only rows they own.
+- `WITH CHECK (auth.uid() = user_id)` gates the rows a caller can **write** — you can't insert or move a row to another owner.
+
+<Note>
+Why owner-only, and why no `anon` policy? A pure anonymous request carries no identity (`auth.uid()` is `null`), so there is no stable "self" to scope anonymous rows to — every anon caller would collapse into one shared bucket. Requiring a session gives each row a real owner and keeps the isolation guarantee honest. If you genuinely want a public board, add a separate `TO anon USING (true)` policy and accept that anon rows are shared by everyone.
+</Note>
+
+<Note>
+Policies are native PostgreSQL RLS. You can also manage them from **Project Studio → Authentication → Policies**, which writes real PostgreSQL policies behind the UI.
+</Note>
+
+## 3. Copy connection values
+
+Open **Project Studio → Connect** and copy the project API URL and SDK install command into your app environment:
+
+```env
+NEXT_PUBLIC_MOTHERBASE_URL=http://todo.localhost
+NEXT_PUBLIC_MOTHERBASE_KEY=mb_publishable_...   # optional until key enforcement is on
+```
+
+## 4. Install the SDK
+
+```bash
+npm install @motherbase/client
+npm install socket.io-client # optional, only for realtime
+```
+
+Initialize once in your app:
+
+```ts
+import { createClient, localStorageStorage } from '@motherbase/client'
+
+export const client = createClient(
+  process.env.NEXT_PUBLIC_MOTHERBASE_URL!,
+  process.env.NEXT_PUBLIC_MOTHERBASE_KEY,
+  { storage: localStorageStorage() },
+)
+```
+
+On Next.js with Server Components, use `@motherbase/ssr` instead, which shares the session
+between browser and server through a cookie: see
+[Framework Quickstarts → Next.js](/docs/getting-started/frameworks/#nextjs-app-router).
+
+## 5. CRUD with REST
+
+```ts
+type Todo = { id: string; title: string; done: boolean; user_id: string; created_at: string }
+
+const { data: todos, error: listError } = await client
+  .from<Todo>('todo')
+  .select('*')
+  .order('created_at', { ascending: false })
+
+// .select() asks for the inserted row back: without it, a write returns data: null
+const { data: created, error: createError } = await client
+  .from<Todo>('todo')
+  .insert({ title: 'Buy milk', done: false })
+  .select()
+
+const todo = created?.[0]
+
+if (todo) {
+  await client.from<Todo>('todo').update({ done: !todo.done }).eq('id', todo.id)
+  await client.from<Todo>('todo').delete().eq('id', todo.id)
+}
+```
+
+`PATCH` and `DELETE` must include filters for non-admin callers. Motherbase rejects unfiltered bulk writes.
+
+## 6. Realtime updates
+
+REST writes emit table events automatically.
+
+```ts
+const channel = client
+  .channel('room-todo')
+  .on('postgres_changes', { event: '*', schema: 'public', table: 'todo' }, (payload) => {
+    if (payload.eventType === 'INSERT') {
+      setTodos(prev => [payload.new, ...prev])
+    }
+
+    if (payload.eventType === 'UPDATE') {
+      setTodos(prev => prev.map(t => t.id === payload.new.id ? payload.new : t))
+    }
+
+    if (payload.eventType === 'DELETE') {
+      setTodos(prev => prev.filter(t => t.id !== payload.old.id))
+    }
+  })
+  .subscribe()
+
+// when the list unmounts
+await client.removeChannel(channel)
+```
+
+## 7. Auth is required
+
+With the owner-scoped policy, every read and write needs a session — a signed-out client sees an empty list and its writes are rejected by RLS. Sign up or sign in first:
+
+```ts
+await client.auth.signUp.email({ email, password, name: email })  // first time
+await client.auth.signIn.email({ email, password })
+
+await client.from('todo').insert({
+  title: 'My todo',
+  done: false, // user_id is filled in server-side from auth.uid()
+})
+```
+
+React to session changes to load or clear data:
+
+```ts
+const { data: { subscription } } = client.auth.onAuthStateChange((event, session) => {
+  // event: 'INITIAL_SESSION' | 'SIGNED_IN' | 'USER_UPDATED'
+  //      | 'MFA_CHALLENGE_VERIFIED' | 'SIGNED_OUT'
+  if (session) loadTodos()
+  else setTodos([])
+})
+
+// on unmount:
+subscription.unsubscribe()
+```
+
+Motherbase scopes reads and writes to rows where `user_id` matches `auth.uid()`, so the same query returns a different list for each user — the isolation is enforced by Postgres, not by client-side filtering.
+
+## Why this stack
+
+The choices below are what make the todo app a few lines of client code instead of a backend project.
+
+### Native PostgreSQL RLS, not a JS policy layer
+
+Access control is expressed as real `CREATE POLICY` rules evaluated by Postgres for REST and SDK requests. The SDK uses the caller's role, so a forgotten filter cannot expose another user's rows. A direct database connection as the owner bypasses RLS; keep those credentials on the server.
+
+### Two ways to query the same table
+
+Use the Supabase-style query builder when you want filters and a `{ data, error }` result:
+
+```ts
+const { data, error } = await client.from('todo').select('*').eq('done', false)
+```
+
+Or use Prisma-style methods, which return rows directly and throw on error:
+
+```ts
+const todos = await client.db.todo.findMany({ where: { done: false } })
+```
+
+Both call the same RLS-protected REST API. Auth uses Better Auth method names, so migrating a Supabase app requires changes to auth calls; see [Migrate from Supabase](/docs/getting-started/migrate-from-supabase) and the [SDK reference](/docs/reference/sdk/).
+
+### PostgREST-style REST over a bespoke API
+
+Data access goes through `/rest/v1/:model` with a PostgREST-style query dialect (`?id=eq.<id>`, `order`, `limit`). Reusing an established, table-driven convention means new tables are instantly queryable with no per-endpoint code, filters map directly onto SQL, and the wire format is already documented by the wider PostgREST ecosystem. The server rejects unfiltered bulk `PATCH`/`DELETE` for non-admins, so a missing filter fails loudly instead of rewriting the whole table.
+
+### Bearer-token auth, no refresh-token dance
+
+Auth is backed by Better Auth session tokens: sign-in returns one opaque bearer token, checked against the session table on every request. There is no refresh token to rotate and no access token to wait out: signing out, or an admin ending the session, revokes it at once. The trade-off is that the token is long-lived and readable by your scripts, so the usual XSS hygiene applies. On the client, `localStorageStorage()` or `cookieStorage()` persists it so the session survives reloads; `@motherbase/ssr` shares it with Server Components.
+
+### socket.io for realtime, loaded on demand
+
+Realtime multiplexes `postgres_changes`, broadcast, and presence over one socket.io connection. socket.io buys automatic reconnection, heartbeats, and a polling fallback for hostile networks — reliability that raw WebSockets leave to you. It is imported lazily only when you open a channel, so REST-only apps never pay for the transport. REST writes emit table change events automatically, which is why the demo's list updates live without any extra publish step.
+
+## Next steps
+
+- Add file attachments via the [Storage API](/docs/platform/storage)
+- Manage project resources from the [CLI](/docs/cli/overview)
+- Deploy your instance following the [Deploy guide](/docs/getting-started/deploy)
