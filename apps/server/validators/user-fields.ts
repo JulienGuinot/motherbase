@@ -29,12 +29,6 @@ export const personNameSchema = z
   // what it really says.
   .refine(value => !/\p{Cc}/u.test(value), 'must not contain control characters');
 
-export const imageUrlSchema = z
-  .string()
-  .trim()
-  .max(URL_MAX, `must be at most ${URL_MAX} characters`)
-  .refine(value => /^https?:\/\//i.test(value), 'must be an http(s) URL');
-
 /**
  * Better Auth's own `name` / `image` columns. They are not additionalFields, so
  * no validator can be attached to them, and they also arrive from OAuth
@@ -56,4 +50,31 @@ export function capCoreProfileFields(user: Record<string, unknown>): Record<stri
     else if (image !== user.image) capped.image = image;
   }
   return Object.keys(capped).length > 0 ? capped : null;
+}
+
+type StructuredName = { firstName?: unknown; lastName?: unknown };
+
+const namePart = (value: unknown) => (typeof value === 'string' ? value.trim() : '');
+
+/**
+ * What the `users_derive_name` trigger (migration 20261112090000) makes of
+ * `name`: "firstName lastName" when either is set, otherwise null (the written
+ * `name` is kept). Must stay in step with that SQL.
+ */
+export function derivedName({ firstName, lastName }: StructuredName): string | null {
+  return [namePart(firstName), namePart(lastName)].filter(Boolean).join(' ') || null;
+}
+
+/**
+ * True when an update sets a `name` the trigger is about to overwrite, because
+ * the row (after this update) still has a first or last name. Rejecting it
+ * beats answering 200 for a name that was never stored.
+ */
+export function discardsWrittenName(update: Record<string, unknown>, current: StructuredName): boolean {
+  if (typeof update.name !== 'string') return false;
+  const derived = derivedName({
+    firstName: 'firstName' in update ? update.firstName : current.firstName,
+    lastName: 'lastName' in update ? update.lastName : current.lastName,
+  });
+  return derived !== null && derived !== update.name.trim();
 }

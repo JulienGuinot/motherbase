@@ -23,9 +23,6 @@ const RESERVED_USER_FIELDS = new Set([
   'createdAt',
   'updatedAt',
   'role',
-  'banned',
-  'banReason',
-  'banExpires',
   'twoFactorEnabled',
   'isAnonymous',
   // aliases this module itself adds, so a re-normalisation is idempotent

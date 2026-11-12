@@ -70,7 +70,7 @@ on the callback route after configuring the provider redirect URL in Auth settin
 ## Accounts, avatars and uploads
 
 `UserAvatar` and `UserButton` provide user identity display with a generated fallback.
-`UserProfileForm` edits the user's name and can include `AvatarUpload`. The avatar uploader
+`UserProfileForm` edits the user's first and last name (Better Auth's `name` is derived from them) and can include `AvatarUpload`. The avatar uploader
 stores the replacement image in a public bucket (the default bucket is `avatars`) and saves
 the resulting URL to the user's `image`; create the bucket and grant signed-in users write
 access before enabling it.

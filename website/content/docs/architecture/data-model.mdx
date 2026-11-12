@@ -40,7 +40,7 @@ Platform tables are deliberately kept out of `public` so the auto-generated REST
 
 | Model | Table | Purpose |
 |---|---|---|
-| `User` | `users` | Identity. Own columns (`role`, `status`, `username`, `firstName`, `imageUrl`, provider ids) plus Better Auth core columns (`name`, `image`, `emailVerified`, `twoFactorEnabled`, `phoneNumber`, `phoneNumberVerified`). `username` is unique and assigned by the create hook when a sign-up supplies none |
+| `User` | `users` | Identity. Better Auth core columns (`name`, `image`, `emailVerified`, `twoFactorEnabled`, `phoneNumber`, `phoneNumberVerified`, `isAnonymous`) plus Motherbase's `additionalFields` (`username`, `firstName`, `lastName`, `role`, `status`). `name` is derived: the `users_derive_name` trigger sets it to "firstName lastName" whenever either is set. `image` is the one avatar URL. Social identities live in `account`, never on this row. `username` is unique and assigned by the create hook when a sign-up supplies none |
 | `Session` | `session` | Active sessions: `token`, `expiresAt`, `ipAddress`, `userAgent`, `activeOrganizationId` |
 | `Account` | `account` | Credential and OAuth links. **Passwords live here** (`password`), not on `User` |
 | `Verification` | `verification` | Email/OTP verification values with `expiresAt` |

@@ -33,7 +33,7 @@ import {
 } from './redirect-urls';
 import {
   capCoreProfileFields,
-  imageUrlSchema,
+  discardsWrittenName,
   personNameSchema,
   usernameSchema,
 } from '../validators/user-fields';
@@ -196,15 +196,13 @@ export interface ProjectAuthDeps {
   apple?: { clientId: string; clientSecret: string; appBundleIdentifier?: string };
 }
 
-/** Google's `picture` / `given_name` / `family_name` onto the columns this app reads. */
+/** Google's `given_name` / `family_name` onto the structured name fields. Better
+ *  Auth already maps `picture` onto `image` and `name` onto `name`. */
 export function mapGoogleProfileToUser(profile: {
-  picture?: string;
   given_name?: string;
   family_name?: string;
 }) {
   return {
-    image: profile.picture || undefined,
-    imageUrl: profile.picture || undefined,
     firstName: profile.given_name || undefined,
     lastName: profile.family_name || undefined,
   };
@@ -229,9 +227,8 @@ function buildSocialProviders(deps: ProjectAuthDeps): Record<string, any> {
     };
   }
 
-  // Better Auth parks the provider avatar on `user.image`, but this app's user
-  // DTO (UserService.toDto) reads `imageUrl`, so the profile is mapped onto both
-  // columns, plus the names Google already hands us.
+  // Better Auth maps the avatar onto `user.image` itself; this adds the
+  // structured names Google already hands us.
   //
   // Deliberately no `overrideUserInfoOnSignIn`: the app lets a user upload their
   // own avatar (UserService.updateImage), and re-running this on every sign-in
@@ -472,26 +469,26 @@ function jwtPlugin(
   });
 }
 
-const USER_ADDITIONAL_FIELDS = {
+/**
+ * Mirrored by the SDK's `MOTHERBASE_USER_FIELDS` (packages/client), which types
+ * `client.auth.updateUser`; tests/user-fields-contract.unit.test.ts keeps the
+ * two in step.
+ */
+export const USER_ADDITIONAL_FIELDS = {
   // `input: true` means a client can set these on sign-up and through
   // `POST /api/auth/update-user`, so every one of them needs a validator:
   // Better Auth applies no length or shape check of its own, and without
   // this a 500-character username went straight into the column.
   username: { type: 'string', required: false, input: true, validator: { input: usernameSchema } },
+  // Writing either rewrites `name` (the users_derive_name trigger).
   firstName: { type: 'string', required: false, input: true, validator: { input: personNameSchema } },
   lastName: { type: 'string', required: false, input: true, validator: { input: personNameSchema } },
-  imageUrl: { type: 'string', required: false, input: true, validator: { input: imageUrlSchema } },
   role: { type: 'string', required: false, defaultValue: 'USER', input: false },
   // Declared here as well as by the anonymous plugin so it is on every
   // session user even while that plugin is off: the `is_anonymous` claim
   // and the guest checks in plugins/user-credentials.ts read it.
   isAnonymous: { type: 'boolean', required: false, defaultValue: false, input: false },
   status: { type: 'string', required: false, defaultValue: 'active', input: false },
-  classicEmail: { type: 'string', required: false, input: false },
-  appleId: { type: 'string', required: false, input: false },
-  appleEmail: { type: 'string', required: false, input: false },
-  googleId: { type: 'string', required: false, input: false },
-  googleEmail: { type: 'string', required: false, input: false },
 } as const;
 
 /** Before: sign-out reporting and redirect enforcement. After: aal2 marking and auth-event notification. */
@@ -566,7 +563,24 @@ function databaseHooks(deps: ProjectAuthDeps): BetterAuthOptions['databaseHooks'
       update: {
         // Better Auth's own `name`/`image` columns take no validator (they are
         // not additionalFields), and update-user accepts any string for them.
-        before: async user => {
+        //
+        // `name` is derived from firstName/lastName by a trigger, so a client
+        // setting `name` alone on a user who has either would get a 200 for a
+        // name that is never stored. Only update-user is checked: the internal
+        // flows that write `name` must not start failing on it.
+        before: async (user, ctx) => {
+          const userId = ctx?.path === '/update-user' ? ctx.context.session?.user.id : undefined;
+          if (userId && typeof user.name === 'string') {
+            const current = await deps.prisma.user.findUnique({
+              where: { id: userId },
+              select: { firstName: true, lastName: true },
+            });
+            if (current && discardsWrittenName(user, current)) {
+              throw new APIError('BAD_REQUEST', {
+                message: 'name is derived from firstName and lastName on this user: update those, or clear them to set name directly.',
+              });
+            }
+          }
           const capped = capCoreProfileFields(user);
           return capped ? { data: { ...user, ...capped } } : undefined;
         },

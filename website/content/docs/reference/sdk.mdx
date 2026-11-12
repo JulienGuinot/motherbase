@@ -498,8 +498,10 @@ await client.auth.signIn.social({ provider: 'apple', idToken: { token, nonce } }
 Account management:
 
 ```ts
-// Profile fields are flat, not under `data`
-await client.auth.updateUser({ name: 'Ada', image: url })
+// Profile fields are flat, not under `data`. `name` is derived: once `firstName`
+// or `lastName` is set it reads "firstName lastName", and a `name` sent alone
+// over them is refused with a 400.
+await client.auth.updateUser({ firstName: 'Ada', lastName: 'Lovelace', image: url })
 
 await client.auth.changePassword({ currentPassword: 'old-secret', newPassword: 'new-secret' })
 

@@ -24,7 +24,8 @@ const userButtonLabels = {
 
 const profileLabels = {
   title: 'Profile',
-  name: 'Name',
+  firstName: 'First name',
+  lastName: 'Last name',
   submit: 'Save profile',
   submitting: 'Saving…',
   saved: 'Profile saved.',
@@ -137,16 +138,20 @@ export function UserProfileForm({ className, classNames, onSaved, avatar, avatar
   labels?: Partial<UserProfileLabels>;
 }) {
   const { client, user } = useAuth();
-  const [name, setName] = useState(user?.name ?? '');
+  const [firstName, setFirstName] = useState(user?.firstName ?? '');
+  const [lastName, setLastName] = useState(user?.lastName ?? '');
   const [saved, setSaved] = useState(false);
   const { busy, error, run } = useFormAction();
   const text = { ...profileLabels, ...labels };
 
-  useEffect(() => setName(user?.name ?? ''), [user?.name]);
+  useEffect(() => setFirstName(user?.firstName ?? ''), [user?.firstName]);
+  useEffect(() => setLastName(user?.lastName ?? ''), [user?.lastName]);
 
+  // The structured name, not `name`: the server derives `name` from these two
+  // and refuses a `name` written alone over them.
   async function save(event: SubmitEvent) {
     event.preventDefault();
-    const result = await run(() => client.auth.updateUser({ name: name.trim() }));
+    const result = await run(() => client.auth.updateUser({ firstName: firstName.trim(), lastName: lastName.trim() }));
     if (result) {
       setSaved(true);
       onSaved?.();
@@ -159,7 +164,8 @@ export function UserProfileForm({ className, classNames, onSaved, avatar, avatar
 
   return <FormShell title={text.title} description={user?.email} leading={leading} className={className} classNames={classNames}>
     <form onSubmit={event => void save(event)} className={classes('mbui-form', classNames?.form)}>
-      <Field label={text.name} name="name" value={name} onChange={value => { setName(value); setSaved(false); }} autoComplete="name" classNames={classNames} />
+      <Field label={text.firstName} name="firstName" value={firstName} onChange={value => { setFirstName(value); setSaved(false); }} autoComplete="given-name" classNames={classNames} />
+      <Field label={text.lastName} name="lastName" value={lastName} onChange={value => { setLastName(value); setSaved(false); }} autoComplete="family-name" classNames={classNames} required={false} />
       <Notice error className={classNames?.message}>{error}</Notice>
       <Notice className={classNames?.message}>{saved ? text.saved : null}</Notice>
       <button type="submit" disabled={busy || !user} className={classes('mbui-button mbui-button-primary', classNames?.button)}>{busy ? text.submitting : text.submit}</button>

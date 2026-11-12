@@ -9,9 +9,7 @@ export interface AdminUser {
   emailVerified: boolean;
   providers: string[];
   createdAt?: string;
-  /** Uploaded avatar. Null for most rows: the column is nullable. */
-  imageUrl?: string | null;
-  /** Better Auth's own avatar column, set by social sign-in. */
+  /** Avatar URL (Better Auth's `image`): the provider's, or one the user uploaded. */
   image?: string | null;
   /** A guest from signInAnonymously(), until it links an email or a provider. */
   isAnonymous?: boolean | null;

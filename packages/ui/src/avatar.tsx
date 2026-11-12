@@ -6,7 +6,7 @@ import type { User } from '@motherbase/client';
 import { Blobatar } from 'blobatar/react';
 import { classes } from './shared.js';
 
-export type AvatarUser = Partial<Pick<User, 'name' | 'email' | 'image' | 'imageUrl' | 'user_metadata'>>;
+export type AvatarUser = Partial<Pick<User, 'name' | 'email' | 'image' | 'user_metadata'>>;
 
 export interface UserAvatarProps {
   user?: AvatarUser | null;
@@ -21,9 +21,9 @@ export interface UserAvatarProps {
   className?: string;
 }
 
-/** The image the user picked, wherever the server stored it. */
+/** The image the user picked: Better Auth's `image`, or its supabase-js alias. */
 export function avatarSrc(user?: AvatarUser | null): string | undefined {
-  return user?.image || user?.user_metadata?.image || user?.imageUrl || undefined;
+  return user?.image || user?.user_metadata?.image || undefined;
 }
 
 export function UserAvatar({ user, src, name, size = 28, alt = '', fallback, className }: UserAvatarProps) {

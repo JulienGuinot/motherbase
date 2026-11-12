@@ -247,7 +247,7 @@ client.auth.signIn.emailOtp({ email, otp }) | .magicLink({ email }) | .passkey()
 client.auth.getSession()                        // { session, user }, asks the server
 client.auth.signOut()
 client.auth.listSessions() | .revokeSession({ token }) | .revokeOtherSessions() | .revokeSessions()
-client.auth.updateUser({ name, image }) | .changePassword({ currentPassword, newPassword }) | .deleteUser({ password })
+client.auth.updateUser({ firstName, lastName, image }) | .changePassword({ currentPassword, newPassword }) | .deleteUser({ password })
 client.auth.listAccounts() | .linkSocial({ provider, callbackURL }) | .unlinkAccount({ providerId })
 client.auth.emailOtp.sendVerificationOtp({ email, type }) | .requestPasswordReset({ email }) | .resetPassword({ email, otp, password })
 client.auth.twoFactor.enable({ password }) | .verifyTotp({ code }) | .verifyOtp({ code }) | .disable({ password })

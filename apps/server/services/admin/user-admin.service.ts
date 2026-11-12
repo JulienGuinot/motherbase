@@ -50,33 +50,19 @@ export function userListWhere(filter: UserListFilter): Prisma.UserWhereInput {
 // deliberately absent: promotion has its own audited route.
 const UPDATABLE_FIELDS = ['firstName', 'lastName', 'username', 'status'] as const;
 
-// Pre-Better-Auth rows carried the social identity on the user row itself.
-// Better Auth never writes these columns (auth/instance.ts declares them
-// `input: false`), so they only ever describe accounts created before the
-// migration. Kept as a fallback, not as the source of truth.
-const LEGACY_PROVIDER_FIELDS: Array<{ field: string; name: string }> = [
-  { field: 'appleId', name: 'apple' },
-  { field: 'googleId', name: 'google' },
-];
-
 /**
  * Which ways this user can sign in.
  *
  * Every identity is an `account` row: social and custom OIDC logins keep their
  * `providerId` ('google', 'github', or whatever `auth.oauth.custom` defines),
  * and a password lives on the reserved 'credential' provider with the hash in
- * `password`. Never `user.googleId` / `user.appleId`: Better Auth does not
- * populate those. Reading the accounts also means a provider never needs
+ * `password`. Reading the accounts also means a provider never needs
  * registering here: enabling GitHub in settings is enough for it to appear.
  */
-const providersFor = (user: Record<string, any>, accounts?: Array<{ providerId: string; password?: string | null }>): string[] => {
+const providersFor = (accounts?: Array<{ providerId: string; password?: string | null }>): string[] => {
   const list = (accounts ?? [])
     .filter(a => a.providerId !== CREDENTIAL)
     .map(a => a.providerId);
-
-  for (const { field, name } of LEGACY_PROVIDER_FIELDS) {
-    if (user[field] && !list.includes(name)) list.push(name);
-  }
 
   // 'email' rather than 'credential': it is what the UI labels the row, and the
   // provider ids above are all user-facing names too.
@@ -161,7 +147,6 @@ export class UserAdminService extends BaseContext {
           data: {
             email,
             name: email,
-            classicEmail: email,
             username,
             role: input.role === 'ADMIN' ? 'ADMIN' : 'USER',
             emailVerified: input.emailVerified ?? false,
@@ -193,7 +178,7 @@ export class UserAdminService extends BaseContext {
     );
 
     return {
-      user: { ...maskRow(user), providers: providersFor(user as any, [{ providerId: 'credential', password: 'set' }]) },
+      user: { ...maskRow(user), providers: providersFor([{ providerId: 'credential', password: 'set' }]) },
       temporaryPassword,
       invited,
     };
@@ -206,7 +191,7 @@ export class UserAdminService extends BaseContext {
     });
     return users.map(u => {
       const { accounts, ...rest } = u as any;
-      return { ...maskRow(rest), providers: providersFor(rest, withPasswordSet(accounts)) };
+      return { ...maskRow(rest), providers: providersFor(withPasswordSet(accounts)) };
     });
   }
 
@@ -244,7 +229,7 @@ export class UserAdminService extends BaseContext {
     return {
       users: users.map(u => {
         const { accounts, ...rest } = u as any;
-        return { ...maskRow(rest), providers: providersFor(rest, withPasswordSet(accounts)) };
+        return { ...maskRow(rest), providers: providersFor(withPasswordSet(accounts)) };
       }),
       page,
       perPage,
@@ -265,7 +250,7 @@ export class UserAdminService extends BaseContext {
     const { sessions, accounts, ...rest } = user as any;
     return {
       ...maskRow(rest),
-      providers: providersFor(rest, accounts),
+      providers: providersFor(accounts),
       activeSessions: (sessions ?? []).length,
       sessions: (sessions ?? [])
         .sort((a: any, b: any) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())

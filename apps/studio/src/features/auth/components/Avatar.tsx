@@ -5,7 +5,7 @@ import "blobatar/motion.css";
 
 export function Avatar({ user }: { user: AdminUser }) {
     const isAdmin = user.role === 'ADMIN';
-    const src = user.image || user.imageUrl;
+    const src = user.image;
 
     // Plain img, not next/image: provider avatars come from arbitrary hosts
     // (googleusercontent, avatars.githubusercontent, a project's own bucket) and

@@ -11,7 +11,7 @@ function toPublicUser(user: User) {
     createdAt: user.createdAt,
     updatedAt: user.updatedAt,
     username: user.username ?? undefined,
-    imageUrl: user.imageUrl ?? undefined,
+    image: user.image ?? undefined,
   };
 }
 
@@ -115,16 +115,16 @@ export class UserService extends BaseContext {
       if (!image.url) throw new HttpException('The uploaded profile image is not readable.', 403);
       const current = await this.di.prisma.user.findUnique({
         where: { id: user.id },
-        select: { imageUrl: true },
+        select: { image: true },
       });
       const newUser = await this.di.prisma.user.update({
         where: { id: user.id },
-        data: { imageUrl: image.url },
+        data: { image: image.url },
       });
       if (!newUser) throw new HttpException('Error updating your profile, please try again later.', 302);
 
-      if (current?.imageUrl && current.imageUrl !== image.url) {
-        await this.removeStoredAvatar(current.imageUrl, user.id).catch(() => undefined);
+      if (current?.image && current.image !== image.url) {
+        await this.removeStoredAvatar(current.image, user.id).catch(() => undefined);
       }
       return { data: toPublicUser(newUser), message: 'Profile image updated successfully.' };
     } catch (error: unknown) {

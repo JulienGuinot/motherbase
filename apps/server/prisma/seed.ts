@@ -30,7 +30,6 @@ async function main() {
     create: {
       email,
       name: email,
-      classicEmail: email,
       username: 'admin',
       role: UserRole.ADMIN,
       emailVerified: true,

@@ -1384,7 +1384,6 @@ export class ImportService extends BaseContext {
               id: raw.id,
               email,
               name: email,
-              classicEmail: email,
               username,
               emailVerified: !!raw.email_confirmed_at,
               firstName: this.pickName(meta, ['first_name', 'given_name']) ?? this.firstWord(meta) ?? undefined,

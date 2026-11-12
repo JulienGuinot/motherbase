@@ -7,7 +7,7 @@ function makeService(overrides: any = {}) {
   const fakePrisma = {
     user: {
       findMany: async () => [
-        { id: '1', email: 'a@b.c', role: 'USER', status: 'active', appleId: null, googleId: 'g', accounts: [credAccount] },
+        { id: '1', email: 'a@b.c', role: 'USER', status: 'active', accounts: [{ providerId: 'google', password: null }, credAccount] },
       ],
       findUnique: async ({ where }: any) => {
         if (where.email === 'exists@example.com') return { id: 'existing', email: where.email };
@@ -83,22 +83,18 @@ describe('UserAdminService', () => {
     const rows = await service.list();
     expect(rows[0]).not.toHaveProperty('passwordHash');
     expect(rows[0]).not.toHaveProperty('accounts');
-    expect(rows[0].providers).toEqual(['google', 'email']); // googleId + credential account
+    expect(rows[0].providers).toEqual(['google', 'email']); // google + credential accounts
   });
 
   // Better Auth writes every identity to `account` (providerId 'google',
-  // 'github', or a custom OIDC id) and never touches the legacy `googleId` /
-  // `appleId` columns on the user row. Reading providers off those columns
-  // meant a social sign-in reported no provider at all, while a password user
-  // correctly reported 'email'. These pin the source of truth.
+  // 'github', or a custom OIDC id). These pin it as the only source of truth.
   const listWith = async (row: Record<string, unknown>) => {
     const { service } = makeService({ user: { findMany: async () => [row] } });
     return (await service.list())[0].providers;
   };
 
   const socialUser = (accounts: Array<Record<string, unknown>>) => ({
-    id: '1', email: 'a@b.c', role: 'USER', status: 'active',
-    appleId: null, googleId: null, accounts,
+    id: '1', email: 'a@b.c', role: 'USER', status: 'active', accounts,
   });
 
   it('reports a Better Auth social sign-in from its account row, not a user column', async () => {
@@ -121,24 +117,6 @@ describe('UserAdminService', () => {
         { providerId: 'acme-sso', password: null },
       ])),
     ).toEqual(['github', 'acme-sso']);
-  });
-
-  it('does not list a provider twice when the legacy column and the account row agree', async () => {
-    expect(
-      await listWith({
-        id: '1', email: 'a@b.c', role: 'USER', status: 'active',
-        appleId: null, googleId: 'g', accounts: [{ providerId: 'google', password: null }],
-      }),
-    ).toEqual(['google']);
-  });
-
-  it('still reports a pre-Better-Auth row that only has the legacy column', async () => {
-    expect(
-      await listWith({
-        id: '1', email: 'a@b.c', role: 'USER', status: 'active',
-        appleId: 'a', googleId: null, accounts: [],
-      }),
-    ).toEqual(['apple']);
   });
 
   it('reports no provider for a credential account with no password set', async () => {

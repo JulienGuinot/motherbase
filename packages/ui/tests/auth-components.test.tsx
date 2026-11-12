@@ -129,9 +129,8 @@ describe('UserAvatar', () => {
     expect(screen.getByText('A')).toBeTruthy();
   });
 
-  it('reads the image from user_metadata and imageUrl', () => {
+  it('reads the image from user_metadata too', () => {
     expect(avatarSrc({ user_metadata: { image: 'a' } })).toBe('a');
-    expect(avatarSrc({ imageUrl: 'b' })).toBe('b');
     expect(avatarSrc({ name: 'Ada' })).toBeUndefined();
   });
 });

@@ -491,7 +491,6 @@ describe('ImportService.importAll', () => {
     expect(created[0]).toMatchObject({
       id: '1',
       email: 'alice@example.com',
-      classicEmail: 'alice@example.com',
       emailVerified: true,
       username: 'alice',
     });

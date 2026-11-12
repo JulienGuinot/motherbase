@@ -1,5 +1,14 @@
 import { createAuthClient as createBetterAuthClient } from 'better-auth/client';
-import { anonymousClient, emailOTPClient, jwtClient, magicLinkClient, organizationClient, phoneNumberClient, twoFactorClient } from 'better-auth/client/plugins';
+import {
+  anonymousClient,
+  emailOTPClient,
+  inferAdditionalFields,
+  jwtClient,
+  magicLinkClient,
+  organizationClient,
+  phoneNumberClient,
+  twoFactorClient,
+} from 'better-auth/client/plugins';
 import { apiKeyClient } from '@better-auth/api-key/client';
 import { passkeyClient } from '@better-auth/passkey/client';
 import { ssoClient } from '@better-auth/sso/client';
@@ -9,6 +18,7 @@ import { withoutTrailingSlash } from '../http/utils.js';
 import { motherbaseClient } from './motherbase-plugin.js';
 import { SessionStore } from './session.js';
 import type { AuthClient, AuthClientOptions, AuthPlugins } from './types.js';
+import { MOTHERBASE_USER_FIELDS } from './user-fields.js';
 
 export function createAuthClient(http: HttpClient, store: SessionStore, options: AuthClientOptions): AuthClient {
   // Must stay in step with `AuthPlugins`; the annotation makes the compiler check it.
@@ -23,6 +33,7 @@ export function createAuthClient(http: HttpClient, store: SessionStore, options:
     passkeyClient(),
     ssoClient(),
     apiKeyClient(),
+    inferAdditionalFields({ user: MOTHERBASE_USER_FIELDS }),
     motherbaseClient(http, store, options),
   ];
   return createBetterAuthClient({

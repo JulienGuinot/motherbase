@@ -241,8 +241,9 @@ your project and the comparison disagreed, not that nothing happened.
 Auth users are imported separately from `auth.users`:
 
 - `id` is preserved so existing owner columns can keep matching `auth.uid()`.
-- `email` becomes `email` and `classicEmail`.
-- `encrypted_password` is stored as `passwordHash`.
+- `email` is kept as `email`.
+- `raw_user_meta_data.first_name` / `given_name` (else the first word of `full_name`) and `last_name` / `family_name` become `firstName` and `lastName`, from which `name` is derived.
+- `encrypted_password` is carried onto a Better Auth `credential` account (`account.password`).
 - bcrypt hashes are accepted on first login and migrated to argon2 after a successful password check.
 - existing Motherbase emails are skipped, not overwritten.
 - usernames are generated from the email local part and deduplicated.

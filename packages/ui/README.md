@@ -144,8 +144,8 @@ are shown as received.
 
 ## Avatars
 
-`UserAvatar` shows the user's image (`image`, `user_metadata.image` or
-`imageUrl`) and falls back to a generated blobatar when there is none or it
+`UserAvatar` shows the user's image (`image`, or its `user_metadata.image`
+alias) and falls back to a generated blobatar when there is none or it
 fails to load. `UserButton` and `UserProfileForm` use it and forward an `avatar`
 prop:
 

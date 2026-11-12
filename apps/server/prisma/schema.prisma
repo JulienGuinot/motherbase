@@ -62,26 +62,21 @@ enum BucketDeletionJobStatus {
 model User {
   id                  String     @id @default(uuid())
   email               String     @unique
-  classicEmail        String?
-  appleEmail          String?
-  appleId             String?
-  googleId            String?
-  googleEmail         String?
   // Nullable because Better Auth does not populate it. The user.create.before
   // hook (auth/instance.ts) assigns one via UserService.getRandomUsername when
   // the sign-up supplies none, and leaves it null if that generation fails.
   username            String?    @unique
+  // Better Auth additionalFields. Whenever either is set, the `users_derive_name`
+  // trigger (migration 20261112090000) rewrites `name` to "firstName lastName",
+  // so the two never disagree, whoever writes the row.
   firstName           String?
   lastName            String?
-  imageUrl            String?
   emailVerified       Boolean    @default(false)
   // Better Auth phoneNumber plugin columns (SMS OTP sign-in).
   phoneNumber         String?    @unique
   phoneNumberVerified Boolean?   @default(false)
-  // Better Auth core columns. `name` is required by Better Auth's user model but
-  // kept optional here so pre-Better-Auth create paths (import/seed/admin) still
-  // compile during the migration; Better Auth always supplies it.
-  name                String?
+  // Better Auth core columns: the display name and the one avatar URL.
+  name                String
   image               String?
   twoFactorEnabled    Boolean?   @default(false)
   // Better Auth anonymous plugin. True for a guest created by
@@ -309,6 +304,7 @@ model Passkey {
   aaguid       String?
 
   @@index([userId])
+  @@index([credentialID])
   @@map("passkey")
   @@schema("auth")
 }
@@ -338,6 +334,8 @@ model ApiKey {
   metadata            String?
 
   @@index([referenceId])
+  @@index([key])
+  @@index([configId])
   @@map("apikey")
   @@schema("auth")
 }

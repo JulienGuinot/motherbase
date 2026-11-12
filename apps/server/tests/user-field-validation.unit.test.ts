@@ -1,7 +1,7 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { PrismaClient } from '@prisma/client';
 import { createProjectAuth } from '../auth/instance';
-import { capCoreProfileFields, usernameSchema, imageUrlSchema, personNameSchema } from '../validators/user-fields';
+import { capCoreProfileFields, usernameSchema, personNameSchema } from '../validators/user-fields';
 
 describe('user profile field validation', () => {
   it('rejects an over-long or malformed username and accepts a normal one', () => {
@@ -11,9 +11,7 @@ describe('user profile field validation', () => {
     expect(usernameSchema.safeParse('PixelPirate7').success).toBe(true);
   });
 
-  it('rejects non-http image URLs and over-long names', () => {
-    expect(imageUrlSchema.safeParse('javascript:alert(1)').success).toBe(false);
-    expect(imageUrlSchema.safeParse('https://cdn.example.com/a.png').success).toBe(true);
+  it('rejects over-long names', () => {
     expect(personNameSchema.safeParse('x'.repeat(500)).success).toBe(false);
     expect(personNameSchema.safeParse('Ada Lovelace').success).toBe(true);
   });
@@ -53,5 +51,39 @@ describe('user profile field validation', () => {
     const before = (auth.options as any).databaseHooks.user.create.before;
     const out = await before({ email: 'a@example.com', name: 'x'.repeat(500) }, null);
     expect(out.data.name).toHaveLength(80);
+  });
+
+  // `name` is derived from firstName/lastName by a trigger, so update-user
+  // must refuse a `name` it would silently overwrite instead of answering 200.
+  describe('update-user and the derived name', () => {
+    const updateHook = (current: { firstName: string | null; lastName: string | null }) => {
+      const findUnique = vi.fn(async () => current);
+      const auth = createProjectAuth({
+        prisma: { user: { findUnique } } as any,
+        secret: 'x'.repeat(40),
+        baseURL: 'http://localhost:3000',
+        sendOtp: async () => {},
+        sendMagicLink: async () => {},
+      });
+      return { before: (auth.options as any).databaseHooks.user.update.before, findUnique };
+    };
+    const updateUserCtx = { path: '/update-user', context: { session: { user: { id: 'u1' } } } };
+
+    it('rejects a name alone on a user whose name is derived', async () => {
+      const { before } = updateHook({ firstName: 'Ada', lastName: 'Lovelace' });
+      await expect(before({ name: 'Countess' }, updateUserCtx)).rejects.toMatchObject({ statusCode: 400 });
+    });
+
+    it('accepts it on a user with no first or last name', async () => {
+      const { before } = updateHook({ firstName: null, lastName: null });
+      await expect(before({ name: 'Countess' }, updateUserCtx)).resolves.toBeUndefined();
+    });
+
+    it('leaves the internal flows that write name alone, without a read', async () => {
+      const { before, findUnique } = updateHook({ firstName: 'Ada', lastName: 'Lovelace' });
+      await expect(before({ name: 'Countess' }, { ...updateUserCtx, path: '/callback/:id' })).resolves.toBeUndefined();
+      await expect(before({ name: 'Countess' }, null)).resolves.toBeUndefined();
+      expect(findUnique).not.toHaveBeenCalled();
+    });
   });
 });

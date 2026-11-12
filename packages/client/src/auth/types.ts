@@ -6,6 +6,7 @@ import type { apiKeyClient } from '@better-auth/api-key/client';
 import type {
   anonymousClient,
   emailOTPClient,
+  inferAdditionalFields,
   jwtClient,
   magicLinkClient,
   organizationClient,
@@ -15,6 +16,7 @@ import type {
 import type { AuthAdminClient } from '../admin/auth-admin-client.js';
 import type { AuthAdminMfaClient } from '../admin/auth-admin-mfa-client.js';
 import type { VerifierStore } from './pkce.js';
+import type { MOTHERBASE_USER_FIELDS } from './user-fields.js';
 
 /**
  * A timestamp as it can reach the client: ISO string over HTTP, `Date` when a
@@ -54,10 +56,6 @@ export interface BetterAuthUserFields {
   /** Set by the `phoneNumber` plugin; aliased to `phone`. */
   phoneNumber?: string | null;
   phoneNumberVerified?: boolean | null;
-  /** Set by the `admin` plugin. */
-  banned?: boolean | null;
-  banReason?: string | null;
-  banExpires?: Timestamp | null;
   /** Set by the `twoFactor` plugin. */
   twoFactorEnabled?: boolean | null;
   /** Set by the `anonymous` plugin; aliased to `is_anonymous`. */
@@ -66,22 +64,19 @@ export interface BetterAuthUserFields {
 
 /**
  * The `additionalFields` Motherbase configures on every project's auth
- * instance (see `apps/server/auth/instance.ts`). The first four are
- * client-writable through `updateUser`; the rest are server-set.
+ * instance (`MOTHERBASE_USER_FIELDS`). `username`, `firstName` and `lastName`
+ * are client-writable through `updateUser`; the rest are server-set.
+ *
+ * `name` is derived: whenever `firstName` or `lastName` is set, the server
+ * rewrites `name` to "firstName lastName". Update those two, not `name`.
  */
 export interface MotherbaseUserFields {
   username?: string | null;
   firstName?: string | null;
   lastName?: string | null;
-  imageUrl?: string | null;
   /** `'USER'` by default on the server, `'authenticated'` after `compat.ts`. */
   role?: string;
   status?: string | null;
-  classicEmail?: string | null;
-  appleId?: string | null;
-  appleEmail?: string | null;
-  googleId?: string | null;
-  googleEmail?: string | null;
 }
 
 /**
@@ -344,6 +339,7 @@ export type AuthPlugins = [
   // `any`, which erases every plugin from the inferred client.
   ReturnType<typeof ssoClient<Record<never, never>>>,
   ReturnType<typeof apiKeyClient>,
+  ReturnType<typeof inferAdditionalFields<unknown, { user: typeof MOTHERBASE_USER_FIELDS }>>,
   MotherbaseClientPlugin,
 ];
 

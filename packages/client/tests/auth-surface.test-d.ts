@@ -38,6 +38,19 @@ describe('client.auth exposes Better Auth', () => {
     expectTypeOf(auth.apiKey.create).toBeFunction();
   });
 
+  // Without `inferAdditionalFields`, Better Auth's client only knows `name` and
+  // `image`, and the profile fields the server accepts were a compile error.
+  it('types the Motherbase user fields on updateUser', () => {
+    void auth.updateUser({ firstName: 'Ada', lastName: 'Lovelace', username: 'ada' });
+    void auth.updateUser({ name: 'Ada', image: 'https://example.com/a.png' });
+    // @ts-expect-error typed, not merely tolerated
+    void auth.updateUser({ firstName: 42 });
+    // @ts-expect-error server-set, not client-writable
+    void auth.updateUser({ role: 'ADMIN' });
+    // @ts-expect-error a removed column: the avatar is Better Auth's `image`
+    void auth.updateUser({ imageUrl: 'https://example.com/a.png' });
+  });
+
   it('has the Motherbase additions', () => {
     expectTypeOf(auth.onAuthStateChange).toBeFunction();
     expectTypeOf(auth.getSessionFromUrl).toBeFunction();

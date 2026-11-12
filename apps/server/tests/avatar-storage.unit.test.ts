@@ -37,7 +37,7 @@ describe('avatar upload controller', () => {
     const uploadPath = path.join(os.tmpdir(), `mb-avatar-${Date.now()}.png`);
     await fs.writeFile(uploadPath, 'png');
     const updateImage = vi.fn(async (image: unknown) => ({
-      data: { id: 'u1', imageUrl: stableUrl },
+      data: { id: 'u1', image: stableUrl },
       message: 'Profile image updated successfully.',
       image,
     }));
@@ -68,7 +68,7 @@ describe('avatar upload controller', () => {
     );
     expect(updateImage).toHaveBeenCalledWith({ fileId: 'avatar-file', url: stableUrl }, req.user);
     expect(next).not.toHaveBeenCalled();
-    expect(res.body.data.imageUrl).toBe(stableUrl);
+    expect(res.body.data.image).toBe(stableUrl);
     expect(stableUrl).not.toContain('/uploads/');
   });
 });
@@ -89,7 +89,7 @@ describe('UserService avatar replacement', () => {
     const remove = vi.fn(async () => ({ deleted: true }));
     const prisma = {
       user: {
-        findUnique: vi.fn(async () => ({ imageUrl: 'http://api.test/public/avatars/u1/old.png' })),
+        findUnique: vi.fn(async () => ({ image: 'http://api.test/public/avatars/u1/old.png' })),
         update: vi.fn(async ({ data }: any) => ({
           id: 'u1',
           email: 'u@example.test',
@@ -108,7 +108,7 @@ describe('UserService avatar replacement', () => {
 
     const result = await service.updateImage({ fileId: 'new-file', url: stableUrl }, { id: 'u1' } as any);
 
-    expect(result.data?.imageUrl).toBe(stableUrl);
+    expect(result.data?.image).toBe(stableUrl);
     expect(prisma.file.findFirst).toHaveBeenCalledWith({
       where: {
         ownerId: 'u1',
@@ -125,7 +125,7 @@ describe('UserService avatar replacement', () => {
     const service = new UserService({
       prisma: {
         user: {
-          findUnique: vi.fn(async () => ({ imageUrl: null })),
+          findUnique: vi.fn(async () => ({ image: null })),
           update: vi.fn(async () => {
             throw new Error('database unavailable');
           }),
