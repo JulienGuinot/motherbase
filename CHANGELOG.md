@@ -11,7 +11,7 @@ versions and are published separately; see [docs/publishing-the-sdk.md](docs/pub
 
 ## [Unreleased]
 
-## [1.0.0] - 2026-11-05
+## [1.0.0] - 2026-11-12
 
 First public release.
 
@@ -29,3 +29,11 @@ First public release.
   `npm:` and `jsr:` imports work on hosts that can only reach out through one.
 - The server validates requests with zod 4, and the security overrides in
   `package.json` now reach the lockfile.
+- `auth.users` follows Better Auth's user model, one column per fact. `name` is
+  derived from `firstName`/`lastName` by a trigger, and `updateUser({ name })`
+  sent alone over them answers 400. The avatar is Better Auth's `image` (the
+  `imageUrl` column is merged into it). The legacy `googleId`/`appleId` columns
+  become `account` rows. `client.auth.updateUser({ firstName, lastName })` is
+  typed, and `UserProfileForm` edits first and last name.
+- Indexes on `apikey.key`, `apikey.configId` and `passkey.credentialID`, which
+  Better Auth looks them up by.
