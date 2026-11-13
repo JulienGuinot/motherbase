@@ -104,10 +104,18 @@ export default function Select({
     return () => cancelAnimationFrame(frame);
   }, [open, showSearch]);
 
-  // Keep the highlighted row in view.
+  // Keep the highlighted row in view by scrolling the popover only.
+  // `scrollIntoView` also scrolls every ancestor, including the `overflow:
+  // hidden` document and shell, which the operator cannot scroll back: the page
+  // slid out of view and only a reload brought it back.
   useEffect(() => {
-    if (!open) return;
-    popRef.current?.querySelector<HTMLElement>(`[data-nav="${active}"]`)?.scrollIntoView({ block: 'nearest' });
+    const pop = popRef.current;
+    const row = pop?.querySelector<HTMLElement>(`[data-nav="${active}"]`);
+    if (!open || !pop || !row) return;
+    const p = pop.getBoundingClientRect();
+    const r = row.getBoundingClientRect();
+    if (r.top < p.top) pop.scrollTop -= p.top - r.top;
+    else if (r.bottom > p.bottom) pop.scrollTop += r.bottom - p.bottom;
   }, [active, open, rows, popRef]);
 
   const openPopover = () => {
@@ -184,7 +192,9 @@ export default function Select({
         <ChevronsUpDown size={12} style={{ color: 'var(--text-mute)', flexShrink: 0, marginLeft: 'auto' }} />
       </button>
 
-      {open && createPortal(
+      {/* Not before the trigger is measured: without `rect` the popover has no
+          position and lands in the document flow, below the shell. */}
+      {open && rect && createPortal(
         <div ref={popRef} className="modal-fade" role="listbox" aria-label={ariaLabel ?? label} style={popStyle}>
           {showSearch && (
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '4px 6px', marginBottom: 2, borderBottom: '1px solid var(--border)' }}>
