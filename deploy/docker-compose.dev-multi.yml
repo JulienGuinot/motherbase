@@ -104,6 +104,9 @@ services:
       DENO_DIR: /tmp/deno-dir
       EDGE_RUNTIME_TOKEN: ${EDGE_RUNTIME_TOKEN:?EDGE_RUNTIME_TOKEN is required}
       EDGE_ALLOWED_INTERNAL_ORIGINS: http://api:5001
+    # Same switch as prod: 0 for a project that runs no edge functions.
+    deploy:
+      replicas: ${EDGE_RUNTIME_REPLICAS:-1}
     networks:
       - edge
     read_only: true
@@ -176,6 +179,7 @@ services:
       LOG_RETENTION_DAYS: ${LOG_RETENTION_DAYS:-7}
       LOG_MAX_ROWS: ${LOG_MAX_ROWS:-2000000}
       EDGE_RUNTIME_URL: http://edge-runtime:9000
+      EDGE_RUNTIME_REPLICAS: ${EDGE_RUNTIME_REPLICAS:-1}
       EDGE_RUNTIME_TOKEN: ${EDGE_RUNTIME_TOKEN}
       EDGE_RUNTIME_CALLBACK_URL: http://api:5001
       # Read from the project's .env.prod like everything above. Left out, a

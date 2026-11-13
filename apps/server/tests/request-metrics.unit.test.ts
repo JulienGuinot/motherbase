@@ -35,6 +35,16 @@ describe('RequestMeter', () => {
     expect(snap.windowSec).toBe(60);
   });
 
+  it('reports boot as the last activity until a caller request touches it', () => {
+    let now = 1_000;
+    const m = new RequestMeter(60_000, () => now);
+    now = 5_000;
+    m.record(); // metered traffic (Studio, the Console's own polling) is not activity
+    expect(m.snapshot().lastActivityAt).toBe(1_000);
+    m.touch();
+    expect(m.snapshot().lastActivityAt).toBe(5_000);
+  });
+
   it('reset clears total and window', () => {
     const m = new RequestMeter();
     m.record();

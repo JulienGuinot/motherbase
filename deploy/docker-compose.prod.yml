@@ -144,6 +144,10 @@ services:
       # Functions may call this project's own API, and only that private address.
       EDGE_ALLOWED_INTERNAL_ORIGINS: http://api:5001
     deploy:
+      # 0 for a project that runs no edge functions (Console > Runtime): the
+      # stack then comes up without this container, and `up` removes a running
+      # one. Unset means 1, so a project created before the switch keeps it.
+      replicas: ${EDGE_RUNTIME_REPLICAS:-1}
       resources:
         limits:
           cpus: "${EDGE_RUNTIME_CPUS:-0.5}"
@@ -230,6 +234,8 @@ services:
       LOG_RETENTION_DAYS: ${LOG_RETENTION_DAYS:-7}
       LOG_MAX_ROWS: ${LOG_MAX_ROWS:-2000000}
       EDGE_RUNTIME_URL: http://edge-runtime:9000
+      # Lets the API say "edge functions are turned off" instead of "unreachable".
+      EDGE_RUNTIME_REPLICAS: ${EDGE_RUNTIME_REPLICAS:-1}
       EDGE_RUNTIME_TOKEN: ${EDGE_RUNTIME_TOKEN:?EDGE_RUNTIME_TOKEN is required}
       EDGE_RUNTIME_CALLBACK_URL: http://api:5001
       # Read from the project's .env.prod like everything above. Left out, a

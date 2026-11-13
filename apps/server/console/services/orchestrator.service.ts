@@ -18,6 +18,10 @@ import {
   allocateDbPort,
   parseDbPort,
   generateSecret,
+  DEFAULT_RUNTIME_OPTIONS,
+  parseRuntimeOptions,
+  runtimeOptionsToEnv,
+  type RuntimeOptions,
   type BranchInfo,
 } from '../lib/manifest';
 import { LogBuffer } from '../../lib/log-buffer';
@@ -334,6 +338,34 @@ export class Orchestrator {
     await this.fsx.writeFile(this.envFile(name), rewriteEnv(env, vars), { mode: 0o600 });
     await this.fsx.chmod(this.envFile(name), 0o600);
     await this.run(name, 'up');
+  }
+
+  /** A project's runtime switches, read from its `.env.prod`. */
+  async readRuntimeOptions(name: string): Promise<RuntimeOptions> {
+    if (!this.fsx.readFile) return { ...DEFAULT_RUNTIME_OPTIONS };
+    const env = await this.fsx.readFile(this.envFile(name), 'utf8').catch(() => '');
+    return parseRuntimeOptions(env);
+  }
+
+  /**
+   * Persist the runtime switches. The edge switch is a container that has to
+   * appear or go, so it reapplies the stack (`up` removes a service scaled to
+   * 0), but only when `apply` says the project is running: reapplying a stopped
+   * project would start it. A stopped one picks the change up on its next start.
+   * The auto-pause delay is read by the Console alone and needs no container.
+   */
+  async writeRuntimeOptions(name: string, patch: Partial<RuntimeOptions>, { apply }: { apply: boolean }): Promise<RuntimeOptions> {
+    this.assertProjectName(name);
+    return this.serialize(name, async () => {
+      if (!this.fsx.readFile) throw new Error('project configuration storage is unavailable');
+      const env = await this.fsx.readFile(this.envFile(name), 'utf8');
+      const current = parseRuntimeOptions(env);
+      const next: RuntimeOptions = { ...current, ...patch };
+      await this.fsx.writeFile(this.envFile(name), rewriteEnv(env, runtimeOptionsToEnv(next)), { mode: 0o600 });
+      await this.fsx.chmod(this.envFile(name), 0o600);
+      if (apply && next.edgeRuntime !== current.edgeRuntime) await this.runDockerAction(name, 'up');
+      return next;
+    });
   }
 
   /** One variable of a project's `.env.prod`, e.g. the key a data branch must inherit. */

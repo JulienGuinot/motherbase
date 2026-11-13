@@ -1,11 +1,13 @@
 import { useState } from 'react';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Activity, Hammer, Play, RotateCw, Square, type LucideIcon } from 'lucide-react';
-import { platform } from '@/shared/lib/api';
+import { platform, type ProjectRuntimeOptions } from '@/shared/lib/api';
 import { getErrorMessage } from '@/shared/lib/errors';
 import { useToast } from '@/shared/lib/toast';
 import { SettingRow } from '@/shared/ui/Row';
 import { Section } from '@/shared/ui/Section';
+import Select from '@/shared/ui/Select';
+import { Toggle } from '@/shared/ui/Toggle';
 
 interface RuntimeAction {
   label: string;
@@ -27,6 +29,21 @@ const ACTIONS: RuntimeAction[] = [
   },
 ];
 
+const AUTO_PAUSE_CHOICES = [
+  { value: '0', label: 'Never' },
+  { value: '15', label: 'After 15 minutes' },
+  { value: '60', label: 'After 1 hour' },
+  { value: '360', label: 'After 6 hours' },
+  { value: '1440', label: 'After 1 day' },
+  { value: '10080', label: 'After 7 days' },
+];
+
+/** The fixed choices, plus the stored delay when the API or CLI set one that is not among them. */
+function autoPauseOptions(current: number) {
+  if (AUTO_PAUSE_CHOICES.some(choice => choice.value === String(current))) return AUTO_PAUSE_CHOICES;
+  return [...AUTO_PAUSE_CHOICES, { value: String(current), label: `After ${current} minutes` }];
+}
+
 function capitalize(word: string): string {
   return word[0].toUpperCase() + word.slice(1);
 }
@@ -41,6 +58,18 @@ export function RuntimeSection({ pid }: { pid: string }) {
     refetchInterval: 5000,
   });
   const status = projectsQ.data?.find(p => p.name === pid)?.status;
+
+  const optionsKey = ['platform-runtime-options', pid];
+  const { data: options } = useQuery({ queryKey: optionsKey, queryFn: () => platform.projectRuntimeOptions(pid) });
+  // Not optimistic: the switch shows what the server stored, once it has.
+  const saveOptions = useMutation({
+    mutationFn: (patch: Partial<ProjectRuntimeOptions>) => platform.setProjectRuntimeOptions(pid, patch),
+    onSuccess: saved => {
+      qc.setQueryData(optionsKey, saved);
+      toast.push({ kind: 'success', title: 'Runtime settings saved' });
+    },
+    onError: err => toast.push({ kind: 'error', title: getErrorMessage(err) ?? 'Could not save runtime settings' }),
+  });
 
   const trigger = async ({ label, run }: RuntimeAction) => {
     setBusy(label);
@@ -76,6 +105,30 @@ export function RuntimeSection({ pid }: { pid: string }) {
             </button>
           ))}
         </div>
+      </SettingRow>
+      <SettingRow
+        label="Edge functions"
+        hint="Runs the edge-runtime container. Off, the project uses less memory and its functions answer an error until it is turned back on. Their code and secrets are kept."
+      >
+        <Toggle
+          checked={options?.edgeRuntime ?? true}
+          onChange={edgeRuntime => saveOptions.mutate({ edgeRuntime })}
+          disabled={!options || saveOptions.isPending}
+          ariaLabel="Edge functions"
+        />
+      </SettingRow>
+      <SettingRow
+        label="Auto-pause"
+        hint="Stops the project when it receives no request for this long. Its data is kept; it answers nothing, and runs no cron job, scheduled function or backup, until someone presses Start."
+      >
+        <Select
+          value={String(options?.autoPauseMinutes ?? 0)}
+          onChange={value => saveOptions.mutate({ autoPauseMinutes: Number(value) })}
+          disabled={!options || saveOptions.isPending}
+          ariaLabel="Auto-pause delay"
+          align="right"
+          options={autoPauseOptions(options?.autoPauseMinutes ?? 0)}
+        />
       </SettingRow>
     </Section>
   );

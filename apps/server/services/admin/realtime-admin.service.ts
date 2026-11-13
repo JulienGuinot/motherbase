@@ -113,6 +113,11 @@ export class RealtimeAdminService extends BaseContext {
     this.io = io;
   }
 
+  /** Open websocket connections. A subscribed client sends no HTTP, yet the project is in use. */
+  connectedClients(): number {
+    return this.io?.engine.clientsCount ?? 0;
+  }
+
   pushEvent(event: RealtimeEvent): void {
     this.ring.push(event);
     if (this.ring.length > MAX_EVENTS) this.ring.shift();

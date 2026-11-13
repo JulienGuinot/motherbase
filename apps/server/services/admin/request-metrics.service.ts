@@ -14,7 +14,19 @@ export class RequestMeter {
   // Timestamps (ms) of requests within the rolling window, oldest first.
   private window: number[] = [];
 
-  constructor(private windowMs = WINDOW_MS, private now: () => number = Date.now) {}
+  // Last request from a caller of the project, as opposed to Studio or a health
+  // probe. Starts at boot, so a project that was just started is not "idle
+  // since 1970" to the Console's auto-pause.
+  private lastActivityAt: number;
+
+  constructor(private windowMs = WINDOW_MS, private now: () => number = Date.now) {
+    this.lastActivityAt = this.now();
+  }
+
+  /** Mark the project as in use right now. */
+  touch(): void {
+    this.lastActivityAt = this.now();
+  }
 
   /** Record one request. O(1) amortised. Prunes expired timestamps as it goes. */
   record(): void {
@@ -25,13 +37,14 @@ export class RequestMeter {
   }
 
   /** Current snapshot: cumulative total, requests in the last window, window size. */
-  snapshot(): { total: number; perMinute: number; windowSec: number } {
+  snapshot(): { total: number; perMinute: number; windowSec: number; lastActivityAt: number } {
     const t = this.now();
     this.prune(t);
     return {
       total: this.total,
       perMinute: this.window.length,
       windowSec: Math.round(this.windowMs / 1000),
+      lastActivityAt: this.lastActivityAt,
     };
   }
 

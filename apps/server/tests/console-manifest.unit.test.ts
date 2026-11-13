@@ -3,6 +3,8 @@ import {
   buildManifest,
   renderEnvProd,
   parseLimits,
+  parseRuntimeOptions,
+  runtimeOptionsPatchSchema,
   DEFAULT_LIMITS,
   type CreateProjectInput,
 } from '../console/lib/manifest';
@@ -36,6 +38,32 @@ describe('buildManifest', () => {
     ['invalid image reference', { apiImage: 'image name:latest' }],
   ])('rejects unsafe project config: %s', (_label, patch) => {
     expect(() => buildManifest({ ...input, ...patch }, fixedSecret)).toThrow();
+  });
+});
+
+describe('runtime options', () => {
+  it('a new project runs its edge runtime unless asked not to, and round-trips through .env.prod', () => {
+    expect(parseRuntimeOptions(renderEnvProd(buildManifest(input, fixedSecret))))
+      .toEqual({ edgeRuntime: true, autoPauseMinutes: 0 });
+    expect(renderEnvProd(buildManifest({ ...input, edgeRuntime: false }, fixedSecret)))
+      .toContain('EDGE_RUNTIME_REPLICAS=0');
+  });
+
+  it('reads a hand-edited or out-of-range delay as never, rather than pausing on a typo', () => {
+    expect(parseRuntimeOptions('AUTO_PAUSE_MINUTES=soon\n').autoPauseMinutes).toBe(0);
+    expect(parseRuntimeOptions('AUTO_PAUSE_MINUTES=1\n').autoPauseMinutes).toBe(0);
+  });
+
+  it.each([
+    [{ autoPauseMinutes: 0 }, true],
+    [{ autoPauseMinutes: 60, edgeRuntime: false }, true],
+    [{ autoPauseMinutes: 2 }, false],
+    [{ autoPauseMinutes: 1.5 }, false],
+    [{ edgeRuntime: 'no' }, false],
+    [{ apiImage: 'evil' }, false],
+    [{}, false],
+  ])('patch %j valid: %s', (patch, valid) => {
+    expect(runtimeOptionsPatchSchema.safeParse(patch).success).toBe(valid);
   });
 });
 

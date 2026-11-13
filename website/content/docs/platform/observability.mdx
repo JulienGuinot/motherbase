@@ -77,10 +77,10 @@ its own retries: a failing batch is retried as-is (lines are never reordered) wi
 `services/admin/request-metrics.service.ts` keeps a cumulative total plus a rolling 60 s window, served at `GET /api/admin/metrics/requests` (in memory, per API process, reset on restart):
 
 ```ts
-requestMeter.snapshot()  // { total, perMinute, windowSec }
+requestMeter.snapshot()  // { total, perMinute, windowSec, lastActivityAt }
 ```
 
-It counts everything except health probes, and it runs **before** the Studio-noise skip, so admin API calls are still metered. It is a module-level singleton because the middleware runs outside the Awilix request scope.
+It counts everything except health probes, and it runs **before** the Studio-noise skip, so admin API calls are still metered. `lastActivityAt` is the exception: it moves only on the requests that survive that skip (and starts at process boot), because it is what the Console's [auto-pause](/docs/console/projects/#runtime-options) waits on. The endpoint adds `realtimeClients`, the number of open websocket connections, for the same reader. It is a module-level singleton because the middleware runs outside the Awilix request scope.
 
 ## Shield telemetry
 

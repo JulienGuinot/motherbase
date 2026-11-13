@@ -262,6 +262,7 @@ These configure the API's half of that link.
 | `EDGE_RUNTIME_URL` | `http://edge-runtime:9000` | Where the API reaches the sidecar |
 | `EDGE_RUNTIME_TOKEN` | empty | Shared secret, sent as `x-edge-runtime-token`. Must match the one the sidecar was started with |
 | `EDGE_RUNTIME_CALLBACK_URL` | `http://api:5001` | This API as the sidecar reaches it, for the `sendMail()` callback |
+| `EDGE_RUNTIME_REPLICAS` | `1` | `0` when the Console left the sidecar out of the stack; the API then reports functions as turned off rather than unreachable |
 
 And these are read by the sidecar process itself, not by the API:
 

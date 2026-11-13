@@ -95,4 +95,13 @@ describe('deploy/console/docker-compose.yml', () => {
       expect(contents).toContain('TRUST_PROXY: ${TRUST_PROXY:-1}');
     }
   });
+
+  it('scales the edge runtime from the variable the Console writes, defaulting to on', () => {
+    // The default is what keeps a project created before the switch running its functions.
+    for (const file of ['docker-compose.prod.yml', 'docker-compose.dev-multi.yml']) {
+      const contents = readFileSync(path.join(__dirname, '..', '..', '..', 'deploy', file), 'utf8');
+      expect(contents).toContain('replicas: ${EDGE_RUNTIME_REPLICAS:-1}');
+      expect(contents).toContain('EDGE_RUNTIME_REPLICAS: ${EDGE_RUNTIME_REPLICAS:-1}');
+    }
+  });
 });

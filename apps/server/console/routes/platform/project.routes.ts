@@ -6,7 +6,7 @@ import { sessionUser } from '../../auth/session';
 import { hasProjectScope, requireCapability, requireProjectCapability } from '../../auth/capabilities';
 import { HttpError } from '../../helpers/http-error';
 import { fail, ok } from '../../helpers/respond';
-import { projectConfigError, projectConfigPatchSchema, resolveProjectConfig, type CreateProjectInput } from '../../lib/manifest';
+import { projectConfigError, projectConfigPatchSchema, resolveProjectConfig, runtimeOptionsPatchSchema, type CreateProjectInput } from '../../lib/manifest';
 import { resolveUpstream } from '../proxy.routes';
 import type { PlatformDeps } from './deps';
 import { guarded, requireKnownProject } from './handlers';
@@ -170,6 +170,17 @@ export function registerProjectRoutes(r: Router, deps: PlatformDeps): void {
     const { patch, error } = validateLimitsPatch(req.body ?? {}, await hostLimitBounds(deps.metrics));
     if (error) return fail(res, 400, error);
     return ok(res, await deps.orchestrator.writeLimits(req.params.id, patch));
+  }));
+
+  r.get('/projects/:id/runtime-options', requireProjectCapability('project.read'), knownProject, guarded(deps, async (req, res) =>
+    ok(res, await deps.orchestrator.readRuntimeOptions(req.params.id)),
+  ));
+
+  r.patch('/projects/:id/runtime-options', requireProjectCapability('runtime.manage'), knownProject, guarded(deps, async (req, res) => {
+    const parsed = runtimeOptionsPatchSchema.safeParse(req.body ?? {});
+    if (!parsed.success) return fail(res, 400, projectConfigError(parsed.error));
+    const apply = res.locals.project.status === 'running';
+    return ok(res, await deps.orchestrator.writeRuntimeOptions(req.params.id, parsed.data, { apply }));
   }));
 
   r.delete('/projects/:id', requireProjectCapability('project.delete'), knownProject, guarded(deps, async (req, res) => {

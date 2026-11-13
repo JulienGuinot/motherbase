@@ -104,6 +104,9 @@ const envSchema = z.object({
   // The token must match the one the edge-runtime service was started with.
   EDGE_RUNTIME_URL: z.string().url().optional().default('http://edge-runtime:9000'),
   EDGE_RUNTIME_TOKEN: z.string().optional().default(''),
+  // '0' when the Console left the sidecar out of this stack (project Runtime
+  // settings). Compose scales the service from the same variable.
+  EDGE_RUNTIME_REPLICAS: z.string().optional().default('1'),
   // This API as the sidecar reaches it, for the sendMail() callback.
   EDGE_RUNTIME_CALLBACK_URL: z.string().url().optional().default('http://api:5001'),
   // On by default: storing a secret has no other purpose than being readable

@@ -75,6 +75,9 @@ export const requestLogger = (req: Request, res: Response, next: NextFunction) =
     return next();
   }
 
+  // What is left is the project being used, which is what auto-pause waits on.
+  requestMeter.touch();
+
   const start = Date.now();
   res.on('finish', () => {
     const ms = Date.now() - start;

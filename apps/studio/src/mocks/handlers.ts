@@ -76,6 +76,7 @@ const orgAi = {
   providers: fx.aiProviders,
 };
 const projectLimits: Record<string, Record<string, number>> = JSON.parse(JSON.stringify(fx.projectLimits));
+const runtimeOptions: Record<string, Record<string, unknown>> = {};
 const projectConfigs: Record<string, Record<string, string>> = Object.fromEntries(
   fx.projects.map(project => [
     project.name,
@@ -409,6 +410,16 @@ export const handlers: HttpHandler[] = [
   http.delete('/api/platform/users/:id', ({ params }) => {
     platformUsers = platformUsers.filter(u => u.id !== params.id);
     return ok({ ok: true });
+  }),
+
+  // ── Per-project runtime switches ────────────────────────────────────────
+  http.get('/api/platform/projects/:id/runtime-options', ({ params }) =>
+    ok(runtimeOptions[String(params.id)] ?? { edgeRuntime: true, autoPauseMinutes: 0 })),
+  http.patch('/api/platform/projects/:id/runtime-options', async ({ params, request }) => {
+    const id = String(params.id);
+    const patch = asRecord(await request.json().catch(() => ({})));
+    runtimeOptions[id] = { ...(runtimeOptions[id] ?? { edgeRuntime: true, autoPauseMinutes: 0 }), ...patch };
+    return ok(runtimeOptions[id]);
   }),
 
   // ── Per-project resource limits ─────────────────────────────────────────

@@ -93,6 +93,42 @@ Note that generated projects get `CONSOLE_SQL_ENABLED=true`: the SQL editor is o
 
 Every action for a given project is **serialized through a per-project queue** (`Orchestrator.serialize`). Two overlapping `update` clicks cannot interleave compose invocations on the same stack; a failed operation does not block the next one.
 
+## Runtime options
+
+Two per-project switches, under **Backend control → Runtime** in the Console and at
+`/api/platform/projects/:id/runtime-options`. Both are stored in the project's `.env.prod`.
+
+| Field | Env var | Default | Effect |
+|---|---|---|---|
+| `edgeRuntime` | `EDGE_RUNTIME_REPLICAS` (`1` / `0`) | `true` | Whether the stack runs the `edge-runtime` container |
+| `autoPauseMinutes` | `AUTO_PAUSE_MINUTES` | `0` (never) | Stop the stack after this long without a request. `0`, or 5 minutes to 30 days |
+
+**Edge runtime.** Compose scales the service from `EDGE_RUNTIME_REPLICAS`, so turning it off
+on a running project removes that one container and turning it on creates it; a stopped
+project picks the change up on its next start. Functions, their code and their secrets are
+untouched: while it is off, deploying or invoking one answers "Edge functions are turned off
+for this project". A project created with `edgeRuntime: false` never starts the container.
+
+**Auto-pause.** Once a minute the Console looks at each running project that set a delay and
+runs `stop` on the ones idle for longer. A project is in use when any of these is more recent
+than the delay:
+
+- a request to its API other than `/api/admin/*` and the health check (`lastActivityAt` in
+  `GET /api/admin/metrics/requests`),
+- a Studio request the Console proxied to it,
+- an open realtime connection, which counts as "now".
+
+The API's clock starts when its process does, so a project that was just started gets a full
+delay before it can be paused again. A project whose API does not answer, or runs an image
+that predates `lastActivityAt`, is never paused.
+
+<Warning>
+Nothing wakes a paused project. Its hostname answers `404` and its cron jobs, scheduled
+functions and scheduled backups do not run until someone presses **Start**. Auto-pause is
+for staging and dormant projects, not for one that has to answer the first request after a
+quiet night.
+</Warning>
+
 ## Config and limits edits
 
 `readConfig` / `writeConfig` and `readLimits` / `writeLimits` edit `.env.prod` in place: the file is parsed, only the known keys are rewritten (missing keys are appended), and everything else is preserved byte for byte. Patches are validated with `projectConfigPatchSchema` before anything is written.

@@ -58,6 +58,8 @@ Source: `apps/server/console/routes/platform.routes.ts`.
 | `PATCH` | `/api/platform/projects/:id/config` | `settings.write` | Patch the above |
 | `GET` | `/api/platform/projects/:id/limits` | `project.read` | CPU/memory quotas |
 | `PATCH` | `/api/platform/projects/:id/limits` | `settings.write` | Patch the quotas |
+| `GET` | `/api/platform/projects/:id/runtime-options` | `project.read` | `edgeRuntime`, `autoPauseMinutes` |
+| `PATCH` | `/api/platform/projects/:id/runtime-options` | `runtime.manage` | Patch either; see [runtime options](/docs/console/projects/#runtime-options) |
 
 Unknown project ids return `404 project not found`.
 

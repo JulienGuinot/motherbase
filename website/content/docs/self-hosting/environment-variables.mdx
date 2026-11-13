@@ -156,6 +156,8 @@ Values live in `deploy/traefik/.env`; the generated file starts the dashboard fi
 | `EDGE_RUNTIME_URL` | API | no | `http://edge-runtime:9000` | Where the API reaches the edge runtime sidecar. |
 | `EDGE_RUNTIME_TOKEN` | API and `edge-runtime` | prod: yes | none | Shared secret between the two. The sidecar refuses to start without it and answers `401` to a request without it. |
 | `EDGE_RUNTIME_CALLBACK_URL` | API | no | `http://api:5001` | This API as the sidecar reaches it, for a function's `sendMail()`. |
+| `EDGE_RUNTIME_REPLICAS` | API and Compose | no | `1` | `0` runs the project without the edge runtime container. Written by the Console's [runtime options](/docs/console/projects/#runtime-options). |
+| `AUTO_PAUSE_MINUTES` | Console | no | `0` | Read by the Console only: stop this project after that many idle minutes. `0` is never. |
 
 ### The `edge-runtime` service
 

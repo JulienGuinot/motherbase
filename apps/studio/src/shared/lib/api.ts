@@ -293,6 +293,13 @@ export const platform = {
   setProjectLimits: (id: string, patch: Partial<ProjectLimits>) =>
     api.patch(`/platform/projects/${id}/limits`, patch).then(r => r.data.data as ProjectLimits),
 
+  // Per-project runtime switches. Turning the edge runtime on or off recreates
+  // that one container when the project is running.
+  projectRuntimeOptions: (id: string) =>
+    api.get(`/platform/projects/${id}/runtime-options`).then(r => r.data.data as ProjectRuntimeOptions),
+  setProjectRuntimeOptions: (id: string, patch: Partial<ProjectRuntimeOptions>) =>
+    api.patch(`/platform/projects/${id}/runtime-options`, patch).then(r => r.data.data as ProjectRuntimeOptions),
+
   // ── Supabase import (proxied to the project's own admin API) ────────────────
   // The explicit /projects/<id>/admin/... path bypasses the axios interceptor's
   // project-scoped rewrite (which only fires for bare /admin URLs), so these work
@@ -481,6 +488,13 @@ export interface PlatformContainerStat {
   service: string | null;
   cpuPercent: number;
   memUsed: number;
+}
+
+export interface ProjectRuntimeOptions {
+  /** Whether the project's stack runs the edge-runtime container. */
+  edgeRuntime: boolean;
+  /** Stop the project after this many minutes without a request. 0 = never. */
+  autoPauseMinutes: number;
 }
 
 export interface ProjectLimits {

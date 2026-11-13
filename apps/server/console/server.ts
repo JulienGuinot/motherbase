@@ -25,6 +25,8 @@ import { PlatformSettingsService } from './services/settings.service';
 import { ProjectDefaultsStore } from './services/project-defaults.service';
 import { PlatformMetricsService } from './services/metrics.service';
 import { AlertsService } from './services/alerts.service';
+import { AutoPauseService } from './services/auto-pause.service';
+import { proxyMetrics } from './services/proxy-metrics.service';
 import { OrchestrationClient, createOrchestrationExec } from './orchestration/client';
 import { AuditStore } from './services/audit.service';
 import { findStudioDir, mountStudio, STUDIO_MOUNT } from '../lib/studio-next';
@@ -123,6 +125,7 @@ async function createConsoleServices(cfg: ConsoleConfig, authCfg: ConsoleAuthCfg
   const registry = overrides?.registry ?? new Registry(cfg, fsp as any, exec);
   const orchestrator = overrides?.orchestrator ?? new Orchestrator(cfg, fsp as any, exec, undefined, logs);
   new AlertsService(settings, metrics, registry, orchestrator).start();
+  new AutoPauseService({ registry, orchestrator, admin: new ProjectAdminClient(registry), proxy: proxyMetrics, logs }).start();
 
   const orgs = OrgStore.open(cfg.projectsDir);
   await backfillOrgs(orgs, users, registry, logs);

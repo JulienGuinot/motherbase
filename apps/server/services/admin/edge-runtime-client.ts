@@ -76,7 +76,9 @@ export class EdgeRuntimeClient {
       return payload;
     } catch {
       return errorResult(
-        `The edge runtime is not reachable at ${this.baseUrl}. Start the edge-runtime service and retry.`,
+        env.EDGE_RUNTIME_REPLICAS === '0'
+          ? 'Edge functions are turned off for this project. Turn them on in the Console (Backend control > Runtime) and retry.'
+          : `The edge runtime is not reachable at ${this.baseUrl}. Start the edge-runtime service and retry.`,
         startedAt
       );
     }

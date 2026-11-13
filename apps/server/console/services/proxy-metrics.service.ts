@@ -26,6 +26,11 @@ export class ProxyMetrics {
     this.byProject.set(projectId, entry);
   }
 
+  /** When the Console last proxied a request to this project (0 = not since boot). */
+  lastAt(projectId: string): number {
+    return this.byProject.get(projectId)?.lastAt ?? 0;
+  }
+
   /** One row per project that has sent at least one request, busiest first. */
   snapshot(): Array<{ projectId: string } & ProjectCounts> {
     return [...this.byProject.entries()]

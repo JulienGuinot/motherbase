@@ -71,8 +71,55 @@ export function parseLimits(env: string, base: ResourceLimits = DEFAULT_LIMITS):
   return out;
 }
 
+/**
+ * Per-project runtime switches. Both live in `.env.prod`: compose reads the
+ * first, and keeping the second beside it leaves one file to back up.
+ */
+export interface RuntimeOptions {
+  /** Whether the stack runs the edge-runtime container at all. */
+  edgeRuntime: boolean;
+  /** Stop the stack after this many minutes without a request. 0 = never. */
+  autoPauseMinutes: number;
+}
+
+// Both defaults are "as before": a project that predates the switches, or one
+// created without them, keeps its edge runtime and is never stopped for it.
+export const DEFAULT_RUNTIME_OPTIONS: RuntimeOptions = { edgeRuntime: true, autoPauseMinutes: 0 };
+
+const EDGE_REPLICAS_ENV = 'EDGE_RUNTIME_REPLICAS';
+const AUTO_PAUSE_ENV = 'AUTO_PAUSE_MINUTES';
+// Shorter than this and a project is stopped between two page loads of the
+// person using it; longer than 30 days is "never" with extra steps.
+export const AUTO_PAUSE_MIN_MINUTES = 5;
+export const AUTO_PAUSE_MAX_MINUTES = 30 * 24 * 60;
+
+export const runtimeOptionsPatchSchema = z.object({
+  edgeRuntime: z.boolean(),
+  autoPauseMinutes: z.number().int().max(AUTO_PAUSE_MAX_MINUTES)
+    .refine(n => n === 0 || n >= AUTO_PAUSE_MIN_MINUTES, `autoPauseMinutes must be 0 (never) or at least ${AUTO_PAUSE_MIN_MINUTES}`),
+}).partial().strict().refine(
+  value => Object.keys(value).length > 0,
+  'no runtime option provided',
+);
+
+export function runtimeOptionsToEnv(o: RuntimeOptions): Record<string, string> {
+  return { [EDGE_REPLICAS_ENV]: o.edgeRuntime ? '1' : '0', [AUTO_PAUSE_ENV]: String(o.autoPauseMinutes) };
+}
+
+/** Read the switches back out of a raw `.env.prod`. A missing or unreadable var is its default. */
+export function parseRuntimeOptions(env: string): RuntimeOptions {
+  const value = (key: string) => env.split('\n').find(l => l.startsWith(`${key}=`))?.slice(key.length + 1).trim();
+  const minutes = Number(value(AUTO_PAUSE_ENV));
+  return {
+    edgeRuntime: value(EDGE_REPLICAS_ENV) !== '0',
+    autoPauseMinutes: Number.isInteger(minutes) && minutes >= AUTO_PAUSE_MIN_MINUTES ? minutes : 0,
+  };
+}
+
 export interface CreateProjectInput {
   name: string;
+  /** Leave the edge-runtime container out of the new stack. Defaults to running it. */
+  edgeRuntime?: boolean;
   /** Host port for this project's PostgreSQL. Allocate with `allocateDbPort`. */
   dbPort?: number;
   domain?: string;
@@ -199,6 +246,7 @@ export interface ProjectManifest {
   minioRootUser: string;
   minioRootPassword: string;
   limits: ResourceLimits;
+  runtime: RuntimeOptions;
   /**
    * Host port the project's PostgreSQL is published on, so external tools (an
    * ORM, psql, a BI client) can reach it. Bound to 127.0.0.1 by default: see
@@ -283,6 +331,7 @@ export function buildManifest(
     minioRootUser: 'admin',
     minioRootPassword: gen(24),
     limits: { ...DEFAULT_LIMITS, ...(input.limits ?? {}) },
+    runtime: { ...DEFAULT_RUNTIME_OPTIONS, edgeRuntime: input.edgeRuntime !== false },
     ...(input.dbPort === undefined ? {} : { dbPort: input.dbPort }),
     ...(input.branch ? { branch: input.branch } : {}),
     createdAt: new Date().toISOString(),
@@ -313,6 +362,7 @@ export function renderEnvProd(m: ProjectManifest): string {
     // compose overlay handles; writing an empty one would look like a bug.
     ...(m.dbPort === undefined ? [] : [`DB_PORT=${m.dbPort}`, 'DB_BIND=127.0.0.1']),
     ...Object.entries(limitsToEnv(m.limits)).map(([k, v]) => `${k}=${v}`),
+    ...Object.entries(runtimeOptionsToEnv(m.runtime)).map(([k, v]) => `${k}=${v}`),
     '',
   ].join('\n');
 }

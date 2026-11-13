@@ -39,6 +39,8 @@ The repository does not enforce a CPU, RAM, disk, or Linux-distribution minimum.
 For sizing, those are **ceilings, not reservations**: a project at its default limits can use up
 to 1.75 CPU and about 2 GB of RAM, but an idle one uses far less. Budget the Console and
 Traefik on top, and adjust per project under [resource limits](/docs/console/projects/#resource-limits).
+A project that runs no edge functions can drop that container, and a dormant one can stop
+itself after a delay: see [runtime options](/docs/console/projects/#runtime-options).
 
 ## DNS
 

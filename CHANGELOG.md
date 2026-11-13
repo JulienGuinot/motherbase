@@ -11,6 +11,11 @@ versions and are published separately; see [docs/publishing-the-sdk.md](docs/pub
 
 ## [Unreleased]
 
+- Per-project runtime options, under **Backend control → Runtime**: turn the
+  edge runtime container off for a project that runs no functions, and
+  auto-pause a project after a delay without requests. Both are off by default
+  for existing projects; a paused project stays stopped until someone starts it.
+
 ## [1.0.0] - 2026-11-12
 
 First public release.

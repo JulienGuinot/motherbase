@@ -263,7 +263,11 @@ export default class AdminObservabilityController {
   @route('/metrics/requests')
   @before(adminOnly)
   async requestMetrics(_req: Request, res: Response) {
-    return apiResponse.successResponseWithData(res, 'OK', requestMeter.snapshot());
+    // lastActivityAt and realtimeClients are what the Console's auto-pause reads.
+    return apiResponse.successResponseWithData(res, 'OK', {
+      ...requestMeter.snapshot(),
+      realtimeClients: this.di.RealtimeAdminService.connectedClients(),
+    });
   }
 
   // Sampled runtime time-series (rps, p95, error rate, memory) for the Reports

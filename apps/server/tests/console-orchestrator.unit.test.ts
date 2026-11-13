@@ -243,6 +243,51 @@ describe('Orchestrator', () => {
     expect(written).toContain('JWT_SECRET=x'); // original preserved
   });
 
+  describe('writeRuntimeOptions', () => {
+    function setup(env: string) {
+      const store: Record<string, string> = { '/srv/projects/projet-a/.env.prod': env };
+      const fsx = {
+        readFile: vi.fn(async (p: string) => store[p.replace(/\\/g, '/')] ?? Promise.reject(new Error('enoent'))),
+        writeFile: vi.fn(async (p: string, data: string, _o?: any) => { store[p.replace(/\\/g, '/')] = data; }),
+        chmod: vi.fn().mockResolvedValue(undefined),
+      };
+      const exec = makeExec();
+      const orch = new Orchestrator(cfg, fsx as any, exec, () => 'y'.repeat(32));
+      const composeCalls = () => exec.mock.calls.filter(([, args]) => args[0] === 'compose');
+      return { orch, composeCalls, written: () => store['/srv/projects/projet-a/.env.prod'] };
+    }
+    const env = 'COMPOSE_PROJECT_NAME=projet-a\nJWT_SECRET=s\nEDGE_RUNTIME_TOKEN=t\n';
+
+    it('reads a project that predates the switches as edge on, never paused', async () => {
+      expect(await setup(env).orch.readRuntimeOptions('projet-a')).toEqual({ edgeRuntime: true, autoPauseMinutes: 0 });
+    });
+
+    it('scales the edge runtime to 0 and reapplies a running stack', async () => {
+      const { orch, composeCalls, written } = setup(env);
+      const next = await orch.writeRuntimeOptions('projet-a', { edgeRuntime: false }, { apply: true });
+      expect(next).toEqual({ edgeRuntime: false, autoPauseMinutes: 0 });
+      expect(written()).toContain('EDGE_RUNTIME_REPLICAS=0');
+      expect(written()).toContain('JWT_SECRET=s');
+      expect(composeCalls()).toHaveLength(1);
+      expect(composeCalls()[0][1]).toEqual(expect.arrayContaining(['up', '-d']));
+    });
+
+    it('does not start a stopped project to apply the edge switch', async () => {
+      const { orch, composeCalls, written } = setup(env);
+      await orch.writeRuntimeOptions('projet-a', { edgeRuntime: false }, { apply: false });
+      expect(written()).toContain('EDGE_RUNTIME_REPLICAS=0');
+      expect(composeCalls()).toHaveLength(0);
+    });
+
+    it('stores the auto-pause delay without touching the containers', async () => {
+      const { orch, composeCalls, written } = setup(env);
+      await orch.writeRuntimeOptions('projet-a', { autoPauseMinutes: 60 }, { apply: true });
+      expect(written()).toContain('AUTO_PAUSE_MINUTES=60');
+      expect(written()).toContain('EDGE_RUNTIME_REPLICAS=1');
+      expect(composeCalls()).toHaveLength(0);
+    });
+  });
+
   // The API runs as `node`, and cap_drop: ALL leaves root without DAC_OVERRIDE,
   // so a shell that landed as root could not read the volumes the server writes.
   it('shells into the API as the account the server runs as', () => {

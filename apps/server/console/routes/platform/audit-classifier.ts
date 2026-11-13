@@ -4,6 +4,7 @@ import type { AuditMutation } from '../../middlewares/audit.middleware';
 import { LIMIT_KEYS } from './limits';
 
 const PROJECT_CONFIG_FIELDS = ['domain', 'storageDomain', 'minioConsoleDomain', 'corsOrigins', 'apiImage', 'certResolver'];
+const RUNTIME_OPTION_FIELDS = ['edgeRuntime', 'autoPauseMinutes'];
 const PLATFORM_SETTING_FIELDS = [
   'domainSuffix', 'adminEmail', 'apiImage', 'certResolver', 'traefikNetwork',
   'alertWebhookUrl', 'alertCpuThreshold', 'alertMemThreshold',
@@ -35,6 +36,14 @@ export function classifyPlatformMutation(req: Request): AuditMutation {
       action: isConfig ? 'project.settings.update' : 'project.limits.update',
       target: safeProjectTarget(projectSetting[1]),
       detail: { fields: selectedFields(req.body, isConfig ? PROJECT_CONFIG_FIELDS : LIMIT_KEYS) },
+    };
+  }
+  const runtimeOptions = routePath.match(/^\/projects\/([^/]+)\/runtime-options$/);
+  if (req.method === 'PATCH' && runtimeOptions) {
+    return {
+      action: 'project.runtime.options.update',
+      target: safeProjectTarget(runtimeOptions[1]),
+      detail: { fields: selectedFields(req.body, RUNTIME_OPTION_FIELDS) },
     };
   }
   const deleted = routePath.match(/^\/projects\/([^/]+)$/);
