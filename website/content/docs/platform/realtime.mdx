@@ -451,13 +451,13 @@ means the count could not be taken, which is not the same as zero.
 ## Authentication
 
 Realtime connections are accepted without a token. If a valid token is present in the Socket.IO
-handshake (`auth.token`, or an `Authorization: Bearer` header), the server resolves the session
-and stores the user id and role on `socket.data`, which is what the RLS-aware table broadcast
+handshake (`auth.token`, or an `Authorization: Bearer` header), the server resolves it (a session
+token or an [access token](/docs/platform/auth/#sessions-and-tokens)) and stores the user id and role on `socket.data`, which is what the RLS-aware table broadcast
 uses. An invalid token does not fail the connection — it downgrades it to anonymous, which
 usually shows up as "the channel connects but no rows ever arrive".
 
 The server reads the token in the handshake, so the client reopens the socket whenever the
-access token changes: on a sign-in, a sign-out, or a switch of user. Your channels are joined
+session token changes: on a sign-in, a sign-out, or a switch of user. Your channels are joined
 again on the new socket and their status callback reports `SUBSCRIBED` (or `CHANNEL_ERROR`)
 once more, so a channel opened before sign-in starts receiving the signed-in user's rows on its
 own. This needs `@motherbase/client` 2.2.2 or later.

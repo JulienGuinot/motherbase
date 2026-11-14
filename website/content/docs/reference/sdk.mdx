@@ -46,6 +46,7 @@ Client options — native shape:
 createClient(url, key, {
   storage,            // session storage adapter, defaults to memoryStorage()
   autoRefresh: true,  // revalidate once on 401, defaults to true
+  accessTokens: true, // send a JWT on REST and storage requests, defaults to true
   fetch,              // custom fetch implementation
   headers,            // extra headers for every request
   compat: 'supabase', // optional, see below
@@ -537,7 +538,9 @@ produces no other event, so without it the app renders its loading state forever
 no `TOKEN_REFRESHED`: Better Auth sessions are not rotated.
 
 Every `client.auth` call that creates, replaces or ends the session writes it back to the
-SDK's session store, so `from()`, storage, functions and realtime send the same bearer.
+SDK's session store, so `from()`, storage, functions and realtime use the same session. `from()`
+and storage send a short-lived JWT minted from it once one is ready (see
+[Access tokens in the SDK](/docs/platform/auth/#access-tokens-in-the-sdk)).
 Calls that change the user without returning it (`updateUser`, `changeEmail`,
 `updateUserCredentials`, `twoFactor.disable`) are followed by a session read, so the stored
 user and `USER_UPDATED` follow. On a `401` the SDK revalidates once against
@@ -728,7 +731,9 @@ const { data } = await client.auth.token()   // { token }
 ```
 
 A Better Auth session token is an opaque bearer, which is why there is no `getClaims()`.
-Verify the JWT server side against `/api/auth/jwks`.
+Verify the JWT server side against `/api/auth/jwks`. The SDK mints the same JWT by itself
+for REST and storage requests; its claims and lifetime are in
+[Sessions and tokens](/docs/platform/auth/#sessions-and-tokens).
 
 ## Session storage
 

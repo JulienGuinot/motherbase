@@ -15,6 +15,21 @@ versions and are published separately; see [docs/publishing-the-sdk.md](docs/pub
   edge runtime container off for a project that runs no functions, and
   auto-pause a project after a delay without requests. Both are off by default
   for existing projects; a paused project stays stopped until someone starts it.
+- Fewer database round trips per REST request: the RLS check rides on the
+  statement that sets the request context, a resolved project key is remembered
+  for 30 seconds (revoking one through the API forgets it at once), and a
+  session the server reads for itself no longer gets a signed `set-auth-jwt`.
+- The data plane (REST, storage, realtime broadcast) accepts the access token
+  from `/api/auth/token` as a bearer and takes the caller from its claims, with
+  no database query. Every token now carries `email`, `user_role`,
+  `is_anonymous`, `user_status` and `iat_ms`. A token is refused before it
+  expires when its session ends, its user changes, a backup is restored or the
+  API restarts, in the API process that made the change; a change made in SQL
+  or by another instance waits for the token's expiry.
+- `@motherbase/client` sends that token on REST and storage requests, minted in
+  the background and held in memory; the stored session and `access_token` are
+  unchanged. `createClient(url, key, { accessTokens: false })` turns it off, and
+  `createServerClient` from `@motherbase/ssr` always does.
 
 ## [1.0.0] - 2026-11-12
 

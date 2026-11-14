@@ -2,6 +2,7 @@ import { Request, Response, NextFunction } from 'express';
 import { logBuffer } from '../models';
 import { shieldTelemetry } from '../lib/shield-telemetry';
 import { requestMeter } from '../services/admin/request-metrics.service';
+import { signedInUser } from '../auth/signed-in-user';
 
 // Studio-internal routes that are too noisy to surface in the Logs screen.
 // These are either self-referential (polling the log buffer itself) or
@@ -96,7 +97,7 @@ export const requestLogger = (req: Request, res: Response, next: NextFunction) =
       ip: clientIp(req),
       userAgent: userAgent(req),
       requestId: req.id ? String(req.id) : undefined,
-      userId: req.user?.id,
+      userId: signedInUser(req)?.id,
       // The id is echoed to the caller as `x-request-id`, so a report naming
       // one failing call can be found in this buffer instead of guessed at.
       // A 3xx says nothing without its target: an auth failure redirects to

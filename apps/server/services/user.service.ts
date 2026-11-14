@@ -3,6 +3,7 @@ import type { User } from '@prisma/client';
 import BaseContext from '../context/base-context';
 import { randomNumber } from '../helpers/utils.helper';
 import { HttpException } from '../exceptions/http-exception';
+import { revokeAccessTokens } from '../auth/access-tokens';
 
 /** The subset of a user row that is safe to hand back to its own owner. */
 function toPublicUser(user: User) {
@@ -148,6 +149,7 @@ export class UserService extends BaseContext {
   async deleteAccount(user: Express.User) {
     // Better Auth sessions/accounts cascade on user delete (FK onDelete: Cascade).
     await this.di.prisma.user.delete({ where: { id: user.id } });
+    revokeAccessTokens(user.id);
     return { data: { isDeleted: true }, message: 'Account deleted successfully.' };
   }
 }

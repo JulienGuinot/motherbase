@@ -152,10 +152,12 @@ export function callerFor(req: Request): RlsUser | undefined {
   if (req.impersonate) return req.impersonate === 'anon' ? undefined : req.impersonate;
 
   const serviceRole = req.apiKey?.type === 'secret';
-  if (!req.user && req.thirdParty) {
+  if (!req.user && !req.tokenUser && req.thirdParty) {
     const { sub, email, role, claims } = req.thirdParty;
     return { id: sub, email, external: { role, claims }, serviceRole };
   }
+  // An access token already holds exactly the fields the data plane reads.
+  if (!req.user && req.tokenUser) return { ...req.tokenUser, serviceRole };
   if (!req.user) return serviceRole ? { serviceRole: true } : undefined;
   // Projected field by field rather than spread: `req.user` is a row, and a row
   // that ever grew a column named `serviceRole` would otherwise hand every

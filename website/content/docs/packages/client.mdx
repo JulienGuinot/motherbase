@@ -32,6 +32,7 @@ The stored session is loaded before the first request and the first channel subs
 |-----------------------|----------|
 | `storage` | `SessionStorageAdapter`; defaults to `memoryStorage()` |
 | `autoRefresh` | Revalidate once after an authenticated `401`; defaults to `true` |
+| `accessTokens` | Send a short-lived JWT minted from the session on REST and storage requests instead of the session token; defaults to `true`. See [Access tokens in the SDK](/docs/platform/auth/#access-tokens-in-the-sdk) |
 | `fetch` | Fetch override; otherwise uses a bound `globalThis.fetch` |
 | `headers` | Extra headers merged into every request, auth calls included |
 | `compat` | `'supabase'` aligns behaviours that share a supabase-js spelling but differ: an `update()` / `delete()` matching nothing resolves an empty array instead of a `404` |
@@ -144,9 +145,9 @@ compatibility and is always `null`.
 
 ## HTTP and error handling
 
-`HttpClient` in `packages/client/src/http/index.ts` hydrates storage before every request, merges client/request headers, attaches `Authorization: Bearer <accessToken>` unless a request is anonymous, and handles JSON, multipart, raw JSON, or raw `Response` bodies.
+`HttpClient` in `packages/client/src/http/index.ts` hydrates storage before every request, merges client/request headers, attaches `Authorization: Bearer <accessToken>` (the session token, or on `/rest/v1`, `/api/files`, `/api/storage` and `/storage/v1` the access token held in memory by `http/access-token.ts` once one is minted) unless a request is anonymous, and handles JSON, multipart, raw JSON, or raw `Response` bodies.
 
-On an authenticated `401`, concurrent calls share one refresh promise. A successful revalidation retries the original request once; a failed revalidation clears auth state. The public modules catch `BackendError` and convert it with `toError`:
+A `401` to a request that carried the access token is first retried once with the session token. On an authenticated `401`, concurrent calls share one refresh promise. A successful revalidation retries the original request once; a failed revalidation clears auth state. The public modules catch `BackendError` and convert it with `toError`:
 
 ```ts
 interface MotherbaseResponse<T> {

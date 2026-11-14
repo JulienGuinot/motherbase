@@ -37,5 +37,8 @@ export function createServerClient<
   return createClient<Database, SchemaName, Schema>(url, key, {
     ...rest,
     storage: serverCookieStorage(cookies, cookieKey, { httpOnly }),
+    // A server client lives for one request: a JWT minted in the background
+    // would arrive after it is gone, so the mint is a wasted round trip.
+    accessTokens: false,
   });
 }

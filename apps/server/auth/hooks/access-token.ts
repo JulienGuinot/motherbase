@@ -3,6 +3,8 @@
 // token and/or merge a fixed set of static claims. Pure and synchronous so it is
 // trivially testable and adds no latency to token minting.
 
+import { ACCESS_TOKEN_CLAIMS } from '../access-tokens';
+
 export interface AccessTokenConfig {
   enabled: boolean;
   /** User fields copied verbatim into the token (e.g. role, status, username). */
@@ -13,7 +15,13 @@ export interface AccessTokenConfig {
 
 // Never let a hook leak security-sensitive or reserved fields into a JWT.
 const BLOCKED_FIELDS = new Set(['password', 'passwordHash', 'twoFactorEnabled', 'phoneNumberVerified']);
-const RESERVED_CLAIMS = new Set(['iss', 'sub', 'aud', 'exp', 'nbf', 'iat', 'jti']);
+// The second line is what this server writes itself and reads back to serve a
+// request from the token alone (auth/access-tokens.ts): a static claim of the
+// same name would be overwritten anyway, so it is dropped here, visibly.
+const RESERVED_CLAIMS = new Set([
+  'iss', 'sub', 'aud', 'exp', 'nbf', 'iat', 'jti',
+  ...Object.values(ACCESS_TOKEN_CLAIMS),
+]);
 
 export function buildClaims(
   config: AccessTokenConfig | undefined,

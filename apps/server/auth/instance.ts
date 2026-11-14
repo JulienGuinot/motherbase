@@ -22,6 +22,12 @@ import { hashPassword, verifyPassword } from './password';
 import { orgFullMessage, orgHasRoomForMember, orgSeatLimit } from './org-limits';
 import { DEFAULT_SIGNING_ALGORITHM, signingKeyAdapter } from './signing-keys';
 import { isServerSideSessionRead } from './server-session';
+import {
+  accessTokenClaims as dataPlaneClaims,
+  datingAccessTokens,
+  invalidateSigningKeys,
+  revokeAccessTokens,
+} from './access-tokens';
 import { userCredentials } from './plugins/user-credentials';
 import { pkceExchange } from './plugins/pkce-exchange';
 import { PhoneOtpStore } from './phone-otp-store';
@@ -462,14 +468,16 @@ function jwtPlugin(
     // undecryptable on rotation.
     jwks: { disablePrivateKeyEncryption: true, keyPairConfig: { alg: DEFAULT_SIGNING_ALGORITHM } },
     // Which key signs is decided by the signing-key lifecycle, not by age.
-    adapter: signingKeyAdapter(prisma),
+    adapter: signingKeyAdapter(prisma, invalidateSigningKeys),
     jwt: {
       ...(tokens ? { expirationTime: `${tokens.accessTokenExpMin}m` } : {}),
-      // `is_anonymous` is a Supabase standard claim, so it rides on every
-      // token whatever the custom-claims hook adds (or replaces the user with).
+      // The claims the data plane reads ride on every token, whatever the
+      // custom-claims hook adds (or replaces the user with): `is_anonymous`
+      // is a Supabase standard claim, and the rest is what lets a request be
+      // served from the token alone (auth/access-tokens.ts).
       definePayload: ({ user }: { user: Record<string, unknown> }) => ({
         ...(accessTokenClaims ? accessTokenClaims(user) : user),
-        is_anonymous: !!user.isAnonymous,
+        ...dataPlaneClaims(user),
       }),
     },
   });
@@ -558,15 +566,26 @@ function databaseHooks(deps: ProjectAuthDeps): BetterAuthOptions['databaseHooks'
         // password set after an email) is no longer anonymous. The same row,
         // the same id, so everything it owned stays owned.
         after: async account => {
-          await deps.prisma.user.updateMany({
+          const { count } = await deps.prisma.user.updateMany({
             where: { id: account.userId, isAnonymous: true },
             data: { isAnonymous: false },
           });
+          if (count) revokeAccessTokens(account.userId);
         },
       },
     },
+    // Access tokens outlive the request that minted them, so whatever ends a
+    // session or changes what a token says about its user refuses the tokens
+    // already out (auth/access-tokens.ts). These run after the write is
+    // committed, for every Better Auth flow: sign-out, revoke-session(s), a
+    // password reset that revokes sessions, update-user, delete-user.
+    session: {
+      delete: { after: async session => revokeAccessTokens(session.userId) },
+    },
     user: {
+      delete: { after: async user => revokeAccessTokens(user.id) },
       update: {
+        after: async user => revokeAccessTokens(user.id),
         // Better Auth's own `name`/`image` columns take no validator (they are
         // not additionalFields), and update-user accepts any string for them.
         //
@@ -667,7 +686,7 @@ export function createProjectAuth(deps: ProjectAuthDeps) {
     ...(redirectsConfigured(deps.redirects) ? redirectOrigins(deps.redirects) : []),
   ];
 
-  return betterAuth({
+  const auth = betterAuth({
     database: prismaAdapter(deps.prisma, { provider: 'postgresql' }),
     secret: deps.secret,
     baseURL: deps.baseURL,
@@ -711,6 +730,14 @@ export function createProjectAuth(deps: ProjectAuthDeps) {
     socialProviders: buildSocialProviders(deps),
     plugins: buildPlugins(deps, methods),
   });
+
+  // Every HTTP entry into this instance goes through `handler` (it is what
+  // toNodeHandler mounts), so this is where a request gets its start time: the
+  // access token it may mint is dated from before anything was read
+  // (auth/access-tokens.ts).
+  const handle = auth.handler;
+  auth.handler = request => datingAccessTokens(() => handle(request));
+  return auth;
 }
 
 export type AuthInstance = ReturnType<typeof createProjectAuth>;

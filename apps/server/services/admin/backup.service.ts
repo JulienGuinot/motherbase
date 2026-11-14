@@ -11,6 +11,7 @@ import { HttpException } from '../../exceptions/http-exception';
 import { BackupRemote, RemoteBackup } from './backup-remote';
 import { runCommand, toLibpqUrl, type CommandResult } from './pg-command';
 import { neutralizeUnsupportedSettings, PORTABLE_DUMP_SETTINGS } from './dump-compat';
+import { invalidateSigningKeys, revokeAccessTokens } from '../../auth/access-tokens';
 import { readTar, tarStream, type TarStreamEntry } from './tar-writer';
 
 /**
@@ -210,7 +211,15 @@ export class BackupService extends BaseContext {
     const file = this.resolveInsideRoot(input.file);
     await this.assertReadable(file);
     await this.makeDumpPortable(file);
-    return this.run('psql', ['--dbname', toLibpqUrl(env.DATABASE_URL), '--set', 'ON_ERROR_STOP=1', '--file', file]);
+    try {
+      return await this.run('psql', ['--dbname', toLibpqUrl(env.DATABASE_URL), '--set', 'ON_ERROR_STOP=1', '--file', file]);
+    } finally {
+      // Users, sessions and signing keys may all be other rows now, and a
+      // restore that failed halfway replaced some of them: nothing this process
+      // remembers about access tokens describes the database any more.
+      invalidateSigningKeys();
+      revokeAccessTokens();
+    }
   }
 
   /**

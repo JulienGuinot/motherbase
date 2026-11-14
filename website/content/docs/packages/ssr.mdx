@@ -39,7 +39,7 @@ The default cookie is not `HttpOnly` because browser auth code must update it. T
 
 ## Server client
 
-`createServerClient` removes `storage` from the accepted options and always installs `serverCookieStorage(cookies)`. All other `ClientOptions`, including `fetch`, `headers`, `autoRefresh`, and `realtimeIoFactory`, are forwarded. Source: `packages/ssr/src/server.ts`.
+`createServerClient` removes `storage` from the accepted options and always installs `serverCookieStorage(cookies)`. It also sets `accessTokens: false`: a client that lives for one request would be gone before an [access token](/docs/platform/auth/#access-tokens-in-the-sdk) minted in the background arrived, so it sends the session token. All other `ClientOptions`, including `fetch`, `headers`, `autoRefresh`, and `realtimeIoFactory`, are forwarded. Source: `packages/ssr/src/server.ts`.
 
 A reusable Next.js helper:
 

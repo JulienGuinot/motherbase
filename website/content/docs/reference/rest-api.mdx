@@ -16,7 +16,7 @@ Auth is powered by [Better Auth](https://www.better-auth.com/). Most endpoints r
 Authorization: Bearer <session-token>
 ```
 
-The server verifies the session, then reloads the full user record by id — role and status are always live, never trusted from the token. The SDK attaches the token and revalidates the session on `401`. See [Auth](/docs/platform/auth) for the full method and plugin surface.
+The server verifies the session, then reloads the full user record by id, so role and status are live. The data plane (`/rest/v1`, storage, realtime broadcast) and the routes that require a signed-in user also accept the short-lived access token from `GET /api/auth/token`; on the data plane the caller is read from its claims without a database query. `/api/auth/*` takes only the session token. The SDK attaches the right one and revalidates the session on `401`. See [Sessions and tokens](/docs/platform/auth/#sessions-and-tokens) for both credentials and when an access token is refused, and [Auth](/docs/platform/auth) for the full method and plugin surface.
 
 ### Running as another user
 
@@ -70,7 +70,7 @@ Plugin routes are mounted under the same base path when their setting group is e
 }
 ```
 
-Send `token` back as `Authorization: Bearer <token>`. The user `role` is resolved server-side from the live record on every protected request.
+Send `token` back as `Authorization: Bearer <token>`. With that session token, the user `role` is resolved server-side from the live record on every protected request; an access token carries it as the `user_role` claim.
 
 ### OAuth callback URLs
 
@@ -108,7 +108,7 @@ Motherbase maps requests to PostgreSQL roles:
 | Role | Meaning |
 |------|---------|
 | `anon` | No valid bearer token |
-| `authenticated` | Valid bearer token |
+| `authenticated` | Valid session token or access token |
 
 Tables created from Project Studio SQL/Table editor have RLS enabled automatically. If RLS is enabled and there is no matching policy, `anon` and `authenticated` callers see no rows and writes fail.
 

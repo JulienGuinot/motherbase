@@ -187,7 +187,12 @@ export class MotherbaseClient<
     // callback before this line's assignment happens, so it has to be a `let`.
     // eslint-disable-next-line prefer-const
     let auth!: AuthClient;
-    this.http = new HttpClient(url, this.store, { autoRefresh, fetch: fetchImpl, headers }, async () => {
+    this.http = new HttpClient(url, this.store, {
+      autoRefresh,
+      fetch: fetchImpl,
+      headers,
+      accessTokens: options.accessTokens ?? true,
+    }, async () => {
       try {
         return Boolean((await auth.getSession()).data);
       } catch {

@@ -14,6 +14,7 @@ import {
   type SigningKeyAction,
   type SigningKeyRow,
 } from '../../auth/signing-keys';
+import { invalidateSigningKeys } from '../../auth/access-tokens';
 
 export const createSigningKeySchema = z
   .object({
@@ -80,6 +81,7 @@ export class SigningKeyService extends BaseContext {
         status: 'standby',
       },
     });
+    invalidateSigningKeys();
     return describeSigningKey(row);
   }
 
@@ -107,6 +109,8 @@ export class SigningKeyService extends BaseContext {
         else await tx.jwks.update({ where: { id: change.id }, data: { status: change.status } });
       }
     });
+    // After the commit: this is what makes a revoked key stop verifying now.
+    invalidateSigningKeys();
     return this.list();
   }
 }
