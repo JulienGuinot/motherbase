@@ -85,6 +85,12 @@ More patterns (public read, organization-scoped, admin-only) are in
 
 Open **Project Studio → Connect** and copy the API URL and the publishable key.
 
+In local mode the API URL is `http://localhost:<port>`, not `http://notes.localhost`.
+Browsers resolve `*.localhost` themselves, but Node does not (`ENOTFOUND`), so
+server-side code (SSR, route handlers, scripts) could never reach the project by its
+domain. Each project's API is published on its own loopback port, from `54420` up,
+which works from both sides.
+
 ```bash
 npm install @motherbase/client
 npm install socket.io-client   # only needed for realtime
@@ -92,7 +98,7 @@ npm install socket.io-client   # only needed for realtime
 
 ```env
 # .env.local
-NEXT_PUBLIC_MOTHERBASE_URL=http://notes.localhost
+NEXT_PUBLIC_MOTHERBASE_URL=http://localhost:54420   # the API URL from Connect
 NEXT_PUBLIC_MOTHERBASE_KEY=mb_publishable_...
 ```
 

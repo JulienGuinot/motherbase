@@ -52,7 +52,7 @@ proxies `/api` through to the API server on 5001, so you get fast refresh withou
 
 Set `CONSOLE_MODE=dev` and the Console switches defaults: scheme `http`, domain suffix `localhost`, projects in `.dev-projects`, compose file `deploy/docker-compose.dev-multi.yml`, and a padded dev JWT secret. In prod mode a real `CONSOLE_JWT_SECRET` of 32+ characters is required or the process refuses to start.
 
-Projects created in dev mode are reachable at `<name>.localhost` over HTTP.
+Projects created in dev mode are reachable at `<name>.localhost` over HTTP. Their API is also published on `127.0.0.1:<API_PORT>` (`DB_PORT + 100`, so `54420` up), because Node cannot resolve `*.localhost` and server-side code would otherwise never reach it. Connect reports that URL.
 
 ## Useful environment switches
 

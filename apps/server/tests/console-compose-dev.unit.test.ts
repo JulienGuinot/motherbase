@@ -23,7 +23,10 @@ describe('docker-compose.dev-multi.yml', () => {
     const apiEnv = (f: string) => Object.keys((yaml.load(read(f)) as any).services.api.environment);
     const prodKeys = apiEnv('docker-compose.prod.yml');
     const devKeys = apiEnv('docker-compose.dev-multi.yml');
-    expect(devKeys).toEqual(prodKeys);
+    // API_PORT is the dev-only loopback port Connect reports: prod must never
+    // forward it, or a VPS project would advertise http://localhost:<port>.
+    expect(devKeys.filter(k => k !== 'API_PORT')).toEqual(prodKeys);
+    expect(prodKeys).not.toContain('API_PORT');
   });
 });
 

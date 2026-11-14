@@ -287,6 +287,22 @@ export function parseDbPort(env: string): number | undefined {
   return Number.isInteger(port) && port > 0 && port < 65536 ? port : undefined;
 }
 
+/**
+ * Host port a project's API is published on in dev mode, on 127.0.0.1 (see
+ * deploy/docker-compose.dev-multi.yml; prod publishes nothing). Needed because
+ * `<name>.localhost` resolves in browsers only: Node's resolver answers
+ * ENOTFOUND, so an app's SSR or scripts could never reach the project.
+ *
+ * Derived from DB_PORT rather than allocated: the offset equals the size of
+ * DB_PORT_RANGE, so the two ranges never overlap, and a project that already
+ * holds a DB_PORT gets a stable API port without any migration.
+ */
+export const API_PORT_OFFSET = DB_PORT_RANGE.last - DB_PORT_RANGE.first + 1;
+
+export function apiPortFor(dbPort: number): number {
+  return dbPort + API_PORT_OFFSET;
+}
+
 export type SecretGen = (bytes: number) => string;
 export const generateSecret: SecretGen = n => randomBytes(n).toString('hex');
 
@@ -360,7 +376,7 @@ export function renderEnvProd(m: ProjectManifest): string {
     `CONSOLE_SQL_ENABLED=true`,
     // Only emitted when allocated. An absent DB_PORT is a valid state the
     // compose overlay handles; writing an empty one would look like a bug.
-    ...(m.dbPort === undefined ? [] : [`DB_PORT=${m.dbPort}`, 'DB_BIND=127.0.0.1']),
+    ...(m.dbPort === undefined ? [] : [`DB_PORT=${m.dbPort}`, 'DB_BIND=127.0.0.1', `API_PORT=${apiPortFor(m.dbPort)}`]),
     ...Object.entries(limitsToEnv(m.limits)).map(([k, v]) => `${k}=${v}`),
     ...Object.entries(runtimeOptionsToEnv(m.runtime)).map(([k, v]) => `${k}=${v}`),
     '',
