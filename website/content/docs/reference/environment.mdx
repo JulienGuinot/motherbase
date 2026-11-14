@@ -27,7 +27,7 @@ node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
 | Variable | Description |
 |----------|-------------|
 | `DATABASE_URL` | PostgreSQL connection string |
-| `JWT_SECRET` | Secret for signing JWT access tokens |
+| `JWT_SECRET` | Signs session cookies and internal HMACs. Access tokens are signed with the project's signing keys instead |
 
 `CONFIG_ENCRYPTION_KEY` is not required to boot, but it is required to save Studio-managed secrets such as edge secrets and encrypted provider settings. `setup.sh` generates it.
 

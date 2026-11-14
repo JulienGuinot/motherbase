@@ -9,7 +9,6 @@ import cors from 'cors';
 import helmet from 'helmet';
 import logger from 'morgan';
 import prisma from './lib/prisma';
-import { fromNodeHeaders } from 'better-auth/node';
 import { globalLimiter, authLimiter, applyRateLimitLimits } from './middlewares/rate-limit';
 import {
   customRulesLimiter,
@@ -75,6 +74,7 @@ import { Server } from 'socket.io';
 import { toNodeHandler } from 'better-auth/node';
 import { HTTP_ROUTES } from '@motherbase/contracts';
 import { registerProjectAuthRoutes } from './auth/routes';
+import { makeIdentityResolver } from './auth/session';
 import { createAuthRateLimiter } from './auth/rate-limits';
 // Reuse the same CORS allowlist for Socket.IO instead of a blanket '*'.
 const socketOrigins = parseCorsOrigins(env.CORS_ORIGINS);
@@ -91,17 +91,20 @@ const io = new Server(http, {
   },
 });
 
+// Who a bearer or a cookie names, for the two callers below that are not an
+// Express middleware. Same resolution as the auth middleware (auth/session.ts).
+const identityOf = makeIdentityResolver(() => container.resolve('AuthManager').current(), prisma);
+
 // Optional auth at the Socket.IO level (has access to handshake.auth).
 // Anonymous connections are allowed: the token just enriches socket.data.
-// Validates a Better Auth session (bearer token) rather than a raw app JWT.
+// The token is a session token or an access token, as on any other request.
 io.use(async (socket, next) => {
   const token =
     (socket.handshake.auth as any)?.token ?? socket.handshake.headers?.authorization?.replace(/^Bearer\s+/i, '');
   if (!token) return next();
   try {
-    const auth = await container.resolve('AuthManager').current();
-    const session = await auth.api.getSession({ headers: new Headers({ authorization: `Bearer ${token}` }) });
-    if (session?.user) socket.data.user = { id: session.user.id, role: (session.user as any).role };
+    const user = await identityOf({ authorization: `Bearer ${token}` });
+    if (user) socket.data.user = user;
   } catch {
     /* invalid token → anonymous socket */
   }
@@ -162,9 +165,9 @@ container
 
 // How the custom rules engine resolves a caller's identity. Invoked ONLY when an
 // enabled rule keys by / filters on user, role or API key, so purely IP/global
-// rules add no per-request session lookup. Role/status are read live from the DB,
-// never trusted from the token (mirrors auth/session.ts). Anonymous or malformed
-// requests resolve to {} and fall back to IP bucketing.
+// rules add no per-request session lookup. Resolved the way the auth middleware
+// resolves a caller (auth/session.ts). Anonymous or malformed requests resolve
+// to {} and fall back to IP bucketing.
 setRateLimitIdentityResolver(async req => {
   const identity: { userId?: string; role?: string; apiKeyId?: string } = {};
   try {
@@ -173,18 +176,10 @@ setRateLimitIdentityResolver(async req => {
     // unknown key stays anonymous and falls back to IP bucketing.
     const key = await container.resolve('ApiKeyService').resolve(presentedToken(req));
     if (key) identity.apiKeyId = key.id;
-    const auth = await container.resolve('AuthManager').current();
-    const session = await auth.api.getSession({ headers: fromNodeHeaders(req.headers) });
-    const id = session?.user?.id;
-    if (id) {
-      const user = await prisma.user.findUnique({
-        where: { id: String(id) },
-        select: { id: true, role: true, status: true },
-      });
-      if (user && user.status === 'active') {
-        identity.userId = user.id;
-        identity.role = String(user.role);
-      }
+    const user = await identityOf(req.headers);
+    if (user) {
+      identity.userId = user.id;
+      identity.role = user.role;
     }
   } catch {
     /* resolve as anonymous */

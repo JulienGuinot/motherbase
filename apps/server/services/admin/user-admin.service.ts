@@ -6,6 +6,7 @@ import { maskRow } from '../../constants/admin.constants';
 import { HttpException } from '../../exceptions/http-exception';
 import { emailRegex } from '../../constants/regex.constants';
 import { CREDENTIAL, setCredentialPassword } from '../../auth/credentials';
+import { revokeAccessTokens } from '../../auth/access-tokens';
 import { personNameSchema, usernameSchema } from '../../validators/user-fields';
 import type { AuditEvent } from '../../auth/audit-actions';
 import { SERVICE_ROLE_ACTOR_ID } from './auth-audit.service';
@@ -268,7 +269,10 @@ export class UserAdminService extends BaseContext {
 
   async revokeSession(userId: string, sessionId: string): Promise<void> {
     const { count } = await this.di.prisma.session.deleteMany({ where: { id: sessionId, userId } });
-    if (count) this.audit({ action: 'token_revoked', logType: 'token' }, { id: userId });
+    if (count) {
+      revokeAccessTokens(userId);
+      this.audit({ action: 'token_revoked', logType: 'token' }, { id: userId });
+    }
   }
 
   /**
@@ -370,10 +374,13 @@ export class UserAdminService extends BaseContext {
   /** Ends an impersonation session. Can never delete a real one. */
   async stopImpersonating(token: string): Promise<void> {
     if (!token || typeof token !== 'string') throw new HttpException('A session token is required', 400);
-    const { count } = await this.di.prisma.session.deleteMany({
+    const session = await this.di.prisma.session.findFirst({
       where: { token, impersonatedBy: { not: null } },
+      select: { id: true, userId: true },
     });
-    if (!count) throw new HttpException('No active impersonation session for that token', 404);
+    if (!session) throw new HttpException('No active impersonation session for that token', 404);
+    await this.di.prisma.session.deleteMany({ where: { id: session.id } });
+    revokeAccessTokens(session.userId);
   }
 
   async update(
@@ -405,6 +412,7 @@ export class UserAdminService extends BaseContext {
     if (data.status && data.status !== 'active') {
       await this.di.prisma.session.deleteMany({ where: { userId: id } });
     }
+    revokeAccessTokens(id);
     this.audit({ action: 'user_modified', logType: 'user' }, user);
     return maskRow(user);
   }
@@ -432,11 +440,13 @@ export class UserAdminService extends BaseContext {
 
   async revokeSessions(id: string): Promise<void> {
     await this.di.prisma.session.deleteMany({ where: { userId: id } });
+    revokeAccessTokens(id);
     this.audit({ action: 'token_revoked', logType: 'token' }, { id });
   }
 
   async setRole(id: string, role: UserRole): Promise<any> {
     const user = await this.di.prisma.user.update({ where: { id }, data: { role } });
+    revokeAccessTokens(id);
     this.audit({ action: 'user_modified', logType: 'user', traits: { role } }, user);
     return maskRow(user);
   }
@@ -488,6 +498,7 @@ export class UserAdminService extends BaseContext {
   async delete(id: string): Promise<void> {
     // Sessions/accounts cascade on user delete (FK onDelete: Cascade).
     const user = await this.di.prisma.user.delete({ where: { id } });
+    revokeAccessTokens(id);
     this.audit({ action: 'user_deleted', logType: 'team' }, user);
   }
 }

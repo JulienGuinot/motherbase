@@ -191,6 +191,12 @@ The SDK attaches the access token automatically and revalidates it on a 401
 Auth bearer sessions, so there is no separate refresh token to rotate: when the
 token is no longer valid the SDK clears the session and emits `SIGNED_OUT`.
 
+REST and storage requests carry a short-lived JWT instead, minted in the
+background from the session and held in memory only, so the server verifies them
+without a database read. Until one is ready, and whenever one is refused, the
+session token is sent as before. Auth and edge function calls always send the
+session token. `createClient(url, key, { accessTokens: false })` turns this off.
+
 ## API surface (cheatsheet)
 
 ```ts

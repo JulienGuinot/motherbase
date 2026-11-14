@@ -242,7 +242,9 @@ describe('storage.from(bucket)', () => {
           },
         }),
     ]);
-    const client = createClient('http://api.test', undefined, { fetch: fn });
+    // The fake answers calls in order: a background access-token mint would
+    // take the upload's answer (packages/client covers that transport itself).
+    const client = createClient('http://api.test', undefined, { fetch: fn, accessTokens: false });
     await client.auth.signIn.email({ email: 'a@b.com', password: 'x' });
 
     const blob = new Blob(['hi'], { type: 'text/plain' });

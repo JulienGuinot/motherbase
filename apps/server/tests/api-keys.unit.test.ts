@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { ApiKeyService } from '../services/api-key.service';
+import { ApiKeyService, RESOLVED_KEY_TTL_MS } from '../services/api-key.service';
 import { rlsContextFor } from '../lib/rls-claims';
 
 // The middleware resolves its dependencies from the container at call time, so
@@ -105,6 +105,32 @@ describe('ApiKeyService', () => {
 
     await service.revoke(created.id);
     expect(await service.resolve(created.clearToken)).toBeNull();
+  });
+
+  it('reads a valid key once, then answers from memory until it is revoked or expires', async () => {
+    const created = await service.create('server', 'secret');
+    const lookups = vi.spyOn(delegate, 'findUnique');
+
+    await service.resolve(created.clearToken);
+    await service.resolve(created.clearToken);
+    expect(lookups).toHaveBeenCalledTimes(1);
+
+    // A wrong token is never remembered: it would let a flood of them grow the map.
+    await service.resolve('mb_secret_nope');
+    await service.resolve('mb_secret_nope');
+    expect(lookups).toHaveBeenCalledTimes(3);
+
+    // A row revoked behind the service's back (another instance, SQL by hand)
+    // stops resolving once the entry expires.
+    delegate.rows[0].revokedAt = new Date();
+    expect(await service.resolve(created.clearToken)).not.toBeNull();
+    vi.useFakeTimers();
+    try {
+      vi.advanceTimersByTime(RESOLVED_KEY_TTL_MS + 1);
+      expect(await service.resolve(created.clearToken)).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('mints the default publishable key once and reuses it after', async () => {

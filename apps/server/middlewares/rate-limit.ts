@@ -5,6 +5,7 @@ import { env } from '../config/env';
 import { actionFromMethod, shieldTelemetry } from '../lib/shield-telemetry';
 import { logActivity } from '../lib/activity-log';
 import { apiErrorEnvelope } from './api-error.middleware';
+import { signedInUser } from '../auth/signed-in-user';
 
 type LimitScope = 'global' | 'auth' | 'rest' | 'edge';
 
@@ -108,7 +109,7 @@ export function ipKey(raw: string): string {
 }
 
 function clientKey(req: Request): string {
-  const userId = (req as any).user?.id;
+  const userId = signedInUser(req)?.id;
   if (userId) return `user:${String(userId)}`;
   return `ip:${ipKey(String(req.ip || req.socket.remoteAddress || 'unknown'))}`;
 }

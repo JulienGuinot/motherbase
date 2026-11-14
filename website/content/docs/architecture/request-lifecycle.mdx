@@ -58,8 +58,8 @@ These are not global — controllers opt in with `@before([...])`.
 
 | Guard | File | Rule |
 |---|---|---|
-| `authMiddleware` | `middlewares/auth.middleware.ts` | Validates a Better Auth session (cookie **or** bearer/JWT), reloads the full Prisma user onto `req.user` |
-| `optionalAuthMiddleware` | same | Same, but anonymous requests continue |
+| `authMiddleware` | `middlewares/auth.middleware.ts` | Validates a Better Auth session (cookie or bearer) or an access token, reloads the full Prisma user onto `req.user` |
+| `optionalAuthMiddleware` | same | Same, but anonymous requests continue, and a valid access token sets `req.tokenUser` from its claims with no query |
 | `requireRole(...roles)` | `middlewares/require-role.ts` | Runs after auth; `401` when `req.user.role` is not listed |
 | `adminGuard` / `adminOnly` | `middlewares/platform-admin.middleware.ts` | Guards every `/api/admin` route |
 | `bucketTokenGuard(perm)` | `middlewares/bucketToken.middleware.ts` | Verifies a bucket bearer token against `:slug` for `read`/`write`/`delete` |
@@ -127,11 +127,11 @@ Keying on `ip:<addr>` also depends on `TRUST_PROXY` being set correctly behind a
 proxy — leave it unset behind Traefik and every client shares the proxy's IP in a single
 bucket, so one caller can exhaust the limit for everyone.
 
-**Custom rules** (`middlewares/custom-rate-limit.ts` + `lib/rate-limit-rules.ts`) — operator-defined, loaded from the `security.rateLimitRules` group, evaluated most-restrictive-wins, backed by an in-memory `FixedWindowStore`. Identity resolution (user id / role / API-key hash) runs **only** when an enabled rule actually keys on it, so purely IP-based rule sets add no per-request session lookup. Roles are read live from the database, never trusted from the token. Invalid saved rules are ignored and the previous set is kept, so a bad save can never switch limiting off.
+**Custom rules** (`middlewares/custom-rate-limit.ts` + `lib/rate-limit-rules.ts`) — operator-defined, loaded from the `security.rateLimitRules` group, evaluated most-restrictive-wins, backed by an in-memory `FixedWindowStore`. Identity resolution (user id / role / API-key hash) runs **only** when an enabled rule actually keys on it, so purely IP-based rule sets add no per-request session lookup. The caller is resolved as the auth middleware resolves it: a session's role is read live from the database, an access token's from its `user_role` claim. Invalid saved rules are ignored and the previous set is kept, so a bad save can never switch limiting off.
 
 ## Realtime path
 
-Socket.IO is mounted at path `/ws` on the same HTTP server, with its CORS origin list derived from `CORS_ORIGINS` (in production, an empty allowlist denies cross-origin sockets). An `io.use` handshake middleware validates an optional bearer token via Better Auth and, on success, attaches `socket.data.user = { id, role }`. Connections without a token are accepted as anonymous.
+Socket.IO is mounted at path `/ws` on the same HTTP server, with its CORS origin list derived from `CORS_ORIGINS` (in production, an empty allowlist denies cross-origin sockets). An `io.use` handshake middleware validates an optional session token or access token, resolved as the auth middleware resolves it, and on success attaches `socket.data.user = { id, role }`. Connections without a token are accepted as anonymous.
 
 ## Error envelope
 

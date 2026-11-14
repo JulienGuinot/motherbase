@@ -109,8 +109,8 @@ export function generateSigningKey(alg: SigningAlgorithm = DEFAULT_SIGNING_ALGOR
   };
 }
 
-/** Which algorithm a private JWK can sign with, or null when it is none we accept. */
-function algorithmOf(jwk: JsonWebKey): SigningAlgorithm | null {
+/** Which algorithm a JWK signs or verifies with, or null when it is none we accept. */
+export function algorithmOf(jwk: JsonWebKey): SigningAlgorithm | null {
   if (jwk.kty === 'EC' && jwk.crv === 'P-256') return 'ES256';
   if (jwk.kty === 'RSA') return 'RS256';
   if (jwk.kty === 'OKP' && jwk.crv === 'Ed25519') return 'EdDSA';
@@ -197,7 +197,7 @@ function toBetterAuthJwk(row: SigningKeyRow) {
  * requests racing here both generate one; the partial unique index lets the
  * first in and the loser signs with the winner's key.
  */
-export function signingKeyAdapter(prisma: PrismaClient) {
+export function signingKeyAdapter(prisma: PrismaClient, onKeyCreated: () => void = () => {}) {
   const rows = () => prisma.jwks.findMany({ orderBy: { createdAt: 'asc' } }) as Promise<SigningKeyRow[]>;
   return {
     getJwks: async () => jwksForBetterAuth(await rows()).map(toBetterAuthJwk),
@@ -212,6 +212,7 @@ export function signingKeyAdapter(prisma: PrismaClient) {
             status: 'in_use',
           },
         });
+        onKeyCreated();
         return toBetterAuthJwk(created);
       } catch (error) {
         const current = await prisma.jwks.findFirst({ where: { status: 'in_use' } });

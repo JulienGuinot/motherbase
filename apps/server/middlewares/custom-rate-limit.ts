@@ -10,6 +10,7 @@ import {
   type RequestCtx,
 } from '../lib/rate-limit-rules';
 import { apiErrorEnvelope } from './api-error.middleware';
+import { signedInUser } from '../auth/signed-in-user';
 
 // Express glue for the operator-defined rate-limit rules engine. The matching
 // and counting logic is the pure module in lib/rate-limit-rules.ts; this file
@@ -77,8 +78,8 @@ export const customRulesLimiter: RequestHandler = async (req, res, next) => {
     }
   }
 
-  const userId = identity.userId ?? (req as any).user?.id;
-  const role = identity.role ?? (req as any).user?.role ?? 'anon';
+  const userId = identity.userId ?? signedInUser(req)?.id;
+  const role = identity.role ?? signedInUser(req)?.role ?? 'anon';
 
   const ctx: RequestCtx = {
     method: req.method,

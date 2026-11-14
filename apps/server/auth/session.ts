@@ -1,16 +1,28 @@
 import type { Request, Response, NextFunction, RequestHandler } from 'express';
+import type { IncomingHttpHeaders } from 'http';
 import { fromNodeHeaders } from 'better-auth/node';
-import type { PrismaClient } from '@prisma/client';
+import type { PrismaClient, User } from '@prisma/client';
 import { HttpException } from '../exceptions/http-exception';
 import { apiErrorEnvelope } from '../middlewares/api-error.middleware';
 import type { AuthInstance } from './instance';
 import type { ThirdPartyCaller } from './third-party';
+import { readSession } from './server-session';
+import { accessTokenAccepted, verifyAccessToken, type AccessTokenUser } from './access-tokens';
+// Declares `req.tokenUser`, which the optional middleware below sets.
+import './signed-in-user';
 
-// Project-side auth middleware over Better Auth sessions. It verifies the
-// session (cookie or bearer/JWT), then RELOADS the full Prisma user by id so
-// `req.user` is exactly the Prisma `User` every controller already expects. And
-// so role/status are always live, never trusted from the token. A soft-deleted
-// or deactivated account (status !== 'active') is rejected with 403.
+// Project-side auth middleware. A request names its caller one of two ways:
+//
+//   * a Better Auth session (cookie, or the session token as a bearer). The
+//     session is looked up, then the full Prisma user is RELOADED by id, so
+//     `req.user` is exactly the Prisma `User` every controller expects and
+//     role/status are live. A soft-deleted or deactivated account
+//     (status !== 'active') is rejected with 403.
+//   * an access token (the JWT from /api/auth/token) as a bearer. It is
+//     verified against the signing keys in memory. The data plane then takes
+//     the caller from its claims, on `req.tokenUser`, with no query at all;
+//     the routes behind the hard middleware still reload the row. How a token
+//     stops being honoured before it expires is in auth/access-tokens.ts.
 
 // A getter so the middleware always uses the live instance. The AuthManager may
 // swap it in-process when auth settings change in the console.
@@ -21,12 +33,6 @@ export function bearerJwt(header: string | undefined): string | null {
   const token = /^Bearer\s+(\S+)$/i.exec(header ?? '')?.[1];
   return token && token.split('.').length === 3 ? token : null;
 }
-
-// The jwt plugin is always registered (auth/instance.ts), but the plugin list is
-// assembled conditionally, which erases its endpoints from the inferred API type.
-type JwtApi = {
-  verifyJWT(input: { body: { token: string } }): Promise<{ payload: { sub?: unknown } | null }>;
-};
 
 /**
  * Whether the request carries anything Better Auth could turn into a session: a
@@ -39,29 +45,73 @@ export function carriesCredentials(headers: Request['headers']): boolean {
   return Boolean(headers.cookie || headers.authorization || headers['x-api-key']);
 }
 
-async function resolveUser(getAuth: GetAuth, prisma: PrismaClient, req: Request) {
-  if (!carriesCredentials(req.headers)) return null;
+/** Who a request's credentials name. At most one of `user` and `tokenUser` is set. */
+interface ResolvedCaller {
+  /** The full row, read from the database for this request. */
+  user?: User | null;
+  /** The caller as a verified access token describes it. */
+  tokenUser?: AccessTokenUser;
+  /** The bearer is an access token of ours that was revoked: it names nobody, to anyone. */
+  refused?: true;
+}
+
+const NOBODY: ResolvedCaller = { user: null };
+const REFUSED: ResolvedCaller = { user: null, refused: true };
+
+/**
+ * `fromToken` lets a verified access token stand for the caller on its own.
+ * Without it the token only says which row to load, which is what a route that
+ * hands `req.user` to a controller needs.
+ */
+async function resolveCaller(
+  getAuth: GetAuth,
+  prisma: PrismaClient,
+  headers: IncomingHttpHeaders,
+  { fromToken }: { fromToken: boolean },
+): Promise<ResolvedCaller> {
+  if (!carriesCredentials(headers)) return NOBODY;
   const auth = await getAuth();
-  const session = await auth.api.getSession({ headers: fromNodeHeaders(req.headers) });
-  let id = session?.user?.id;
+
   // An access token from /api/auth/token (or one minted with `motherbase gen
-  // bearer-jwt` from an imported signing key). Better Auth verifies it against
-  // every key not revoked, with this project as issuer and audience. Only the
-  // subject is taken from it: role and status are reloaded below like any session.
-  const jwt = !id ? bearerJwt(req.headers.authorization) : null;
-  if (jwt) {
-    const verified = await (auth.api as unknown as JwtApi).verifyJWT({ body: { token: jwt } }).catch(() => null);
-    id = typeof verified?.payload?.sub === 'string' ? verified.payload.sub : undefined;
+  // bearer-jwt` from an imported signing key), checked first because it costs
+  // no query: a session token has two segments, never three, so this cannot
+  // mistake one for the other. A JWT that is not ours (a third-party issuer's)
+  // falls through; the optional middleware tries it as one.
+  const jwt = bearerJwt(headers.authorization);
+  const token = jwt ? await verifyAccessToken(prisma, auth.options.baseURL, jwt) : null;
+  if (token) {
+    // Minted before its session ended or its user changed: refused, exactly
+    // like a session that no longer exists. Falling back to the row here
+    // would bring a revoked session's token back to life.
+    if (token.issuedMs !== null && !accessTokenAccepted(token.subject, token.issuedMs)) return REFUSED;
+    if (token.user && fromToken) return { tokenUser: token.user };
+    return { user: await prisma.user.findUnique({ where: { id: token.subject } }) };
   }
-  if (!id) return null;
-  return prisma.user.findUnique({ where: { id: String(id) } });
+
+  const session = await readSession(auth, fromNodeHeaders(headers));
+  const id = session?.user?.id;
+  if (!id) return NOBODY;
+  return { user: await prisma.user.findUnique({ where: { id: String(id) } }) };
+}
+
+/**
+ * The caller behind a set of headers, for code that is not an Express
+ * middleware (the socket handshake, the rate-limit identity): its id and role,
+ * or null for anyone not signed in or whose account is not active.
+ */
+export function makeIdentityResolver(getAuth: GetAuth, prisma: PrismaClient) {
+  return async (headers: IncomingHttpHeaders): Promise<{ id: string; role: string } | null> => {
+    const { user, tokenUser } = await resolveCaller(getAuth, prisma, headers, { fromToken: true });
+    if (tokenUser) return { id: tokenUser.id, role: tokenUser.role };
+    return user && user.status === 'active' ? { id: user.id, role: String(user.role) } : null;
+  };
 }
 
 /** Hard auth: 401 without a valid session, 403 for an inactive account. */
 export function makeAuthMiddleware(getAuth: GetAuth, prisma: PrismaClient): RequestHandler {
   return async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const user = await resolveUser(getAuth, prisma, req);
+      const { user } = await resolveCaller(getAuth, prisma, req.headers, { fromToken: false });
       if (!user) return res.status(401).json(apiErrorEnvelope('UNAUTHORIZED', 'A valid user session is required.', req.id));
       if (user.status !== 'active') throw new HttpException('Account is not active', 403);
       (req as any).user = user;
@@ -110,16 +160,21 @@ export function makeOptionalAuthMiddleware(
 ): RequestHandler {
   return async (req: Request, res: Response, next: NextFunction) => {
     let unknownSession = false;
+    let refused = false;
     try {
-      const user = await resolveUser(getAuth, prisma, req);
-      unknownSession = user === null;
-      if (user && user.status === 'active') (req as any).user = user;
+      const { user, tokenUser, ...caller } = await resolveCaller(getAuth, prisma, req.headers, { fromToken: true });
+      refused = caller.refused === true;
+      unknownSession = !user && !tokenUser;
+      if (tokenUser) req.tokenUser = tokenUser;
+      else if (user && user.status === 'active') req.user = user;
     } catch {
       /* proceed as anonymous rather than crashing the request */
     }
     // Only a JWT can be a third-party token: an API key sent as a bearer
-    // (`Authorization: Bearer mb_secret_...`) never reaches the resolver.
-    const bearer = !req.user && resolveThirdParty ? bearerJwt(req.headers.authorization) : null;
+    // (`Authorization: Bearer mb_secret_...`) never reaches the resolver. Nor
+    // does a revoked token of ours: a provider entry pointing back at this
+    // project's own keys must not be a way around its revocation.
+    const bearer = !req.user && !req.tokenUser && !refused && resolveThirdParty ? bearerJwt(req.headers.authorization) : null;
     if (bearer) {
       try {
         const caller = await resolveThirdParty!(bearer);

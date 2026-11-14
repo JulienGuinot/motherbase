@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createPrivateKey, sign } from 'crypto';
 import express from 'express';
 import request from 'supertest';
@@ -102,5 +102,25 @@ describe('JWT signing keys', () => {
 
     expect((await me(`${input}.${signature}`)).status).toBe(200);
     expect((await me(`${input}.${signature.slice(0, -4)}AAAA`)).status).toBe(401);
+  });
+});
+
+// auth/server-session.ts: a session this server reads for itself must not cost
+// a signature, and the header a client relies on must still be there.
+describe('set-auth-jwt', () => {
+  it('is still sent to a client that asks for its session over HTTP', async () => {
+    const res = await request(app).get('/api/auth/get-session').set('Authorization', `Bearer ${session}`);
+    expect(res.status).toBe(200);
+    expect(res.headers['set-auth-jwt']).toMatch(/^[\w-]+\.[\w-]+\.[\w-]+$/);
+  });
+
+  it('is not produced when the auth middleware resolves the session', async () => {
+    const keyReads = vi.spyOn(prisma.jwks, 'findMany');
+    try {
+      expect((await me(session)).status).toBe(200);
+      expect(keyReads).not.toHaveBeenCalled();
+    } finally {
+      keyReads.mockRestore();
+    }
   });
 });

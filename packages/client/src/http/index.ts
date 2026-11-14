@@ -5,9 +5,11 @@ import { isBrowser } from "../utils/runtime.js";
 import { ApiEnvelope } from "../types.js";
 import { requestIdOf, withoutTrailingSlash } from "./utils.js";
 import { BackendError } from "./backend-error.js";
+import { AccessTokens, isDataPlanePath } from "./access-token.js";
 
 export class HttpClient {
     private refreshPromise: Promise<boolean> | null = null;
+    private readonly accessTokens?: AccessTokens;
 
     constructor(
         private readonly baseUrl: string,
@@ -16,12 +18,20 @@ export class HttpClient {
             autoRefresh: boolean;
             fetch: typeof fetch;
             headers?: Record<string, string>;
+            /** Send a JWT instead of the session token to the data plane (`ClientOptions.accessTokens`). */
+            accessTokens?: boolean;
             /** Called once per HTTP round trip, including the retry after a refresh. */
             onRequest?: RequestObserver;
         },
         /** Performs the refresh; returns true on success. Injected to avoid a cycle. */
         private readonly doRefresh: () => Promise<boolean>,
-    ) { }
+    ) {
+        // Without `atob` (React Native before Hermes had it) no JWT can be read,
+        // and every mint would be a wasted request.
+        if (opts.accessTokens && typeof atob === 'function') {
+            this.accessTokens = new AccessTokens(store, sessionToken => this.mintAccessToken(sessionToken));
+        }
+    }
 
     /**
      * Install (or clear) the request observer.
@@ -61,7 +71,20 @@ export class HttpClient {
     }
 
     private async sendWithRefresh(path: string, options: RequestOptions): Promise<Response> {
-        const res = await this.send(path, options);
+      
+      
+        await this.store.hydrate();
+        const jwt = !options.anonymous && isDataPlanePath(path) ? this.accessTokens?.current() : undefined;
+        let res = await this.send(path, options, jwt);
+        if (jwt && res.status === 401) {
+            // A refused JWT says nothing about the session: retry with the session
+            // token, and leave revalidation (and a possible sign-out) to that answer.
+            this.accessTokens?.reject(jwt);
+            await res.body?.cancel().catch(() => undefined);
+            res = await this.send(path, options);
+        }
+
+
         if (res.status === 401 && this.opts.autoRefresh && !options.anonymous && !options._retry) {
             const refreshed = await this.refreshOnce();
             if (refreshed) {
@@ -81,12 +104,13 @@ export class HttpClient {
         return this.refreshPromise;
     }
 
-    private async send(path: string, options: RequestOptions): Promise<Response> {
+    /** `jwt`, when given, is sent instead of the session token. */
+    private async send(path: string, options: RequestOptions, jwt?: string): Promise<Response> {
         await this.store.hydrate();
         const headers: Record<string, string> = { ...this.opts.headers, ...options.headers };
         const session = this.store.get();
         if (!options.anonymous && session?.accessToken) {
-            headers['Authorization'] = `Bearer ${session.accessToken}`;
+            headers['Authorization'] = `Bearer ${jwt ?? session.accessToken}`;
         }
 
         let body: BodyInit | undefined;
@@ -116,6 +140,19 @@ export class HttpClient {
             signal: options.signal,
             ...(options.credentials ? { credentials: options.credentials } : {}),
         }));
+    }
+
+    /**
+     * `GET /api/auth/token` for this session token. Sent directly rather than
+     * through `send`, so it carries no JWT and a 401 here only means "no JWT":
+     * it must not start a session revalidation. Resolves with null on failure.
+     */
+    private async mintAccessToken(sessionToken: string): Promise<unknown> {
+        const path = HTTP_ROUTES.authToken;
+        const res = await this.observe('GET', path, () => this.opts.fetch(this.url(path), {
+            headers: { ...this.opts.headers, Authorization: `Bearer ${sessionToken}` },
+        }));
+        return res.ok ? res.json() : null;
     }
 
     /**

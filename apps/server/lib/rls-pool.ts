@@ -22,6 +22,27 @@ export const DEFAULT_STATEMENT_TIMEOUT_MS = 30_000;
 const CONNECTION_TIMEOUT_MS = 10_000;
 
 /**
+ * The names, among the `public` tables bound to `param`, that have row level
+ * security enabled. One expression so the gate reads the same wherever it is
+ * asked: folded into the transaction's opening statement (`rlsGate` below), or
+ * on its own by a caller that joins a transaction already open.
+ */
+const rlsEnabledSql = (param: string): string =>
+  `ARRAY(SELECT c.relname::text
+           FROM pg_class c
+           JOIN pg_namespace n ON n.oid = c.relnamespace
+          WHERE n.nspname = 'public'
+            AND c.relname = ANY(${param}::text[])
+            AND c.relkind IN ('r', 'p')
+            AND c.relrowsecurity)`;
+
+/** `rlsEnabledSql` as its own round trip, for a transaction somebody else opened. */
+export async function rlsEnabledTables(client: PoolClient, tables: string[]): Promise<ReadonlySet<string>> {
+  const result = await client.query(`SELECT ${rlsEnabledSql('$1')} AS "rlsEnabled"`, [tables]);
+  return new Set<string>(result.rows?.[0]?.rlsEnabled ?? []);
+}
+
+/**
  * Dedicated data-plane connection pool. Separate from Prisma (which stays on the
  * superuser control plane). Every query runs inside a transaction that switches to
  * a non-owner role so Postgres RLS is enforced.
@@ -74,11 +95,17 @@ export class RlsPool {
    *
    * `statementTimeoutMs` is applied with SET LOCAL after the role switch, so it
    * covers the caller's statement and dies with the transaction.
+   *
+   * `rlsGate` names `public` tables whose RLS state the caller must know before
+   * it runs anything. The answer rides on the statement that sets the request
+   * context and reaches `fn` as its second argument: the names that have RLS
+   * enabled, read live in this transaction. Asked separately it was one more
+   * round trip on every REST request.
    */
   async withRlsTx<T>(
     ctx: RlsContext,
-    fn: (client: PoolClient) => Promise<T>,
-    options: { rollback?: boolean; readOnly?: boolean; statementTimeoutMs?: number } = {}
+    fn: (client: PoolClient, rlsEnabled: ReadonlySet<string>) => Promise<T>,
+    options: { rollback?: boolean; readOnly?: boolean; statementTimeoutMs?: number; rlsGate?: string[] } = {}
   ): Promise<T> {
     this.assertRole(ctx.role);
     const client = await this.pool.connect();
@@ -92,11 +119,13 @@ export class RlsPool {
       // and the role is still allowlisted above. Three separate statements here
       // were three of the seven round trips of every REST read.
       const timeoutMs = options.statementTimeoutMs ?? DEFAULT_STATEMENT_TIMEOUT_MS;
-      await client.query(
-        `SELECT set_config('role', $1, true), set_config('request.jwt.claims', $2, true), set_config('statement_timeout', $3, true)`,
-        [ctx.role, ctx.claims, String(Math.max(1, Math.floor(timeoutMs)))],
+      const gate = options.rlsGate ?? [];
+      const context = await client.query(
+        `SELECT set_config('role', $1, true), set_config('request.jwt.claims', $2, true), set_config('statement_timeout', $3, true)` +
+          (gate.length ? `, ${rlsEnabledSql('$4')} AS "rlsEnabled"` : ''),
+        [ctx.role, ctx.claims, String(Math.max(1, Math.floor(timeoutMs))), ...(gate.length ? [gate] : [])],
       );
-      const result = await fn(client);
+      const result = await fn(client, new Set<string>(gate.length ? context.rows?.[0]?.rlsEnabled ?? [] : []));
       await client.query(options.rollback ? 'ROLLBACK' : 'COMMIT');
       return result;
     } catch (err) {

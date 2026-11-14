@@ -92,6 +92,14 @@ export interface ClientOptions extends SupabaseStyleOptions {
   storage?: SessionStorageAdapter;
   /** Refresh the access token automatically on a 401. Default: true. */
   autoRefresh?: boolean;
+  /**
+   * On REST and storage requests, send a short-lived JWT minted from the session
+   * instead of the session token, which the server verifies without a database
+   * read. Minted in the background and held in memory only: the stored session
+   * is unchanged, and auth and edge function calls keep the session token.
+   * Default: true. Turn it off for a client that lives for one request.
+   */
+  accessTokens?: boolean;
   /** Override the fetch implementation (for SSR or tests). */
   fetch?: typeof fetch;
   /** Extra headers merged into every request (e.g. a custom `apikey`). */

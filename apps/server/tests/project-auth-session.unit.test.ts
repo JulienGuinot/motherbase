@@ -12,8 +12,13 @@ function res() {
 const SIGNED_IN = { cookie: "better-auth.session_token=t" };
 
 function deps(sessionUserId: string | null, user: any) {
-  const auth: any = { api: { getSession: vi.fn(async () => (sessionUserId ? { user: { id: sessionUserId } } : null)) } };
-  const prisma: any = { user: { findUnique: vi.fn(async () => user) } };
+  const auth: any = {
+    options: { baseURL: 'http://localhost:3000' },
+    api: { getSession: vi.fn(async () => (sessionUserId ? { user: { id: sessionUserId } } : null)) },
+  };
+  // No signing key on file: a JWT-shaped bearer is nobody's access token here
+  // (tests/access-tokens.unit.test.ts covers the ones that are).
+  const prisma: any = { user: { findUnique: vi.fn(async () => user) }, jwks: { findMany: vi.fn(async () => []) } };
   return { auth, prisma };
 }
 

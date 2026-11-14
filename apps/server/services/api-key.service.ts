@@ -34,6 +34,9 @@ const PREFIXES: Record<ApiKeyType, string> = {
 
 const DEFAULT_PUBLISHABLE_NAME = 'default';
 
+/** How long a resolved key is trusted without re-reading its row. */
+export const RESOLVED_KEY_TTL_MS = 30_000;
+
 /**
  * Project API keys.
  *
@@ -50,6 +53,17 @@ const DEFAULT_PUBLISHABLE_NAME = 'default';
  * costs one indexed miss and never a scan-and-compare over the table.
  */
 export class ApiKeyService extends BaseContext {
+  /**
+   * Valid keys by token hash. Every data-plane request presents the same key or
+   * two, and looking it up was one round trip on each of them.
+   *
+   * Only keys that resolved are kept, so the map is bounded by the number of
+   * keys the project has and a flood of wrong tokens cannot grow it. `revoke`
+   * empties it, which makes a revocation immediate in this process; the TTL is
+   * for a row changed by anything else (another instance, SQL by hand).
+   */
+  private resolved = new Map<string, { key: ResolvedApiKey; expiresAt: number }>();
+
   static hash(token: string): string {
     return crypto.createHash('sha256').update(token, 'utf8').digest('hex');
   }
@@ -62,11 +76,17 @@ export class ApiKeyService extends BaseContext {
   async resolve(token: string | undefined | null): Promise<ResolvedApiKey | null> {
     const clean = typeof token === 'string' ? token.trim() : '';
     if (!clean) return null;
-    // ponytail: one indexed lookup per request, no cache. Add a short-TTL map
-    // keyed by hash if REST throughput ever makes this show up in a profile.
-    const row = await this.delegate().findUnique({ where: { tokenHash: ApiKeyService.hash(clean) } });
-    if (!row || row.revokedAt) return null;
-    return { id: row.id, name: row.name, type: row.type as ApiKeyType };
+    const tokenHash = ApiKeyService.hash(clean);
+    const cached = this.resolved.get(tokenHash);
+    if (cached && cached.expiresAt > Date.now()) return cached.key;
+    const row = await this.delegate().findUnique({ where: { tokenHash } });
+    if (!row || row.revokedAt) {
+      this.resolved.delete(tokenHash);
+      return null;
+    }
+    const key: ResolvedApiKey = { id: row.id, name: row.name, type: row.type as ApiKeyType };
+    this.resolved.set(tokenHash, { key, expiresAt: Date.now() + RESOLVED_KEY_TTL_MS });
+    return key;
   }
 
   async list(): Promise<ApiKeySummary[]> {
@@ -105,6 +125,7 @@ export class ApiKeyService extends BaseContext {
     if (!row) throw new HttpException('API key not found', 404);
     if (row.revokedAt) return this.summary(row);
     const updated = await this.delegate().update({ where: { id }, data: { revokedAt: new Date() } });
+    this.resolved.clear();
     return this.summary(updated);
   }
 

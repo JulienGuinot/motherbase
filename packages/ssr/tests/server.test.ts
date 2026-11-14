@@ -62,4 +62,25 @@ describe('createServerClient', () => {
 
     expect(capturedAuthHeader).toBe('Bearer tok1');
   });
+
+  it('never mints an access JWT: the client is gone before one could be used', async () => {
+    const jar = fakeCookieJar();
+    jar.jar.set(
+      'motherbase.session',
+      encodeURIComponent(JSON.stringify({ accessToken: 'tok1', user: { id: 'u1', email: 'a@test.dev' } })),
+    );
+
+    const paths: string[] = [];
+    const fetchMock: typeof fetch = async (input) => {
+      paths.push(new URL(String(input)).pathname);
+      return new Response(JSON.stringify({ status: 1, data: [] }), { status: 200 });
+    };
+
+    const client = createServerClient('http://localhost:5001', undefined, { cookies: jar, fetch: fetchMock });
+    await client.from('todo').select('*');
+    await client.from('todo').select('*');
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    expect(paths).toEqual(['/rest/v1/todo', '/rest/v1/todo']);
+  });
 });

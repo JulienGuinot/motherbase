@@ -204,7 +204,7 @@ Data access goes through `/rest/v1/:model` with a PostgREST-style query dialect 
 
 ### Bearer-token auth, no refresh-token dance
 
-Auth is backed by Better Auth session tokens: sign-in returns one opaque bearer token, checked against the session table on every request. There is no refresh token to rotate and no access token to wait out: signing out, or an admin ending the session, revokes it at once. The trade-off is that the token is long-lived and readable by your scripts, so the usual XSS hygiene applies. On the client, `localStorageStorage()` or `cookieStorage()` persists it so the session survives reloads; `@motherbase/ssr` shares it with Server Components.
+Auth is backed by Better Auth session tokens: sign-in returns one opaque bearer token, checked against the session table on every request. There is no refresh token to rotate: signing out, or an admin ending the session, revokes it at once. For REST and storage requests the SDK sends a short-lived JWT minted from that session instead, which the server verifies without a database query; see [Sessions and tokens](/docs/platform/auth/#sessions-and-tokens) for when one is refused. The trade-off is that the token is long-lived and readable by your scripts, so the usual XSS hygiene applies. On the client, `localStorageStorage()` or `cookieStorage()` persists it so the session survives reloads; `@motherbase/ssr` shares it with Server Components.
 
 ### socket.io for realtime, loaded on demand
 

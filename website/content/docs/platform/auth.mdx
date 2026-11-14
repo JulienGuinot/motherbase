@@ -43,23 +43,115 @@ Every account gets a `username` even though Better Auth does not set one: the `u
 
 ## Sessions and tokens
 
-Better Auth issues a single **session token**, not an access/refresh pair. Send it as a bearer token:
+A signed-in user holds two credentials, both sent as a bearer:
 
 ```http
-Authorization: Bearer <session-token>
+Authorization: Bearer <session-token-or-access-token>
 ```
 
-Two kinds of token exist, with different jobs:
+| Token | Issued by | Accepted by | Stops working |
+|---|---|---|---|
+| Session token (opaque) | Every sign-in | Every route, `/api/auth/*` included | At once, when the session is signed out or revoked |
+| Access token (JWT) | `GET /api/auth/token`, sent with the session token | The data plane and the routes that require a signed-in user. Not `/api/auth/*` | At expiry, or earlier in the cases [below](#access-token-revocation) |
 
-| Token | Issued by | Used for |
-|---|---|---|
-| Session token (opaque) | Every sign-in | What the SDK stores and sends. Revocable: signing out or ending the session kills it at once |
-| Access token (JWT) | `GET /api/auth/token`, for the current session | Handing an identity to another service that verifies it offline against the JWKS |
+Better Auth has no refresh token: the session token is the one the SDK stores, and the one
+`session.access_token` holds. The access token is minted from it, lives for **Access token
+lifetime (minutes)** under **Auth · Token expiry** (`auth.tokens`, default `15`), and is
+signed with the project's signing key (below). It is not a session: `get-session`,
+`sign-out`, `update-user` and every other `/api/auth/*` route answer as if nobody were signed
+in when given one.
 
-The API accepts either as a bearer, and also a JWT from a configured [third-party issuer](/docs/studio/auth/)
-(Clerk, Firebase, Auth0…). Whichever arrives, the server resolves the user id, then **reloads the full user record by id** on every request. Role and status are always read live from the database — never trusted from the token. A soft-deleted or deactivated account (`status !== 'active'`) is rejected with `403`.
+The API also accepts, on the data plane, a JWT from a configured
+[third-party issuer](/docs/studio/auth/) (Clerk, Firebase, Auth0…).
 
-For downstream services that want a verifiable JWT, the `jwt` plugin issues one and publishes a JWKS:
+**What the server does with each** (`auth/session.ts`):
+
+- **Session token.** The session is read, then the full user record is reloaded by id, so role
+  and status are live. An account whose `status` is not `active` is refused with `403` on a
+  route that requires a signed-in user, and treated as anonymous on the data plane.
+- **Access token, on the data plane** (`/rest/v1`, storage, realtime broadcast, the socket
+  handshake, edge function invocation, and the rate-limit identity). The signature is checked
+  against the signing keys held in memory and the caller is taken from the token's claims,
+  with no database query. RLS sees the same `request.jwt.claims` as for a session: `sub`,
+  `role: authenticated`, `email`, `user_role`, `is_anonymous`.
+- **Access token, on a route that requires a signed-in user** (`/api/users`, `/api/devices`,
+  `/api/notifications`, and `/api/admin` reached with a user credential). Verified the same
+  way, then the user record is loaded as for a session.
+
+The keys held in memory are the non-revoked rows of `auth.jwks`. They are read again at most
+every 30 seconds, at once in the same process after a key is created, rotated or revoked
+through the API, and when a token names a key the process has not seen.
+
+**Claims.** Besides `iss`, `aud`, `sub`, `iat` and `exp`, every access token carries
+(`auth/access-tokens.ts`):
+
+| Claim | Value |
+|---|---|
+| `email` | The user's email |
+| `user_role` | The application role (`auth.users.role`), not the Postgres role |
+| `is_anonymous` | `true` for a guest from anonymous sign-in |
+| `user_status` | The account's status (`auth.users.status`) when the token was minted |
+| `iat_ms` | When the request that minted the token began, in milliseconds |
+
+They are written last, over the default payload and over the custom claims hook (below), and
+the hook drops a static claim named `user_role`, `is_anonymous`, `user_status` or `iat_ms`.
+
+A token is served from its claims alone only when it carries `iat_ms`, a `user_role`, and
+`user_status: "active"`. Any other token only says who the caller is: the user record is read
+on every request, as for a session, so the account's status and role are live.
+
+### Access token revocation
+
+A signature cannot say that the session behind it ended a second ago. The API process remembers
+when each user's tokens stopped being valid, and refuses a token minted before that, when:
+
+- its session is signed out or revoked, by the user or by an operator;
+- the user is updated or deleted through Better Auth or the admin API (role, status, profile);
+- a guest account becomes a permanent one;
+- an operator ends an impersonation of that user;
+- a database backup is restored (every user's tokens);
+- the API restarts: every token minted before it booted is refused once.
+
+A refused token is a `401`, and is never tried as a third-party token. The SDK retries the
+request once with the session token, keeps sending the session token for 30 seconds, then
+mints a new access token, so a user whose session is still alive does not notice.
+
+`iat_ms` is the start of the minting request, not the moment the token was signed: a token
+minted while a revocation was being committed is dated before it, and refused.
+
+What this does not cover: those cutoffs live in the memory of one API process. A change made
+directly in SQL, or through another API instance, is not seen, and the tokens it should have
+ended stay valid until they expire. The access token lifetime is that worst case; shorten it if
+it is too long for you.
+
+A token minted for an inactive account is dated like any other, so revocation applies to it;
+it is also re-checked against the user record on every request, because its `user_status` is
+not `active`. A token without `iat_ms` belongs to no session, so nothing above revokes it:
+that is one signed offline with `motherbase gen bearer-jwt` and an imported signing key. The
+user record is read on every request for such a token, so the account's status and role still
+apply at once (unless its `--payload` sets `iat_ms`, `user_role` and `user_status: "active"`,
+which makes it a token served from its claims). Revoking a signing key stops its tokens at
+once in the same process, and in any other within 30 seconds.
+
+### Access tokens in the SDK
+
+`@motherbase/client` sends the access token on REST and storage requests (`/rest/v1`,
+`/api/files`, `/api/storage`, `/storage/v1`). It mints one in the background from the stored
+session and keeps it in memory only; the stored session is unchanged. Auth calls, edge function
+invocations and realtime keep the session token. No request waits for a mint: the first
+requests of a client are sent with the session token until the access token is ready, and a
+`401` on a request that carried one is retried once with the session token.
+
+```ts
+createClient(url, key, { accessTokens: false }) // always send the session token
+```
+
+`createServerClient` from [`@motherbase/ssr`](/docs/packages/ssr/) always turns it off: a
+client that lives for one request would be gone before its token arrived.
+
+### JWKS
+
+Services outside Motherbase can verify an access token against the published keys:
 
 ```http
 GET /api/auth/token   # mint a signed JWT for the current session
@@ -72,7 +164,8 @@ GET /auth/v1/.well-known/jwks.json   # the same set, where Supabase clients and 
 project issues, from **Studio → Authentication → Auth Hooks**: `includeUserFields` copies the listed user fields into the token,
 and `staticClaims` (JSON) merges a fixed set (`auth/hooks/access-token.ts`). `password`, `passwordHash`,
 `twoFactorEnabled` and `phoneNumberVerified` are never copied, and the standard claims (`iss`, `sub`, `aud`, `exp`,
-`nbf`, `iat`, `jti`) are never overridden.
+`nbf`, `iat`, `jti`) are never overridden. Neither are `email`, `user_role`, `is_anonymous`, `user_status` and
+`iat_ms`, which the data plane reads (see the claims table above).
 
 **Signing keys.** Access tokens are signed with a row of `auth.jwks`, with a Supabase-style lifecycle that Better
 Auth's plugin lacks (`auth/signing-keys.ts`), managed under **Project Settings → JWT keys**:
@@ -388,7 +481,7 @@ update, delete), and nothing in the request pipeline authenticates with one. The
 
 ## Roles
 
-The user `role` field defaults to `USER`. The middleware loads the user record on every request and exposes the live value to PostgreSQL RLS as `auth.jwt() ->> 'user_role'`. Promote or demote from **Project Studio → Authentication → Users** or the CLI.
+The user `role` field defaults to `USER`. It reaches PostgreSQL RLS as `auth.jwt() ->> 'user_role'`: read from the user record on each request made with a session token, and taken from the `user_role` claim on one made with an access token, which a role change through the API or Studio [refuses](#access-token-revocation). Promote or demote from **Project Studio → Authentication → Users** or the CLI.
 
 ```sql
 CREATE POLICY "admin only"

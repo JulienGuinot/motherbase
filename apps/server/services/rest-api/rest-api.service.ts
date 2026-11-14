@@ -5,6 +5,7 @@ import { parseQuery, type Filter, type ParsedQuery } from './postgrest-parser';
 import { getCatalog } from './catalog';
 import type { PoolClient } from 'pg';
 import { rlsContextFor, type RlsUser } from '../../lib/rls-claims';
+import { rlsEnabledTables } from '../../lib/rls-pool';
 import { logActivity } from '../../lib/activity-log';
 import { errorMessage } from '../../lib/errors';
 import { quoteIdent } from '../admin/schema-ddl';
@@ -778,29 +779,26 @@ export class RestApiService extends BaseContext {
     /** Join this transaction instead of opening one. See `WriteOptions.tx`. */
     existing?: PoolClient,
   ): Promise<T> {
-    const run = async (client: PoolClient) => {
-      const result = await client.query(
-        `SELECT c.relrowsecurity AS "rlsEnabled"
-           FROM pg_class c
-           JOIN pg_namespace n ON n.oid = c.relnamespace
-          WHERE n.nspname = 'public'
-            AND c.relname = $1
-            AND c.relkind IN ('r', 'p')
-          LIMIT 1`,
-        [model.dbName],
-      );
-
-      if (result.rows[0]?.rlsEnabled !== true) {
+    // Fail closed: the table, and every table an embed reaches, must report RLS
+    // on, or the request stops before any data SQL. An embedded relation must
+    // not become a hole around that rule: its rows are returned to the caller
+    // just like the parent's are.
+    const tables = [model.dbName, ...embeddedTables];
+    const run = async (client: PoolClient, rlsEnabled: ReadonlySet<string>) => {
+      if (!rlsEnabled.has(model.dbName)) {
         throw new HttpException(
           `Table '${model.dbName}' is not exposed because row-level security is not enabled.`,
           403,
         );
       }
-
-      // The same gate for every table an embed reaches. An embedded relation must
-      // not become a hole around the rule that a REST-visible table carries RLS:
-      // its rows are returned to the caller just like the parent's are.
-      if (embeddedTables.length) await this.assertEmbeddedRls(client, embeddedTables);
+      for (const table of embeddedTables) {
+        if (!rlsEnabled.has(table)) {
+          throw new HttpException(
+            `Table '${table}' cannot be embedded because row-level security is not enabled on it.`,
+            403,
+          );
+        }
+      }
 
       try {
         return await work(client);
@@ -821,31 +819,11 @@ export class RestApiService extends BaseContext {
       }
     };
 
-    return existing ? run(existing) : this.di.RlsPool.withRlsTx(rlsContextFor(user), run);
-  }
-
-  /** Fail closed: every named table must report RLS on, or the request stops. */
-  private async assertEmbeddedRls(client: PoolClient, tables: string[]): Promise<void> {
-    const result = await client.query(
-      `SELECT c.relname AS "name", c.relrowsecurity AS "rlsEnabled"
-         FROM pg_class c
-         JOIN pg_namespace n ON n.oid = c.relnamespace
-        WHERE n.nspname = 'public'
-          AND c.relname = ANY($1::text[])
-          AND c.relkind IN ('r', 'p')`,
-      [tables],
-    );
-    const enabled = new Set(
-      (result.rows ?? []).filter((row: any) => row.rlsEnabled === true).map((row: any) => row.name),
-    );
-    for (const table of tables) {
-      if (!enabled.has(table)) {
-        throw new HttpException(
-          `Table '${table}' cannot be embedded because row-level security is not enabled on it.`,
-          403,
-        );
-      }
-    }
+    // A transaction somebody else opened has not asked the gate for these
+    // tables, so it is asked here; a new one answers it as it opens.
+    return existing
+      ? run(existing, await rlsEnabledTables(existing, tables))
+      : this.di.RlsPool.withRlsTx(rlsContextFor(user), run, { rlsGate: tables });
   }
 
   private dispatchWebhooks(

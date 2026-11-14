@@ -11,7 +11,7 @@ order: 5
 | Internet → Traefik | Anyone | TLS termination, host routing (`deploy/traefik`) |
 | Traefik → project API | Proxy only | `TRUST_PROXY` declares how many hops to trust for `req.ip` |
 | Console → project API | The Console proxy | `X-Platform-Token` compared to `PLATFORM_SERVICE_TOKEN` in constant time |
-| Client → project API | End users, machines | Better Auth session (cookie or bearer), API key, or bucket token |
+| Client → project API | End users, machines | Better Auth session (cookie or bearer), access token (JWT), API key, or bucket token |
 | API → Postgres (control plane) | Prisma, as owner | Platform tables; RLS not in play |
 | API → Postgres (data plane) | `RlsPool`, as `anon` / `authenticated` / `service_role` | Postgres RLS policies, bypassed only by `service_role` |
 
@@ -19,11 +19,12 @@ order: 5
 
 | Credential | Where it comes from | Grants |
 |---|---|---|
-| `JWT_SECRET` | env, ≥32 chars, boot-validated | Signs project tokens |
+| `JWT_SECRET` | env, ≥32 chars, boot-validated | Signs session cookies and internal HMACs (upload and render tokens). No access token is signed with it |
 | `PLATFORM_SERVICE_TOKEN` | env, ≥32 chars when set | **Synthetic ADMIN** on `/api/admin`. Absent = single-instance mode |
 | `CONFIG_ENCRYPTION_KEY` | env, base64 32 bytes | Encrypts secret settings at rest |
 | `EDGE_INVOKE_TOKEN` | env | Public edge invocation without a session |
 | Better Auth session | Sign-in | The user's own role and RLS identity |
+| Access token (JWT) | `GET /api/auth/token`, signed with an `auth.jwks` key | The same identity on the data plane, read from its claims until it expires or is [refused](/docs/platform/auth/#access-token-revocation). Not a session |
 | API key | Auth API (`ApiKey` table) | Machine access, optionally rate-limited and expiring |
 | Bucket token | Storage admin | `read` / `write` / `delete` on one bucket |
 
@@ -68,9 +69,11 @@ Your policies read them with `current_setting('request.jwt.claims', true)::json`
 
 The `rollback: true` mode exists for the RLS simulator: it runs operator-supplied SQL and must not be able to leave a trace, and that guarantee must not depend on the static read-only analysis in front of it being complete.
 
-## Identity is re-read, never trusted from the token
+## Identity is re-read for a session, and bounded for an access token
 
-Both the custom rate-limit identity resolver (`app.ts`) and the auth middleware reload the user from the database and check `status === 'active'` before using a role. A token carrying a stale role, or belonging to a since-deleted user, does not grant anything.
+Presented with a session token, both the custom rate-limit identity resolver (`app.ts`) and the auth middleware reload the user from the database and check `status === 'active'` before using a role. A session carrying a stale role, or belonging to a since-deleted user, does not grant anything.
+
+Presented with an [access token](/docs/platform/auth/#sessions-and-tokens), the data plane takes the role from the token's `user_role` claim instead, with no query. What keeps that from being stale is revocation: the API process refuses every token minted before its session ended or its user changed. A change that process does not see (SQL by hand, another instance) leaves the token valid until it expires, so the access token lifetime is the bound. Routes that require a signed-in user reload the record whichever credential is presented.
 
 ## Which data-plane role a request runs as
 

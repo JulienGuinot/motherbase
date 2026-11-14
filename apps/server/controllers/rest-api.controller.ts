@@ -4,6 +4,7 @@ import { HTTP_ROUTES } from '@motherbase/contracts';
 import IContextContainer from '../context/icontext-container';
 import { optionalAuthMiddleware } from '../middlewares/auth.middleware';
 import { apiKeyMiddleware, callerFor } from '../middlewares/api-key.middleware';
+import { signedInUser } from '../auth/signed-in-user';
 import { restApiLimiter } from '../middlewares/rate-limit';
 import { HttpException } from '../exceptions/http-exception';
 import {
@@ -120,7 +121,7 @@ export default class RestApiController {
       assertTableProfile(profileOf(req, 'accept-profile'));
       const prefer = parsePrefer(req.headers.prefer as string | string[] | undefined);
       const explain = wantsPlan(req.headers.accept);
-      if (explain && req.user?.role !== 'ADMIN') {
+      if (explain && signedInUser(req)?.role !== 'ADMIN') {
         // EXPLAIN exposes row estimates and index names for rows the caller may
         // not be allowed to read, so it is an operator tool, not a public one.
         throw new HttpException('EXPLAIN is available to admin callers only.', 403, 'PGRST103', { expose: true });

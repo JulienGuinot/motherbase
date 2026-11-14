@@ -4,6 +4,7 @@ import { env } from '../config/env';
 import { safeEqual } from '../lib/safe-equal';
 import { apiErrorEnvelope } from './api-error.middleware';
 import { presentedToken } from './api-key.middleware';
+import { signedInUser } from '../auth/signed-in-user';
 
 function header(req: Request, name: string): string {
   const value = req.headers[name.toLowerCase()];
@@ -24,7 +25,7 @@ async function isSecretKey(req: Request): Promise<boolean> {
 
 export async function edgeInvokeGuard(req: Request, res: Response, next: NextFunction) {
   if (env.EDGE_PUBLIC_INVOKE_ENABLED) return next();
-  if ((req as any).user?.id) return next();
+  if (signedInUser(req)?.id) return next();
 
   const token = header(req, 'x-motherbase-edge-token') || header(req, 'x-edge-invoke-token');
   if (env.EDGE_INVOKE_TOKEN && token && safeEqual(token, env.EDGE_INVOKE_TOKEN)) return next();

@@ -84,20 +84,20 @@ afterAll(() => __primeCatalogForTests(null));
 /**
  * Fake RlsPool double: withRlsTx runs the callback against a fake client whose
  * `query` is driven by the provided handler, recording every (sql, params) call.
+ * Like the real pool, it answers the `rlsGate` it was opened with: every gated
+ * table has RLS on, unless `rlsState` says otherwise.
  */
 function makeFakePool(queryImpl: (sql: string, params: any[]) => any, rlsState: boolean | 'missing' = true) {
   const calls: Array<{ sql: string; params: any[] }> = [];
   const client = {
     query: vi.fn(async (sql: string, params: any[] = []) => {
       calls.push({ sql, params });
-      if (sql.includes('c.relrowsecurity')) {
-        return { rows: rlsState === 'missing' ? [] : [{ rlsEnabled: rlsState }] };
-      }
       const rows = await queryImpl(sql, params);
       return { rows, command: sql.split(' ')[0] };
     }),
   };
-  const withRlsTx = vi.fn((_ctx: any, fn: any) => fn(client));
+  const withRlsTx = vi.fn((_ctx: any, fn: any, options?: { rlsGate?: string[] }) =>
+    fn(client, new Set(rlsState === true ? options?.rlsGate ?? [] : [])));
   return { RlsPool: { withRlsTx }, client, calls };
 }
 
@@ -229,14 +229,16 @@ describe('RestApiService', () => {
     await authed.service.handleGet('files', {}, { id: 'u1' });
     expect(authed.RlsPool.withRlsTx).toHaveBeenCalledWith(
       expect.objectContaining({ role: 'authenticated' }),
-      expect.any(Function)
+      expect.any(Function),
+      { rlsGate: ['files'] },
     );
 
     const anon = makeService();
     await anon.service.handleGet('files', {}, undefined);
     expect(anon.RlsPool.withRlsTx).toHaveBeenCalledWith(
       expect.objectContaining({ role: 'anon' }),
-      expect.any(Function)
+      expect.any(Function),
+      { rlsGate: ['files'] },
     );
   });
 
@@ -250,18 +252,19 @@ describe('RestApiService', () => {
     ],
     ['DELETE', (service: RestApiService) => service.handleDelete('files', { id: 'eq.f1' }, { id: 'u1', role: 'ADMIN' }, RETURN_ROWS)],
   ])('refuses %s before data SQL when public-table RLS is disabled', async (_method, request) => {
-    const { service, calls } = makeService([], false);
+    const { service, calls, RlsPool } = makeService([], false);
 
     await expect(request(service)).rejects.toMatchObject({ statusCode: 403 });
-    expect(calls).toHaveLength(1);
-    expect(calls[0].sql).toContain('c.relrowsecurity');
+    expect(calls).toHaveLength(0);
+    // The gate is asked by the statement that opens the transaction.
+    expect(RlsPool.withRlsTx.mock.calls[0][2]).toEqual({ rlsGate: ['files'] });
   });
 
   it('fails closed when the public-table RLS state cannot be resolved', async () => {
     const { service, calls } = makeService([], 'missing');
 
     await expect(service.handleGet('files', {}, { id: 'u1' })).rejects.toMatchObject({ statusCode: 403 });
-    expect(calls).toHaveLength(1);
+    expect(calls).toHaveLength(0);
   });
 
   it('handles post patch and delete', async () => {
@@ -358,7 +361,6 @@ describe('RestApiService', () => {
     const order: string[] = [];
     const client = {
       query: vi.fn(async (sql: string) => {
-        if (sql.includes('c.relrowsecurity')) return { rows: [{ rlsEnabled: true }] };
         if (sql.startsWith('SELECT "id", xmin')) {
           order.push('select');
           return { rows: [{ id: 'f1', _restXmin: '42' }] };
@@ -370,7 +372,7 @@ describe('RestApiService', () => {
         return { rows: [] };
       }),
     };
-    const RlsPool = { withRlsTx: vi.fn(async (_ctx: any, run: any) => run(client)) };
+    const RlsPool = { withRlsTx: vi.fn(async (_ctx: any, run: any) => run(client, new Set(['files']))) };
     const audience = { mode: 'restricted' as const, socketIdsByRowId: new Map() };
     const RealtimeBroadcastService = {
       captureDeleteAudience: vi.fn(async () => {

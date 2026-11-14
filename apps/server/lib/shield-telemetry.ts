@@ -1,4 +1,5 @@
 import type { Request, Response } from 'express';
+import { signedInUser } from '../auth/signed-in-user';
 
 type TrafficSource = 'auth' | 'rest' | 'edge' | 'files' | 'api';
 
@@ -55,7 +56,7 @@ function clientIp(req: Request): string {
 }
 
 function requestUserId(req: Request): string | undefined {
-  const user = (req as any).user;
+  const user = signedInUser(req);
   return user?.id ? String(user.id) : undefined;
 }
 
