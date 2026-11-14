@@ -75,6 +75,7 @@ import { Server } from 'socket.io';
 import { toNodeHandler } from 'better-auth/node';
 import { HTTP_ROUTES } from '@motherbase/contracts';
 import { registerProjectAuthRoutes } from './auth/routes';
+import { readSession } from './auth/server-session';
 import { createAuthRateLimiter } from './auth/rate-limits';
 // Reuse the same CORS allowlist for Socket.IO instead of a blanket '*'.
 const socketOrigins = parseCorsOrigins(env.CORS_ORIGINS);
@@ -100,7 +101,7 @@ io.use(async (socket, next) => {
   if (!token) return next();
   try {
     const auth = await container.resolve('AuthManager').current();
-    const session = await auth.api.getSession({ headers: new Headers({ authorization: `Bearer ${token}` }) });
+    const session = await readSession(auth, new Headers({ authorization: `Bearer ${token}` }));
     if (session?.user) socket.data.user = { id: session.user.id, role: (session.user as any).role };
   } catch {
     /* invalid token → anonymous socket */
@@ -174,7 +175,7 @@ setRateLimitIdentityResolver(async req => {
     const key = await container.resolve('ApiKeyService').resolve(presentedToken(req));
     if (key) identity.apiKeyId = key.id;
     const auth = await container.resolve('AuthManager').current();
-    const session = await auth.api.getSession({ headers: fromNodeHeaders(req.headers) });
+    const session = await readSession(auth, fromNodeHeaders(req.headers));
     const id = session?.user?.id;
     if (id) {
       const user = await prisma.user.findUnique({

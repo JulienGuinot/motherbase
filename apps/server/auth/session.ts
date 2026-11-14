@@ -5,6 +5,7 @@ import { HttpException } from '../exceptions/http-exception';
 import { apiErrorEnvelope } from '../middlewares/api-error.middleware';
 import type { AuthInstance } from './instance';
 import type { ThirdPartyCaller } from './third-party';
+import { readSession } from './server-session';
 
 // Project-side auth middleware over Better Auth sessions. It verifies the
 // session (cookie or bearer/JWT), then RELOADS the full Prisma user by id so
@@ -42,7 +43,7 @@ export function carriesCredentials(headers: Request['headers']): boolean {
 async function resolveUser(getAuth: GetAuth, prisma: PrismaClient, req: Request) {
   if (!carriesCredentials(req.headers)) return null;
   const auth = await getAuth();
-  const session = await auth.api.getSession({ headers: fromNodeHeaders(req.headers) });
+  const session = await readSession(auth, fromNodeHeaders(req.headers));
   let id = session?.user?.id;
   // An access token from /api/auth/token (or one minted with `motherbase gen
   // bearer-jwt` from an imported signing key). Better Auth verifies it against

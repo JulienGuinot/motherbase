@@ -21,6 +21,7 @@ import type { PrismaClient } from '@prisma/client';
 import { hashPassword, verifyPassword } from './password';
 import { orgFullMessage, orgHasRoomForMember, orgSeatLimit } from './org-limits';
 import { DEFAULT_SIGNING_ALGORITHM, signingKeyAdapter } from './signing-keys';
+import { isServerSideSessionRead } from './server-session';
 import { userCredentials } from './plugins/user-credentials';
 import { pkceExchange } from './plugins/pkce-exchange';
 import { PhoneOtpStore } from './phone-otp-store';
@@ -449,6 +450,11 @@ function jwtPlugin(
   accessTokenClaims: ProjectAuthDeps['accessTokenClaims'],
 ) {
   return jwt({
+    // No `set-auth-jwt` header for a session this server reads for itself: see
+    // auth/server-session.ts. A getter, because the plugin reads it per call.
+    get disableSettingJwtHeader() {
+      return isServerSideSessionRead();
+    },
     // New keys are ES256, Supabase's default. Existing keys keep their own
     // algorithm: each row records it (auth/signing-keys.ts).
     // Self-hosted with a trusted DB: the JWKS private key is stored unencrypted so
