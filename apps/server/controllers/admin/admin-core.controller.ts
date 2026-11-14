@@ -4,6 +4,7 @@ import IContextContainer from '../../context/icontext-container';
 import { adminOnly } from '../../middlewares/platform-admin.middleware';
 import * as apiResponse from '../../helpers/api-response.helper';
 import { env } from '../../config/env';
+import { localApiUrl } from '../../lib/local-api-url';
 
 
 @route('/api/admin')
@@ -31,7 +32,7 @@ export default class AdminCoreController {
     // Using req.headers.host would return the console proxy's domain when the request is proxied.
     const configuredHost = env.BASE_HOST || req.headers.host || `localhost:${env.PORT}`;
     const hostOnly = configuredHost.split(':')[0];
-    const apiUrl = `${proto}://${configuredHost}`;
+    const apiUrl = localApiUrl(process.env.API_PORT) ?? `${proto}://${configuredHost}`;
     const wsUrl = apiUrl;
     // The snippets on the Connect page have always referenced an ANON_KEY env
     // var; this is the value that fills it. Minted on first read rather than at

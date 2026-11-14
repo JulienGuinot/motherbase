@@ -11,6 +11,11 @@ versions and are published separately; see [docs/publishing-the-sdk.md](docs/pub
 
 ## [Unreleased]
 
+- Local mode: each project's API is also published on `127.0.0.1:<port>`
+  (`54420` up, derived from its database port) and Connect reports that URL.
+  `<name>.localhost` resolves only in browsers, so an app's SSR, route handlers
+  and scripts got `ENOTFOUND` and saw the backend as down. Existing local
+  projects get the port on their next start.
 - Per-project runtime options, under **Backend control → Runtime**: turn the
   edge runtime container off for a project that runs no functions, and
   auto-pause a project after a delay without requests. Both are off by default

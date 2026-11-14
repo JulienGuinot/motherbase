@@ -5,7 +5,29 @@ import {
   parseDbPort,
   buildManifest,
   renderEnvProd,
+  apiPortFor,
 } from '../console/lib/manifest';
+import { localApiUrl } from '../lib/local-api-url';
+
+describe('apiPortFor', () => {
+  // An API port inside the DB range would collide with another project's database.
+  it('never lands in the DB port range', () => {
+    expect(apiPortFor(DB_PORT_RANGE.first)).toBe(DB_PORT_RANGE.last + 1);
+    expect(apiPortFor(DB_PORT_RANGE.last)).toBeGreaterThan(DB_PORT_RANGE.last);
+  });
+});
+
+describe('localApiUrl', () => {
+  it('is the loopback URL when API_PORT is set', () => {
+    expect(localApiUrl('54421')).toBe('http://localhost:54421');
+  });
+
+  it('is null outside dev mode, where API_PORT is absent or empty', () => {
+    expect(localApiUrl(undefined)).toBeNull();
+    expect(localApiUrl('')).toBeNull();
+    expect(localApiUrl('nope')).toBeNull();
+  });
+});
 
 // Two projects sharing a host port means the second stack fails to bind, quietly
 // and at a moment nobody is watching. These are the assertions that stops it.
@@ -64,6 +86,11 @@ describe('renderEnvProd', () => {
     const env = renderEnvProd(buildManifest(base, gen));
     expect(env).not.toContain('DB_PORT=');
     expect(env).not.toContain('DB_BIND=');
+  });
+
+  it('emits the API port derived from the DB port, and none without one', () => {
+    expect(renderEnvProd(buildManifest({ ...base, dbPort: 54325 }, gen))).toContain('API_PORT=54425');
+    expect(renderEnvProd(buildManifest(base, gen))).not.toContain('API_PORT=');
   });
 
   it('round-trips through parseDbPort', () => {

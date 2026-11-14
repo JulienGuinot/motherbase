@@ -130,9 +130,17 @@ services:
         condition: service_healthy
       edge-runtime:
         condition: service_started
+    # Dev only: `<name>.localhost` resolves in browsers, not in Node, so an
+    # app's SSR or scripts need this loopback port to reach the API. API_PORT
+    # comes from .env.prod (console/lib/manifest.ts apiPortFor); absent, Docker
+    # picks a free port.
+    ports:
+      - "127.0.0.1:${API_PORT:-}:5001"
     environment:
       NODE_ENV: production
       PORT: 5001
+      # Reported by connect-info as the API URL apps should use.
+      API_PORT: ${API_PORT:-}
       DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@db:5432/app?schema=public
       # Reported by Studio on the Connect page so an operator can build an
       # external connection string. Empty when the port was never allocated.

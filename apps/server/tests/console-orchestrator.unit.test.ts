@@ -288,6 +288,39 @@ describe('Orchestrator', () => {
     });
   });
 
+  describe('env backfill on compose calls', () => {
+    function setup(env: string) {
+      const store: Record<string, string> = { '/srv/projects/projet-a/.env.prod': env };
+      const fsx = {
+        readFile: vi.fn(async (p: string) => store[p.replace(/\\/g, '/')] ?? Promise.reject(new Error('enoent'))),
+        writeFile: vi.fn(async (p: string, data: string, _o?: any) => { store[p.replace(/\\/g, '/')] = data; }),
+        chmod: vi.fn().mockResolvedValue(undefined),
+      };
+      const orch = new Orchestrator(cfg, fsx as any, makeExec(), () => 'y'.repeat(32));
+      return { orch, fsx, written: () => store['/srv/projects/projet-a/.env.prod'] };
+    }
+
+    it('gives a project that predates API_PORT the port derived from its DB_PORT', async () => {
+      const { orch, written } = setup('JWT_SECRET=s\nEDGE_RUNTIME_TOKEN=t\nDB_PORT=54321\n');
+      await orch.start('projet-a');
+      expect(written()).toContain('API_PORT=54421');
+      expect(written()).toContain('EDGE_RUNTIME_TOKEN=t');
+    });
+
+    it('leaves a complete env file untouched', async () => {
+      const { orch, fsx } = setup('EDGE_RUNTIME_TOKEN=t\nDB_PORT=54321\nAPI_PORT=54421\n');
+      await orch.start('projet-a');
+      expect(fsx.writeFile).not.toHaveBeenCalled();
+    });
+
+    it('adds no API_PORT when the project has no DB_PORT to derive it from', async () => {
+      const { orch, written } = setup('JWT_SECRET=s\n');
+      await orch.start('projet-a');
+      expect(written()).toContain('EDGE_RUNTIME_TOKEN=');
+      expect(written()).not.toContain('API_PORT=');
+    });
+  });
+
   // The API runs as `node`, and cap_drop: ALL leaves root without DAC_OVERRIDE,
   // so a shell that landed as root could not read the volumes the server writes.
   it('shells into the API as the account the server runs as', () => {

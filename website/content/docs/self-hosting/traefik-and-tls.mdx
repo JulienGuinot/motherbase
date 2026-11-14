@@ -19,6 +19,8 @@ The local Console is published directly at `http://localhost:5500`. Projects cre
 | Object storage | `<name>-storage.localhost` | MinIO port `9000` |
 | MinIO Console | `<name>-minio.localhost` | MinIO port `9001` |
 
+The API is also published outside Traefik on `127.0.0.1:<API_PORT>` (from `54420`), the URL apps should use: Node does not resolve `*.localhost`, so SSR and scripts cannot reach the routes above.
+
 The dev Traefik dashboard is deliberately insecure and published at `http://localhost:8080`; the file says not to expose this stack to the internet.
 
 ## Production entrypoints

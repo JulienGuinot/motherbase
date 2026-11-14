@@ -17,6 +17,7 @@ import {
   parseLimits,
   allocateDbPort,
   parseDbPort,
+  apiPortFor,
   generateSecret,
   DEFAULT_RUNTIME_OPTIONS,
   parseRuntimeOptions,
@@ -116,21 +117,31 @@ export class Orchestrator {
   }
 
   /**
-   * Projects created before edge functions ran in the Deno sidecar have no
-   * EDGE_RUNTIME_TOKEN, and the compose file refuses to interpolate without
-   * one. Every compose call routes through here, so this is where an older
-   * `.env.prod` gets it, once.
+   * Fills in what an older `.env.prod` lacks, once. Every compose call routes
+   * through here.
+   *
+   * - EDGE_RUNTIME_TOKEN: projects created before edge functions ran in the
+   *   Deno sidecar have none, and the compose file refuses to interpolate
+   *   without one.
+   * - API_PORT: projects created before the dev API port existed. Derived from
+   *   their DB_PORT, so it is the same port a fresh project would get.
    */
-  private async ensureEdgeRuntimeToken(name: string): Promise<void> {
+  private async ensureEnvBackfill(name: string): Promise<void> {
     if (!this.fsx.readFile) return;
     const env = await this.fsx.readFile(this.envFile(name), 'utf8').catch(() => null);
-    if (env === null || parseEnv(env).get('EDGE_RUNTIME_TOKEN')) return;
-    await this.fsx.writeFile(this.envFile(name), rewriteEnv(env, { EDGE_RUNTIME_TOKEN: (this.gen ?? generateSecret)(32) }), { mode: 0o600 });
+    if (env === null) return;
+    const values = parseEnv(env);
+    const missing: Record<string, string> = {};
+    if (!values.get('EDGE_RUNTIME_TOKEN')) missing.EDGE_RUNTIME_TOKEN = (this.gen ?? generateSecret)(32);
+    const dbPort = parseDbPort(env);
+    if (dbPort !== undefined && !values.get('API_PORT')) missing.API_PORT = String(apiPortFor(dbPort));
+    if (!Object.keys(missing).length) return;
+    await this.fsx.writeFile(this.envFile(name), rewriteEnv(env, missing), { mode: 0o600 });
     await this.fsx.chmod(this.envFile(name), 0o600);
   }
 
   private async runDockerAction(name: string, action: ComposeAction) {
-    await this.ensureEdgeRuntimeToken(name);
+    await this.ensureEnvBackfill(name);
     const shouldLog = action !== 'logs';
     if (shouldLog) this.logs?.push({ level: 'info', source: 'console', message: `${action} project ${name}` });
     try {
