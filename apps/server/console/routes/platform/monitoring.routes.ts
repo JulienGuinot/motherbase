@@ -6,14 +6,14 @@ import type { PlatformDeps } from './deps';
 import { guarded, scopedProjects } from './handlers';
 import { GIB } from './limits';
 
-/** Each project's configured quota, keyed by name. Undefined when unreadable. */
+/** Each project's metered quota, keyed by name. Undefined when unreadable. */
 async function limitsByProject(deps: PlatformDeps): Promise<Record<string, any> | undefined> {
   try {
     const projects = await deps.registry.list();
-    if (!Array.isArray(projects) || typeof deps.orchestrator?.readLimits !== 'function') return undefined;
+    if (!Array.isArray(projects) || typeof deps.orchestrator?.readMeteredLimits !== 'function') return undefined;
     const limits: Record<string, any> = {};
     for (const name of projects.map(p => p?.name).filter(Boolean)) {
-      try { limits[name] = await deps.orchestrator.readLimits(name); } catch { /* skip */ }
+      try { limits[name] = await deps.orchestrator.readMeteredLimits(name); } catch { /* skip */ }
     }
     return limits;
   } catch {

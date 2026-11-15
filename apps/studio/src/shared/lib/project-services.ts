@@ -19,6 +19,11 @@ export const PROJECT_SERVICES = [
   memKey: keyof ProjectLimits;
 }>;
 
+/** The services a project runs: a turned-off edge runtime has no container, so no quota to show or count. */
+export function runningServices(edgeRuntime: boolean) {
+  return edgeRuntime ? PROJECT_SERVICES : PROJECT_SERVICES.filter(s => s.service !== 'edge-runtime');
+}
+
 export function serviceLabel(service: string | null): string {
   return PROJECT_SERVICES.find(s => s.service === service)?.label ?? service ?? 'Other';
 }
