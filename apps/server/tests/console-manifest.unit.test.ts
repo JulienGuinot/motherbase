@@ -4,6 +4,7 @@ import {
   renderEnvProd,
   parseLimits,
   parseRuntimeOptions,
+  meteredLimits,
   runtimeOptionsPatchSchema,
   DEFAULT_LIMITS,
   type CreateProjectInput,
@@ -52,6 +53,13 @@ describe('runtime options', () => {
   it('reads a hand-edited or out-of-range delay as never, rather than pausing on a typo', () => {
     expect(parseRuntimeOptions('AUTO_PAUSE_MINUTES=soon\n').autoPauseMinutes).toBe(0);
     expect(parseRuntimeOptions('AUTO_PAUSE_MINUTES=1\n').autoPauseMinutes).toBe(0);
+  });
+
+  it('meters a turned-off edge runtime as no quota, keeping its stored limits', () => {
+    const off = meteredLimits(DEFAULT_LIMITS, { edgeRuntime: false, autoPauseMinutes: 0 });
+    expect(off).toEqual({ ...DEFAULT_LIMITS, edgeCpus: 0, edgeMemMb: 0 });
+    expect(meteredLimits(DEFAULT_LIMITS, { edgeRuntime: true, autoPauseMinutes: 0 })).toEqual(DEFAULT_LIMITS);
+    expect(DEFAULT_LIMITS.edgeCpus).toBeGreaterThan(0);
   });
 
   it.each([

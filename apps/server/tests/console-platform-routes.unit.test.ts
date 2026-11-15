@@ -189,7 +189,7 @@ describe('project resource limits', () => {
   it('GET /disk joins each project quota in bytes', async () => {
     const registry = { get: vi.fn(), list: vi.fn().mockResolvedValue([{ name: 'foo' }, { name: 'bar' }]) };
     const orchestrator = {
-      readLimits: vi.fn(async (name: string) => {
+      readMeteredLimits: vi.fn(async (name: string) => {
         if (name === 'bar') throw new Error('unreadable');
         return { diskGb: 10 };
       }),
@@ -223,7 +223,7 @@ describe('project resource limits', () => {
       list: vi.fn().mockResolvedValue([{ name: 'foo' }]),
     };
     const limits = { apiCpus: 1, apiMemMb: 512, dbCpus: 0.5, dbMemMb: 512, minioCpus: 0.25, minioMemMb: 256 };
-    const orchestrator = { readLimits: vi.fn().mockResolvedValue(limits) };
+    const orchestrator = { readMeteredLimits: vi.fn().mockResolvedValue(limits) };
     const metrics = {
       host: () => ({ cpuCount: 8 }),
       perProject: vi.fn(async (byProj: any) => ({

@@ -116,6 +116,14 @@ export function parseRuntimeOptions(env: string): RuntimeOptions {
   };
 }
 
+/**
+ * The quota usage is measured against: a project with its edge runtime turned
+ * off runs no edge container, so the edge limits it keeps for later count as 0.
+ */
+export function meteredLimits(limits: ResourceLimits, options: RuntimeOptions): ResourceLimits {
+  return options.edgeRuntime ? limits : { ...limits, edgeCpus: 0, edgeMemMb: 0 };
+}
+
 export interface CreateProjectInput {
   name: string;
   /** Leave the edge-runtime container out of the new stack. Defaults to running it. */

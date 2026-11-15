@@ -15,7 +15,7 @@ interface RegistryLike {
 }
 
 interface OrchestratorLike {
-  readLimits?(project: string): Promise<any>;
+  readMeteredLimits?(project: string): Promise<any>;
 }
 
 export type AlertsFetchFn = (
@@ -107,12 +107,12 @@ export class AlertsService {
     let limitsByProject: Record<string, any> | undefined;
     try {
       const projs = await this.registry.list();
-      if (Array.isArray(projs) && typeof this.orchestrator.readLimits === 'function') {
+      if (Array.isArray(projs) && typeof this.orchestrator.readMeteredLimits === 'function') {
         limitsByProject = {};
         for (const p of projs) {
           if (!p?.name) continue;
           try {
-            limitsByProject[p.name] = await this.orchestrator.readLimits(p.name);
+            limitsByProject[p.name] = await this.orchestrator.readMeteredLimits(p.name);
           } catch {
             /* skip */
           }

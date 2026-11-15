@@ -15,6 +15,7 @@ import {
   DEFAULT_LIMITS,
   limitsToEnv,
   parseLimits,
+  meteredLimits,
   allocateDbPort,
   parseDbPort,
   apiPortFor,
@@ -247,6 +248,13 @@ export class Orchestrator {
     if (!this.fsx.readFile) return { ...DEFAULT_LIMITS };
     const env = await this.fsx.readFile(this.envFile(name), 'utf8').catch(() => '');
     return parseLimits(env);
+  }
+
+  /** The limits usage is metered against: {@link readLimits} minus a turned-off edge runtime. */
+  async readMeteredLimits(name: string): Promise<ResourceLimits> {
+    if (!this.fsx.readFile) return { ...DEFAULT_LIMITS };
+    const env = await this.fsx.readFile(this.envFile(name), 'utf8').catch(() => '');
+    return meteredLimits(parseLimits(env), parseRuntimeOptions(env));
   }
 
   /** Effective editable project configuration. `.env.prod` is authoritative;

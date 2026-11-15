@@ -5,7 +5,7 @@ import type { ProjectUsage } from '@/features/projects/types';
 import { platform, type ProjectLimits } from '@/shared/lib/api';
 import { getErrorMessage } from '@/shared/lib/errors';
 import { formatBytes } from '@/shared/lib/format';
-import { PROJECT_SERVICES } from '@/shared/lib/project-services';
+import { runningServices } from '@/shared/lib/project-services';
 import { useToast } from '@/shared/lib/toast';
 
 const MIN_CPUS = 0.1;
@@ -128,6 +128,13 @@ function LimitsEditor({
     refetchInterval: 5000,
   });
   const diskQ = useQuery({ queryKey: ['platform-disk'], queryFn: platform.disk, refetchInterval: 60_000 });
+  // Same key as the Runtime section, so turning edge functions off there updates this form.
+  const optionsQ = useQuery({
+    queryKey: ['platform-runtime-options', project],
+    queryFn: () => platform.projectRuntimeOptions(project),
+  });
+  const edgeRuntime = optionsQ.data?.edgeRuntime ?? true;
+  const services = runningServices(edgeRuntime);
 
   const host = metricsQ.data?.host ?? null;
   const containers = (metricsQ.data?.containers ?? []).filter(c => c.project === project);
@@ -136,10 +143,10 @@ function LimitsEditor({
   const set = (key: keyof ProjectLimits) => (value: string) => setValues(prev => ({ ...prev, [key]: value }));
   const dirty = (Object.keys(values) as (keyof ProjectLimits)[]).some(key => Number(values[key]) !== data[key]);
   const diskBad = invalid(values.diskGb, MIN_DISK_GB, true);
-  const formInvalid = diskBad || PROJECT_SERVICES.some(s => invalid(values[s.cpuKey], MIN_CPUS) || invalid(values[s.memKey], MIN_MEM_MB));
+  const formInvalid = diskBad || services.some(s => invalid(values[s.cpuKey], MIN_CPUS) || invalid(values[s.memKey], MIN_MEM_MB));
 
-  const totalCpus = PROJECT_SERVICES.reduce((sum, s) => sum + (Number(values[s.cpuKey]) || 0), 0);
-  const totalMemMb = PROJECT_SERVICES.reduce((sum, s) => sum + (Number(values[s.memKey]) || 0), 0);
+  const totalCpus = services.reduce((sum, s) => sum + (Number(values[s.cpuKey]) || 0), 0);
+  const totalMemMb = services.reduce((sum, s) => sum + (Number(values[s.memKey]) || 0), 0);
   const diskGb = Number(values.diskGb) || 0;
 
   const save = useMutation({
@@ -199,7 +206,7 @@ function LimitsEditor({
           <span>CPU</span>
           <span>Memory</span>
         </div>
-        {PROJECT_SERVICES.map(s => {
+        {services.map(s => {
           const live = containers.find(c => c.service === s.service);
           return (
             <div key={s.service} className="grid gap-3 border-t hairline px-4 py-3 sm:grid-cols-[1fr_8rem_8rem] sm:items-center sm:gap-4 [&:nth-child(2)]:border-t-0">
@@ -233,6 +240,11 @@ function LimitsEditor({
             </div>
           );
         })}
+        {!edgeRuntime && (
+          <div className="border-t hairline px-4 py-3 text-[11px]" style={{ color: 'var(--text-mute)' }}>
+            Edge functions are turned off for this project, so they use no quota. Turn them back on under Runtime.
+          </div>
+        )}
       </div>
 
       <div className="grid gap-3 sm:grid-cols-[1fr_8rem] sm:items-start sm:gap-4">
