@@ -9,7 +9,7 @@ then rename that heading to the version when you cut it.
 The npm packages (`@motherbase/client`, `@motherbase/cli`, ...) carry their own
 versions and are published separately; see [docs/publishing-the-sdk.md](docs/publishing-the-sdk.md).
 
-## [Unreleased]
+## [1.1.0] - 2026-11-15
 
 - Local mode: each project's API is also published on `127.0.0.1:<port>`
   (`54420` up, derived from its database port) and Connect reports that URL.
