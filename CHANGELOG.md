@@ -9,6 +9,16 @@ then rename that heading to the version when you cut it.
 The npm packages (`@motherbase/client`, `@motherbase/cli`, ...) carry their own
 versions and are published separately; see [docs/publishing-the-sdk.md](docs/publishing-the-sdk.md).
 
+## [1.1.1] - 2026-11-18
+
+- A project with its edge runtime turned off no longer counts the edge
+  container's CPU and memory in its quota: the quota form hides the edge row,
+  and metered usage, the usage pages and resource alerts leave it out. The
+  stored edge limits are kept for when the runtime is turned back on.
+- Studio on phones: on Authentication, Database, Integrations and
+  Observability pages, content now scrolls under the navigation pill as on
+  every other page, instead of stopping above a fixed empty band.
+
 ## [1.1.0] - 2026-11-15
 
 - Local mode: each project's API is also published on `127.0.0.1:<port>`
