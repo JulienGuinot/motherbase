@@ -15,6 +15,7 @@ import { authStatus, type AuthStatusItem } from './auth-status';
 import { logAuthActivity } from './auth-activity';
 import { crossSiteCookieAttributes, resolveBaseUrl } from './auth-origins';
 import { AuthDelivery } from './auth-delivery';
+import { canDeliver, deliveryChannel, deliveryNotConfigured, type DeliveryRoutes } from './delivery-preflight';
 import {
   accessTokenClaims,
   captchaOptions,
@@ -70,6 +71,31 @@ export class AuthManager extends BaseContext {
     const messages: AuthMessage[] = [];
     const result = await this.capture.run(messages, fn);
     return { result, messages };
+  }
+
+  /**
+   * Refuse, before Better Auth runs it, a request that would send an email or
+   * SMS this project cannot deliver. Read from settings per request, so a
+   * transport configured in Studio counts at once.
+   */
+  private async assertDeliverable(
+    path: string,
+    body: Record<string, unknown> | undefined,
+    routes: DeliveryRoutes & { testNumbers: Record<string, string> },
+  ): Promise<void> {
+    const channel = deliveryChannel(path, routes);
+    if (!channel) return;
+    // generateLink captures the message instead of sending it.
+    if (this.capture.getStore()) return;
+    // A test number gets its fixed code without any SMS.
+    if (channel === 'sms' && typeof body?.phoneNumber === 'string' && routes.testNumbers[body.phoneNumber]) return;
+    const s = this.di.SettingsService;
+    const deliverable = canDeliver(channel, {
+      smtp: await s.get('email.smtp'),
+      sms: await s.get('phone.sms'),
+      sendHook: await s.get('auth.hooks.send'),
+    });
+    if (!deliverable) throw deliveryNotConfigured(channel);
   }
 
   /** True when the message was captured, i.e. must not be delivered. */
@@ -166,6 +192,9 @@ export class AuthManager extends BaseContext {
     const phone = phoneSignIn(await s.get('auth.phoneOtp'), await s.get('phone.sms'));
     const otpChannel = twoFactorOtpChannel(twoFactor, phone.smsReady);
     const signUpGate = await s.get<SignUpGateConfig>('auth.hooks.signUp');
+    const signUpSendsEmail =
+      (await s.get<{ emailPassword?: boolean }>('auth.methods'))?.emailPassword !== false &&
+      !!(await s.get<{ requireEmailVerification?: boolean }>('auth.signup'))?.requireEmailVerification;
     const delivery = new AuthDelivery(this.di, {
       sendHook: await s.get<SendHookConfig>('auth.hooks.send'),
       spendQuota: channel => this.spendDeliveryQuota(channel),
@@ -199,6 +228,12 @@ export class AuthManager extends BaseContext {
       organization: organizationOptions(await s.get('auth.organization')),
       sendOtp: delivery.emailOtp,
       sendReauthenticationNonce: delivery.reauthenticationNonce,
+      assertDeliverable: (path, body) =>
+        this.assertDeliverable(path, body, {
+          twoFactorChannel: otpChannel,
+          signUpSendsEmail,
+          testNumbers: phone.options?.testNumbers ?? {},
+        }),
       sendMagicLink: delivery.magicLink,
       sendVerificationLink: delivery.verificationLink,
       beforeUserCreated: signUpGate?.enabled

@@ -9,6 +9,8 @@ const settings: Record<string, unknown> = {
   'auth.methods': { emailPassword: true, magicLink: true, emailOTP: true },
   'auth.tokens': { accessTokenExpMin: 15, refreshTokenExpDays: 30 },
   'auth.rateLimits': { emailSentPerHour: 1 },
+  // A project that can send: without SMTP the request is refused before the quota.
+  'email.smtp': { host: 'smtp.test.local', username: 'mailer' },
 };
 const manager = new AuthManager({
   prisma,

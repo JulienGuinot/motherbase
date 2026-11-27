@@ -136,6 +136,12 @@ export interface ProjectAuthDeps {
   /** Non-social sign-in method toggles. Absent keys default on, except
    *  `anonymous`, which defaults off as it does in Supabase. */
   methods?: { emailPassword?: boolean; magicLink?: boolean; emailOTP?: boolean; anonymous?: boolean };
+  /**
+   * Runs before every endpoint, with its path and body. Throws when the request
+   * would send an email or SMS the project has no way to deliver: Better Auth
+   * swallows a failed send and answers 200 (see auth/delivery-preflight.ts).
+   */
+  assertDeliverable?: (path: string, body: Record<string, unknown> | undefined) => Promise<void>;
   /** Mails the `reauthenticate()` nonce. Absent = the endpoint answers 500 on use. */
   sendReauthenticationNonce?: (args: { email: string; nonce: string }) => Promise<void>;
   /** Registration + password policy. Absent = open signup, no verification, 8..128 length. */
@@ -510,6 +516,7 @@ function authHooks(deps: ProjectAuthDeps) {
   const redirects = deps.redirects;
   return {
     before: createAuthMiddleware(async ctx => {
+      await deps.assertDeliverable?.(ctx.path, ctx.body as Record<string, unknown> | undefined);
       // Sign-out deletes the session before any after-hook runs, so its
       // owner is only knowable up front. Reported here, where it still is.
       if (deps.onAuthRequest && ctx.path === '/sign-out') {
