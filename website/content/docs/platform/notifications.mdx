@@ -67,6 +67,22 @@ The call is a plain `POST` to `https://api.twilio.com/2010-04-01/Accounts/<sid>/
 registerDevice(userId, token, platform)   // upsert on token
 unregisterDevice(token, userId)
 sendToUser(userId, { title, body, data })
+sendToUsers(userIds, { title, body, data }) // every device of every listed user
+```
+
+Tokens go to the provider in batches of 500, FCM's limit for one multicast call.
+
+From the SDK, the app registers the token it got from FCM or APNs for the signed-in user, and the project's back
+end sends:
+
+```ts
+// In the app, once signed in:
+await client.notifications.registerDevice(fcmToken, 'android')
+// On sign-out:
+await client.notifications.unregisterDevice(fcmToken)
+
+// In an edge function or a server, with the secret API key:
+await client.notifications.send({ userIds: ['u1', 'u2'] }, { title: 'New reply', body: 'Ada answered you' })
 ```
 
 Results come back as `{ token, success, error?, invalid? }`. Tokens the provider reports as **permanently invalid** are deleted from the `devices` table on the spot, so the registry self-cleans. A disabled provider does not throw — every token gets `success: false, error: 'Push provider not configured'`.
@@ -79,7 +95,7 @@ Provider credentials come from `push.fcm` / `push.apns`; the env variables `FIRE
 |---|---|---|---|
 | `POST` | `/api/devices/` | session + validator | Register a push token |
 | `DELETE` | `/api/devices/` | session + validator | Unregister a token |
-| `POST` | `/api/notifications/send` | session with role `ADMIN` | Send to a user |
+| `POST` | `/api/notifications/send` | secret API key, or session with role `ADMIN` | Send to one user (`userId`) or up to 1000 (`userIds`) |
 | `POST` | `/api/notifications/test` | session + validator | Test delivery |
 | `POST` | `/api/admin/settings/push/test` | admin | `{ token, platform: ios \| android \| web }`: sends one test notification to that device with the saved `push.fcm` / `push.apns` (Project Settings → Push notifications) |
 

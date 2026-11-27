@@ -254,8 +254,8 @@ Source: `apps/server/controllers/notification.controller.ts`
 
 | Method | Path | Handler | Guards |
 |---|---|---|---|
-| `POST` | `/api/notifications/send` | `send` | `authMiddleware`, `requireRole(UserRole.ADMIN)`, `sendNotificationValidator`, `validateRequest` |
-| `POST` | `/api/notifications/test` | `test` | `authMiddleware`, `testNotificationValidator`, `validateRequest` |
+| `POST` | `/api/notifications/send` | `send` | `apiKeyMiddleware`, `optionalAuthMiddleware`, `secretKeyOrProjectAdmin` |
+| `POST` | `/api/notifications/test` | `test` | `authMiddleware` |
 
 ## Observability: logs, metrics, advisors, jobs
 
@@ -459,6 +459,7 @@ Source: `apps/server/controllers/admin/admin-settings.controller.ts`
 | `PATCH` | `/api/admin/webhooks/:id` | `updateWebhook` | `adminOnly` |
 | `DELETE` | `/api/admin/webhooks/:id` | `deleteWebhook` | `adminOnly` |
 | `GET` | `/api/admin/webhooks/:id/deliveries` | `webhookDeliveries` | `adminOnly` |
+| `POST` | `/api/admin/webhooks/:id/rotate-secret` | `rotateWebhookSecret` | `adminOnly` |
 | `POST` | `/api/admin/webhooks/:id/test` | `testWebhook` | `adminOnly` |
 | `GET` | `/api/admin/webhooks/events` | `listWebhookEvents` | `adminOnly` |
 

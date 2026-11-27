@@ -35,6 +35,8 @@ export const HTTP_ROUTES = {
   storageV1: '/storage/v1',
   rest: '/rest/v1',
   edge: '/api/edge',
+  devices: '/api/devices',
+  notificationsSend: '/api/notifications/send',
   realtimeBroadcast: '/realtime/v1/api/broadcast',
 } as const;
 

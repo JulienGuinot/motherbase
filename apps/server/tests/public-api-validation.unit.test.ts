@@ -2,9 +2,10 @@ import { describe, it, expect } from 'vitest';
 import { validationResult } from 'express-validator';
 import {
   registerDeviceValidator,
-  sendNotificationValidator,
+  sendNotificationSchema,
   PUSH_TOKEN_MAX,
   PUSH_TITLE_MAX,
+  PUSH_USERS_MAX,
 } from '../validators/device.validators';
 import { RealtimeTopicService } from '../services/realtime/realtime-topic.service';
 
@@ -27,14 +28,23 @@ describe('public API request validation', () => {
     expect(badPlatform.isEmpty()).toBe(false);
   });
 
-  it('bounds notification title/body and rejects a non-flat data map', async () => {
+  it('bounds notification title/body and rejects a non-flat data map', () => {
+    const ok = (body: unknown) => sendNotificationSchema.safeParse(body).success;
     const base = { userId: 'u1', title: 'Hi', body: 'There' };
-    expect((await check(sendNotificationValidator, base)).isEmpty()).toBe(true);
-    expect((await check(sendNotificationValidator, { ...base, data: { a: 'b' } })).isEmpty()).toBe(true);
-    expect((await check(sendNotificationValidator, { ...base, data: { a: { nested: 1 } } })).isEmpty()).toBe(false);
-    expect((await check(sendNotificationValidator, { ...base, title: 'x'.repeat(PUSH_TITLE_MAX + 1) })).isEmpty()).toBe(
-      false
-    );
+    expect(ok(base)).toBe(true);
+    expect(ok({ ...base, data: { a: 'b' } })).toBe(true);
+    expect(ok({ ...base, data: { a: { nested: 1 } } })).toBe(false);
+    expect(ok({ ...base, title: 'x'.repeat(PUSH_TITLE_MAX + 1) })).toBe(false);
+  });
+
+  it('targets one user or a bounded list of users, never both or neither', () => {
+    const ok = (body: unknown) => sendNotificationSchema.safeParse(body).success;
+    const message = { title: 'Hi', body: 'There' };
+    expect(ok({ ...message, userIds: ['u1', 'u2'] })).toBe(true);
+    expect(ok({ ...message, userIds: Array.from({ length: PUSH_USERS_MAX + 1 }, (_, i) => `u${i}`) })).toBe(false);
+    expect(ok({ ...message, userIds: [] })).toBe(false);
+    expect(ok({ ...message, userId: 'u1', userIds: ['u2'] })).toBe(false);
+    expect(ok(message)).toBe(false);
   });
 
   it('caps what a realtime join stores for the life of the socket', async () => {

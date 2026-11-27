@@ -600,10 +600,11 @@ cannot stay missing from this page.
 | `realtime` | `motherbase realtime <config\|channels> ...` | Realtime configuration and channels |
 | `realtime config` | `motherbase realtime config [--models a,b,c]` | Show realtime config, or set enabled models with --models a,b,c |
 | `realtime channels` | `motherbase realtime channels` | List active realtime channels |
-| `webhooks` | `motherbase webhooks <list\|create\|delete\|test> ...` | Outgoing webhooks |
+| `webhooks` | `motherbase webhooks <list\|create\|delete\|rotate-secret\|test> ...` | Outgoing webhooks |
 | `webhooks list` | `motherbase webhooks list` | List webhooks |
 | `webhooks create` | `motherbase webhooks create --name <n> --url <u> --events a,b` | Create a webhook |
 | `webhooks delete` | `motherbase webhooks delete <id>` | Delete a webhook |
+| `webhooks rotate-secret` | `motherbase webhooks rotate-secret <id>` | Replace a webhook signing secret (the old one stops verifying at once) |
 | `webhooks test` | `motherbase webhooks test <id>` | Send a test event to a webhook |
 | `cron` | `motherbase cron <list\|create\|delete\|toggle> ...` | Scheduled jobs (pg_cron) |
 | `cron list` | `motherbase cron list [--app]` | List pg_cron jobs (and app jobs with --app) |

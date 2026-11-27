@@ -2,31 +2,38 @@ import { before, POST, route } from 'awilix-express';
 import { NextFunction, Request, Response } from 'express';
 import { UserRole } from '@prisma/client';
 import IContextContainer from '../context/icontext-container';
-import { authMiddleware } from '../middlewares/auth.middleware';
-import { requireRole } from '../middlewares/require-role';
-import { validateRequest } from '../middlewares/validate-request';
+import { authMiddleware, optionalAuthMiddleware } from '../middlewares/auth.middleware';
+import { apiKeyMiddleware } from '../middlewares/api-key.middleware';
 import { getApiResponse } from '../helpers/http.helper';
-import { sendNotificationValidator, testNotificationValidator } from '../validators/device.validators';
+import * as apiResponse from '../helpers/api-response.helper';
+import { parseBody } from '../lib/zod-body';
+import { sendNotificationSchema, testNotificationSchema } from '../validators/device.validators';
 
-interface SendBody {
-  userId: string;
-  title: string;
-  body: string;
-  data?: Record<string, string>;
+/**
+ * Sending to other users is for the project's back end: a secret API key (an
+ * edge function, a server, a cron job) or a signed-in user with the ADMIN role.
+ */
+export function secretKeyOrProjectAdmin(req: Request, res: Response, next: NextFunction) {
+  if (req.apiKey?.type === 'secret') return next();
+  if (!req.user) return apiResponse.unauthorizedResponse(res, 'Unauthorized');
+  if (req.user.role !== UserRole.ADMIN) {
+    return apiResponse.unauthorizedResponse(res, 'Forbidden: needs a secret API key or the ADMIN role');
+  }
+  return next();
 }
 
 @route('/api/notifications')
 export default class NotificationController {
   constructor(private di: IContextContainer) {}
 
-  // Admin-only: send a push to any user.
+  // A push to one user (`userId`) or up to 1000 (`userIds`).
   @POST()
   @route('/send')
-  @before([authMiddleware, requireRole(UserRole.ADMIN), sendNotificationValidator, validateRequest])
-  async send(req: Request<{}, {}, SendBody>, res: Response, next: NextFunction) {
+  @before([apiKeyMiddleware, optionalAuthMiddleware, secretKeyOrProjectAdmin])
+  async send(req: Request, res: Response, next: NextFunction) {
     try {
-      const { userId, title, body, data } = req.body;
-      const response = await this.di.NotificationService.sendToUser(userId, { title, body, data });
+      const { userId, userIds, title, body, data } = parseBody(sendNotificationSchema, req.body);
+      const response = await this.di.NotificationService.sendToUsers(userIds ?? [userId!], { title, body, data });
       return getApiResponse(res, response);
     } catch (error: unknown) {
       return next(error);
@@ -36,10 +43,10 @@ export default class NotificationController {
   // Send a push to the authenticated user's own devices (handy for testing).
   @POST()
   @route('/test')
-  @before([authMiddleware, testNotificationValidator, validateRequest])
-  async test(req: Request<{}, {}, { title: string; body: string; data?: Record<string, string> }>, res: Response, next: NextFunction) {
+  @before([authMiddleware])
+  async test(req: Request, res: Response, next: NextFunction) {
     try {
-      const { title, body, data } = req.body;
+      const { title, body, data } = parseBody(testNotificationSchema, req.body);
       const response = await this.di.NotificationService.sendToUser(req.user!.id, { title, body, data });
       return getApiResponse(res, response);
     } catch (error: unknown) {
