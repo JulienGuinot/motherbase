@@ -3,7 +3,7 @@ import { errorMessage } from '../../lib/errors';
 import { formatSqlError } from '../../lib/pg-error';
 import { HttpException } from '../../exceptions/http-exception';
 import { execDdl } from './schema-ddl';
-import { isTransactionControl } from './sql-script';
+import { LONG_TRANSACTION, cannotRunInTransaction, isRollback, isTransactionControl } from './sql-script';
 import { invalidateCatalog } from '../rest-api/catalog';
 import { hasUnsafeReadFunction } from '@motherbase/ai';
 import { env } from '../../config/env';
@@ -232,8 +232,18 @@ function sanitize(value: any): any {
   return value;
 }
 
+const TRANSACTION_CONTROL_ONLY =
+  'The batch holds only BEGIN, COMMIT or ROLLBACK: the editor runs every batch in one transaction of its own.';
 const TRANSACTION_CONTROL_SKIPPED =
-  'BEGIN, COMMIT and ROLLBACK were skipped: the editor runs each statement on its own.';
+  'BEGIN and COMMIT were skipped: the batch already ran as one transaction.';
+const BATCH_ROLLED_BACK = 'The batch contains ROLLBACK: it ran, then was rolled back. Nothing was committed.';
+
+/** Thrown inside the batch transaction to roll it back while keeping its result. */
+class RollbackBatch extends Error {
+  constructor(readonly result: SqlResult) {
+    super('batch rolled back');
+  }
+}
 
 const DESTRUCTIVE_RE = /^(DROP|TRUNCATE|DELETE|ALTER)\b/i;
 
@@ -282,21 +292,25 @@ export class SqlService extends BaseContext {
     const resolvedMode = mode ?? (await this.editorMode());
     assertSqlAllowed(trimmed, resolvedMode);
 
-    // Each statement runs on whichever pooled connection Prisma hands out, so a
-    // typed `BEGIN` would open a transaction on one connection and return it to
-    // the pool still open. The first error would leave it aborted, failing every
-    // unrelated query that later drew it with 25P02 until the process restarted.
+    // The batch runs as one transaction that this service owns, so the author's
+    // own BEGIN/COMMIT/ROLLBACK are not sent: a typed `BEGIN` would otherwise
+    // open a second level the driver cannot see, and a typed `COMMIT` would end
+    // ours half-way. A ROLLBACK anywhere in the batch is honoured by rolling the
+    // whole batch back, which is what `BEGIN ... ROLLBACK` around a dry run means.
     const written = splitStatements(trimmed);
+    const control = written.filter(stmt => isTransactionControl(stripComments(stmt)));
     const statements = written.filter(stmt => !isTransactionControl(stripComments(stmt)));
-    if (statements.length === 0) throw new HttpException(TRANSACTION_CONTROL_SKIPPED, 400);
+    if (statements.length === 0) throw new HttpException(TRANSACTION_CONTROL_ONLY, 400);
+    const rollback = control.some(stmt => isRollback(stripComments(stmt)));
 
     // Read-only mode: rely on a real Postgres READ ONLY transaction as the hard
     // guarantee: any mutation (incl. data-modifying CTEs) is rejected by the DB
     // even if it slips past the static guard above.
     const result = resolvedMode.readonly
       ? await this.executeReadonly(statements)
-      : await this.executeReadWrite(statements);
-    if (statements.length < written.length) (result.warnings ??= []).push(TRANSACTION_CONTROL_SKIPPED);
+      : await this.executeReadWrite(statements, rollback);
+    if (rollback && !resolvedMode.readonly) (result.warnings ??= []).push(BATCH_ROLLED_BACK);
+    else if (control.length) (result.warnings ??= []).push(TRANSACTION_CONTROL_SKIPPED);
     return result;
   }
 
@@ -319,7 +333,48 @@ export class SqlService extends BaseContext {
     });
   }
 
-  private async executeReadWrite(statements: string[]): Promise<SqlResult> {
+  /**
+   * One transaction for the whole batch: a failing statement leaves nothing of
+   * the statements before it, and a ROLLBACK in the batch undoes all of it.
+   * The few statements Postgres refuses inside a transaction block run on their
+   * own connection, and only as the sole statement of a batch.
+   */
+  private async executeReadWrite(statements: string[], rollback: boolean): Promise<SqlResult> {
+    const outside = statements.find(stmt => cannotRunInTransaction(stripComments(stmt)));
+    if (outside) {
+      if (statements.length > 1 || rollback) {
+        const keyword = stripComments(outside).trim().split(/\s+/).slice(0, 2).join(' ').toUpperCase();
+        throw new HttpException(
+          `${keyword} cannot run inside a transaction, and a batch runs as one. Run it on its own, without BEGIN or ROLLBACK.`,
+          400
+        );
+      }
+      const result = await this.runWrites(this.di.prisma, statements);
+      for (const { table, routes } of result.newRoutes ?? []) this.logRoutes(table, routes);
+      return result;
+    }
+    try {
+      const result = await this.di.prisma.$transaction(async (tx: any) => {
+        const ran = await this.runWrites(tx, statements);
+        if (rollback) throw new RollbackBatch(ran);
+        return ran;
+      }, LONG_TRANSACTION);
+      for (const { table, routes } of result.newRoutes ?? []) this.logRoutes(table, routes);
+      return result;
+    } catch (err) {
+      if (err instanceof RollbackBatch) {
+        const { newRoutes: _discarded, ...result } = err.result;
+        return result;
+      }
+      throw err;
+    } finally {
+      // DDL inside the transaction invalidated the catalog before it committed;
+      // a reload in that window saw the old schema.
+      invalidateCatalog();
+    }
+  }
+
+  private async runWrites(executor: any, statements: string[]): Promise<SqlResult> {
     let last: SqlResult = { kind: 'empty' };
     const allNewRoutes: { table: string; routes: ApiRoute[] }[] = [];
     const warnings: string[] = [];
@@ -329,7 +384,7 @@ export class SqlService extends BaseContext {
       const kind = classifyStatement(stmt);
       try {
         if (kind === 'read') {
-          const rows = sanitize(await this.di.prisma.$queryRawUnsafe<any[]>(stmt));
+          const rows = sanitize(await executor.$queryRawUnsafe(stmt));
           const columns = rows.length ? Object.keys(rows[0]) : [];
           this.audit(stmt, 'read', rows.length);
           last = { kind, columns, rows };
@@ -341,7 +396,7 @@ export class SqlService extends BaseContext {
           // Every write statement goes through the DDL choke point, so an ad-hoc
           // CREATE/ALTER/DROP typed into the SQL console refreshes the catalog
           // and shows up on /rest/v1 with no restart.
-          const rowsAffected = await execDdl<number>(this.di.prisma, stmt);
+          const rowsAffected = await execDdl<number>(executor, stmt);
           this.audit(stmt, 'write', rowsAffected);
           last = { kind, rowsAffected };
           wrote = true;
@@ -354,11 +409,9 @@ export class SqlService extends BaseContext {
             const table = created.name;
             const routes = tableRoutes(table);
             allNewRoutes.push({ table, routes });
-            this.logRoutes(table, routes);
-            await this.di.RlsService.setRls(table, true);
-            // RlsService owns its own ALTER TABLE ... ENABLE ROW LEVEL SECURITY
-            // and runs after the invalidation above, so the snapshot's rlsEnabled
-            // for the new table would otherwise be stale.
+            // Same transaction: a table that is rolled back takes its RLS with it,
+            // and one that commits is never visible without it.
+            await this.di.RlsService.setRls(table, true, executor);
             invalidateCatalog();
           }
         }

@@ -32,6 +32,25 @@ export function isTransactionControl(statement: string): boolean {
   return /^(?:BEGIN|START\s+TRANSACTION|COMMIT|END|ABORT|ROLLBACK(?!\s+TO\b))\b/i.test(statement.trim());
 }
 
+// Prisma's interactive transactions time out after 5s by default, which a real
+// migration or SQL file (an index build, a backfill) outlives.
+export const LONG_TRANSACTION = { maxWait: 10_000, timeout: 10 * 60_000 };
+
+/** `ROLLBACK` / `ABORT` (not `ROLLBACK TO`): the author asked for nothing to stick. */
+export function isRollback(statement: string): boolean {
+  return /^(?:ROLLBACK(?!\s+TO\b)|ABORT)\b/i.test(statement.trim());
+}
+
+/**
+ * Statements Postgres refuses inside a transaction block (SQLSTATE 25001).
+ * A batch runs as one transaction, so one of these can only run alone.
+ */
+export function cannotRunInTransaction(statement: string): boolean {
+  return /^(?:VACUUM|(?:CREATE|DROP)\s+(?:DATABASE|TABLESPACE)|ALTER\s+SYSTEM|CREATE\s+(?:UNIQUE\s+)?INDEX\s+CONCURRENTLY|DROP\s+INDEX\s+CONCURRENTLY|REINDEX\b.*\bCONCURRENTLY|DROP\s+SUBSCRIPTION|CREATE\s+SUBSCRIPTION)\b/is.test(
+    statement.trim()
+  );
+}
+
 // pg_dump's preamble: session settings that restate server defaults.
 const PREAMBLE_SET = /^SET\s+[a-z_.]+\s*(?:=|TO)\s*.*;\s*$/gim;
 const SEARCH_PATH_RESET = /^SELECT pg_catalog\.set_config\('search_path', '', false\);\s*$/gm;

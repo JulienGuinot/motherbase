@@ -60,16 +60,26 @@ static check is refused by the database itself. The AI assistant's queries alway
 the editor connects as the owner role: for a genuinely unprivileged path, give people a role without write grants.
 </Warning>
 
-## Transaction control is skipped
+## A batch is one transaction
 
-Each statement of a batch runs on its own, on whichever pooled connection the server hands
-out. A typed `BEGIN` would therefore open a transaction on one connection and return it to
-the pool still open, and after its first error every unrelated query drawing that connection
-would fail with `25P02`. So `BEGIN`, `START TRANSACTION`, `COMMIT`, `END`, `ABORT` and
-`ROLLBACK` are dropped from the batch before it runs, and the response carries the warning
-*BEGIN, COMMIT and ROLLBACK were skipped: the editor runs each statement on its own.* A batch
-made only of those answers `400` with the same sentence. `SAVEPOINT` and `ROLLBACK TO` are
-kept. For an atomic change, write a migration (see [Git migrations](/docs/platform/git-migrations/)).
+A batch, whether typed in the editor or sent with `motherbase db sql <file.sql>`, runs as one
+transaction: if a statement fails, none of the statements before it are kept.
+
+The server owns that transaction, so the batch's own `BEGIN`, `START TRANSACTION`, `COMMIT`
+and `END` are not sent, and the response carries the warning *BEGIN and COMMIT were skipped:
+the batch already ran as one transaction.* A `ROLLBACK` or `ABORT` anywhere in the batch rolls
+the whole batch back once it has run: `BEGIN; DELETE ...; ROLLBACK;` is a dry run that returns
+what the statements saw and commits nothing, with the warning *The batch contains ROLLBACK: it
+ran, then was rolled back. Nothing was committed.* `SAVEPOINT` and `ROLLBACK TO` are kept: they
+nest inside the batch's transaction. A batch made only of transaction control answers `400`.
+
+Postgres refuses a few statements inside a transaction block: `VACUUM`, `CREATE INDEX
+CONCURRENTLY`, `DROP INDEX CONCURRENTLY`, `REINDEX ... CONCURRENTLY`, `ALTER SYSTEM`,
+`CREATE`/`DROP DATABASE`, `CREATE`/`DROP TABLESPACE` and `CREATE`/`DROP SUBSCRIPTION`. Such a statement
+runs only as the sole statement of its batch; mixed with others it answers `400`.
+
+A batch has ten minutes to finish. For a change that is versioned and replayed on every
+environment, write a migration (see [Git migrations](/docs/platform/git-migrations/)).
 
 Failures keep Postgres's own `ERROR` / `DETAIL` / `HINT` (see
 [SQL editor hints](/docs/reference/errors/#sql-editor-hints)), and their status follows the

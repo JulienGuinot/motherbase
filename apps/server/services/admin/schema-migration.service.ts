@@ -8,7 +8,7 @@ import { execDdl, quoteIdent } from './schema-ddl';
 import { invalidateCatalog } from '../rest-api/catalog';
 import { splitStatements } from './sql.service';
 import { versionAt } from './git/migration-files';
-import { prepareScript } from './sql-script';
+import { LONG_TRANSACTION, prepareScript } from './sql-script';
 import type { SchemaService } from './schema.service';
 
 // Tables we never snapshot/diff: everything INTERNAL_TABLE_RE covers, plus the
@@ -16,9 +16,7 @@ import type { SchemaService } from './schema.service';
 // Studio schema-migration workflow) listed by `systemTableNames()`.
 const SCHEMA_MIGRATION_LOCK = 'motherbase:schema-migrations';
 
-// Prisma's interactive transactions time out after 5s by default, which a real
-// migration (an index build, a backfill) outlives.
-export const LONG_TRANSACTION = { maxWait: 10_000, timeout: 10 * 60_000 };
+export { LONG_TRANSACTION };
 
 /** The set of table (db) names owned by the app's Prisma schema. Excluded from snapshots. */
 function systemTableNames(): Set<string> {

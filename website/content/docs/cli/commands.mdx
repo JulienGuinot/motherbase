@@ -136,7 +136,7 @@ motherbase db backups config
 motherbase db backups config --set key=value --set key2=value2
 ```
 
-`db sql` uses `/api/admin/sql`; projects can disable raw SQL with `CONSOLE_SQL_ENABLED=false`. Backups use `/api/admin/backups/*`.
+`db sql` uses `/api/admin/sql`, which runs the whole input as one transaction: a failing statement keeps nothing, and a `ROLLBACK` anywhere in the file rolls all of it back (see [SQL editor](/docs/studio/sql/#a-batch-is-one-transaction)). Projects can disable raw SQL with `CONSOLE_SQL_ENABLED=false`. Backups use `/api/admin/backups/*`.
 
 ## Migrations
 

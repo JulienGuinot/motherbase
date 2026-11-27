@@ -133,16 +133,70 @@ describe('SqlService.execute', () => {
     expect(calls.execute).toContain('DELETE');
   });
 
-  it('never sends transaction control to the shared pool, and says it skipped it', async () => {
-    const sent: string[] = [];
-    const { svc } = service([], 1);
-    (svc as any).di.prisma.$executeRawUnsafe = async (sql: string) => { sent.push(sql); return 1; };
+  // A batch is one transaction: before, each statement autocommitted on its own
+  // pooled connection, so `BEGIN; DELETE ...; ROLLBACK` deleted for real.
+  describe('batch transaction', () => {
+    function transactional() {
+      const sent: string[] = [];
+      const outcome: string[] = [];
+      const { svc } = service([], 1);
+      const prisma = (svc as any).di.prisma;
+      prisma.$executeRawUnsafe = async (sql: string) => { sent.push(sql); return 1; };
+      prisma.$transaction = async (fn: (tx: any) => any) => {
+        try {
+          const value = await fn(prisma);
+          outcome.push('commit');
+          return value;
+        } catch (err) {
+          outcome.push('rollback');
+          throw err;
+        }
+      };
+      return { svc, sent, outcome };
+    }
 
-    const res = await svc.execute('BEGIN; UPDATE users SET name = 1; -- done\nCOMMIT;', RW);
+    it('runs the batch in one transaction and keeps BEGIN/COMMIT out of it', async () => {
+      const { svc, sent, outcome } = transactional();
+      const res = await svc.execute('BEGIN; UPDATE users SET name = 1; -- done\nCOMMIT;', RW);
+      expect(sent).toEqual(['UPDATE users SET name = 1']);
+      expect(outcome).toEqual(['commit']);
+      expect(res.warnings).toContain('BEGIN and COMMIT were skipped: the batch already ran as one transaction.');
+    });
 
-    expect(sent).toEqual(['UPDATE users SET name = 1']);
-    expect(res.warnings).toContain('BEGIN, COMMIT and ROLLBACK were skipped: the editor runs each statement on its own.');
-    await expect(svc.execute('BEGIN; ROLLBACK', RW)).rejects.toMatchObject({ statusCode: 400 });
+    it('rolls the whole batch back when it contains ROLLBACK, and returns what it saw', async () => {
+      const { svc, sent, outcome } = transactional();
+      const res = await svc.execute('BEGIN; DELETE FROM users WHERE id = 1; ROLLBACK;', RW);
+      expect(sent).toEqual(['DELETE FROM users WHERE id = 1']);
+      expect(outcome).toEqual(['rollback']);
+      expect(res).toMatchObject({ kind: 'write', rowsAffected: 1 });
+      expect(res.warnings).toContain('The batch contains ROLLBACK: it ran, then was rolled back. Nothing was committed.');
+    });
+
+    it('rolls back the statements before a failing one', async () => {
+      const { svc, outcome } = transactional();
+      const prisma = (svc as any).di.prisma;
+      prisma.$executeRawUnsafe = async (sql: string) => {
+        if (sql.startsWith('INSERT')) throw new Error('duplicate key');
+        return 1;
+      };
+      await expect(svc.execute('UPDATE users SET name = 1; INSERT INTO users VALUES (1)', RW)).rejects.toMatchObject({
+        statusCode: 400,
+      });
+      expect(outcome).toEqual(['rollback']);
+    });
+
+    it('runs a statement Postgres refuses in a transaction on its own, and only alone', async () => {
+      const { svc, sent, outcome } = transactional();
+      await svc.execute('CREATE INDEX CONCURRENTLY i ON users (email)', RW);
+      expect(sent).toEqual(['CREATE INDEX CONCURRENTLY i ON users (email)']);
+      expect(outcome).toEqual([]);
+      await expect(svc.execute('SELECT 1; VACUUM users', RW)).rejects.toMatchObject({ statusCode: 400 });
+    });
+
+    it('answers 400 for a batch made only of transaction control', async () => {
+      const { svc } = transactional();
+      await expect(svc.execute('BEGIN; ROLLBACK', RW)).rejects.toMatchObject({ statusCode: 400 });
+    });
   });
 
   it('audits every execution into the log buffer', async () => {
