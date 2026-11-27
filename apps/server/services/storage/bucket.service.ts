@@ -5,7 +5,8 @@ import BaseContext from '../../context/base-context';
 import IContextContainer from '../../context/icontext-container';
 import { HttpException } from '../../exceptions/http-exception';
 import { assertSafeUrlShape } from '../../helpers/ssrf.helper';
-import { sendWebhook } from '../../helpers/webhook-sender.helper';
+import { deliverWebhook } from '../../helpers/webhook-sender.helper';
+import { newWebhookSecret } from '../../lib/webhook-signature';
 import { logActivity } from '../../lib/activity-log';
 import { errorMessage } from '../../lib/errors';
 import { buildFileWhere, filePage, type FileListFilters } from './file-query';
@@ -269,7 +270,7 @@ export class BucketService extends BaseContext {
     // bad URL fails visibly here rather than silently at dispatch. The
     // DNS-resolving check runs at send time (see sendWebhook).
     assertSafeUrlShape(input.url);
-    return this.di.prisma.bucketWebhook.create({ data: { bucketId, url: input.url, events: input.events } });
+    return this.di.prisma.bucketWebhook.create({ data: { bucketId, url: input.url, events: input.events, secret: newWebhookSecret() } });
   }
 
   async removeWebhook(id: string): Promise<void> {
@@ -289,15 +290,30 @@ export class BucketService extends BaseContext {
       return;
     }
 
+    const payloadBody = { event, payload, timestamp: new Date().toISOString() };
     for (const wh of webhooks) {
-      // Go through sendWebhook rather than a raw fetch: it applies the SSRF
-      // guard (this URL is operator-supplied but must not be able to reach
-      // loopback/metadata/internal container addresses), a timeout, and
-      // redirect: 'manual' so a redirect cannot re-enter internal space after
-      // the check.
-      sendWebhook(this.di.OutboundHttpClient, wh.url, { event, payload, timestamp: new Date().toISOString() }).catch(
-        err => logActivity('error', 'webhook', `[BucketWebhook] dispatch failed for ${wh.url}: ${errorMessage(err)}`)
-      );
+      // Through deliverWebhook rather than a raw fetch: it signs the request and
+      // retries it, and its sendWebhook applies the SSRF guard (this URL is
+      // operator-supplied but must not be able to reach loopback/metadata/
+      // internal container addresses), a timeout, and redirect: 'manual' so a
+      // redirect cannot re-enter internal space after the check.
+      let first = true;
+      void deliverWebhook({
+        client: this.di.OutboundHttpClient,
+        payload: payloadBody,
+        target: async () => {
+          if (first) {
+            first = false;
+            return wh;
+          }
+          return this.di.prisma.bucketWebhook.findUnique({ where: { id: wh.id } }).catch(() => null);
+        },
+        onAttempt: result => {
+          if (result.ok) return;
+          const retry = result.retryInMs === null ? '' : `, retrying in ${Math.round(result.retryInMs / 1000)}s`;
+          logActivity('error', 'webhook', `[BucketWebhook] ${event} → ${wh.url} failed (attempt ${result.attempt}): ${result.error}${retry}`);
+        },
+      }).catch(err => logActivity('error', 'webhook', `[BucketWebhook] dispatch failed for ${wh.url}: ${errorMessage(err)}`));
     }
   }
 

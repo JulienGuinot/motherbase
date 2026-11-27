@@ -534,6 +534,8 @@ model BucketWebhook {
   bucketId String
   url      String
   events   String[]
+  /// Signs every delivery (Standard Webhooks), like platform.webhooks.secret.
+  secret   String
 
   bucket Bucket @relation(fields: [bucketId], references: [id], onDelete: Cascade)
 
@@ -584,6 +586,8 @@ model Webhook {
   url       String
   events    String[]
   enabled   Boolean  @default(true)
+  /// Signs every delivery (Standard Webhooks). `whsec_` + base64 of 32 random bytes.
+  secret    String
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -602,6 +606,8 @@ model WebhookDelivery {
   durationMs   Int
   test         Boolean  @default(false)
   errorMessage String?
+  /// Which try this row records; each retry records its own row.
+  attempt      Int      @default(1)
   createdAt    DateTime @default(now())
 
   webhook Webhook @relation(fields: [webhookId], references: [id], onDelete: Cascade)

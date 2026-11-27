@@ -1,4 +1,4 @@
-import { createHmac } from 'crypto';
+import { createHmac, randomBytes } from 'crypto';
 import { safeEqual } from './safe-equal';
 
 /**
@@ -19,4 +19,32 @@ export function verifyHubSignature(
   if (!secret || !header?.startsWith('sha256=')) return false;
   const expected = `sha256=${createHmac('sha256', secret).update(Buffer.from(rawBody as any)).digest('hex')}`;
   return safeEqual(header, expected);
+}
+
+/** A new outgoing-webhook secret: `whsec_` + base64 of 32 random bytes. */
+export function newWebhookSecret(): string {
+  return `whsec_${randomBytes(32).toString('base64')}`;
+}
+
+/**
+ * The Standard Webhooks headers (https://www.standardwebhooks.com) for one
+ * delivery, so a receiver can verify it with any of that spec's libraries:
+ * `webhook-signature` is `v1,` + base64 HMAC-SHA256, keyed by the secret's
+ * base64 part decoded, over `${id}.${timestamp}.${body}`. The id stays the same
+ * across retries of a delivery, which is what a receiver deduplicates on; the
+ * timestamp (seconds) is what it checks for replay.
+ */
+export function standardWebhookHeaders(
+  secret: string,
+  id: string,
+  body: string,
+  timestamp = Math.floor(Date.now() / 1000),
+): Record<string, string> {
+  const key = Buffer.from(secret.replace(/^whsec_/, ''), 'base64');
+  const signature = createHmac('sha256', key).update(`${id}.${timestamp}.${body}`).digest('base64');
+  return {
+    'webhook-id': id,
+    'webhook-timestamp': String(timestamp),
+    'webhook-signature': `v1,${signature}`,
+  };
 }

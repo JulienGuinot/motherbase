@@ -1,3 +1,4 @@
+import CopyButton from '@/shared/ui/CopyButton';
 import { useState, type ReactNode } from 'react';
 import { Trash2, Plus } from 'lucide-react';
 import { Modal, ModalBody, ModalFooter, ModalHeader } from '@/shared/ui/Modal';
@@ -54,6 +55,7 @@ export function BucketWebhooksModal({ bucketName, webhooks, onClose, onAdd, onRe
                       ))}
                     </div>
                   </div>
+                  <CopyButton value={wh.secret} title="Copy signing secret (Standard Webhooks)" />
                   <button
                     onClick={async () => { if (await confirmDialog({ title: 'Remove this webhook?', description: 'Bucket events stop being delivered to it.', confirmLabel: 'Remove', tone: 'danger' })) onRemove(wh.id); }}
                     className="btn btn-ghost shrink-0"

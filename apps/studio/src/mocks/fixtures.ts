@@ -576,6 +576,7 @@ export const webhooks = [
     url: 'https://hooks.slack.com/services/xxx',
     events: ['posts.insert'],
     enabled: true,
+    secret: 'whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw',
     createdAt: iso(86_400_000 * 5),
   },
 ];

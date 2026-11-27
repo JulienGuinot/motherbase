@@ -105,6 +105,8 @@ export interface BucketWebhook {
   id: string;
   url: string;
   events: string[];
+  /** Signs every delivery (Standard Webhooks headers). */
+  secret: string;
 }
 
 export interface CreateBucketWebhookInput {

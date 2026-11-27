@@ -4,6 +4,8 @@ import { errorMessage } from '../../lib/errors';
 import { HttpException } from '../../exceptions/http-exception';
 import { assertSafeUrlShape } from '../../helpers/ssrf.helper';
 import { sendWebhook } from '../../helpers/webhook-sender.helper';
+import { newWebhookSecret } from '../../lib/webhook-signature';
+import { randomUUID } from 'crypto';
 
 export interface WebhookInput {
   name?: string;
@@ -35,7 +37,7 @@ export class WebhookAdminService extends BaseContext {
   }
 
   async create(input: WebhookInput): Promise<Webhook> {
-    const created = await this.delegate().create({ data: { ...cleanInput(input), enabled: true } });
+    const created = await this.delegate().create({ data: { ...cleanInput(input), enabled: true, secret: newWebhookSecret() } });
     this.di.EventDispatcherService?.invalidateWebhooks();
     return created;
   }
@@ -64,6 +66,15 @@ export class WebhookAdminService extends BaseContext {
     return updated;
   }
 
+  /** A new signing secret. The old one stops verifying at once: update the receiver with the new one. */
+  async rotateSecret(id: string): Promise<Webhook> {
+    const current = await this.delegate().findUnique({ where: { id } });
+    if (!current) throw new HttpException('Webhook not found', 404);
+    const updated = await this.delegate().update({ where: { id }, data: { secret: newWebhookSecret() } });
+    this.di.EventDispatcherService?.invalidateWebhooks();
+    return updated;
+  }
+
   async delete(id: string): Promise<void> {
     await this.delegate().delete({ where: { id } });
     this.di.EventDispatcherService?.invalidateWebhooks();
@@ -81,7 +92,7 @@ export class WebhookAdminService extends BaseContext {
         webhookId: hook.id,
         sentAt: new Date().toISOString(),
         data: { message: 'Studio test payload' },
-      });
+      }, undefined, { secret: hook.secret, id: randomUUID() });
       await this.recordDelivery(id, event, result.status, result.ok, result.ms, true, result.ok ? null : `HTTP ${result.status}`);
       return result;
     } catch (err) {

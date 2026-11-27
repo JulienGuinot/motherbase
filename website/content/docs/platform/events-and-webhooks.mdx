@@ -4,7 +4,13 @@ description: "Row-change events, webhook matching and delivery, the delivery log
 order: 22
 ---
 
-Any insert, update or delete through the data plane can fan out to HTTP endpoints you register. Matching, delivery and the audit trail live in `apps/server/services/events/event-dispatcher.service.ts`.
+Any insert, update or delete made through the REST API (`client.from(...)`) can fan out to HTTP endpoints you register. Matching, delivery and the audit trail live in `apps/server/services/events/event-dispatcher.service.ts`.
+
+<Warning>
+Row events come from REST writes only, as for [Realtime](/docs/platform/realtime/). A row written by a trigger, inside an
+`rpc()` function, by a `pg_cron` job, from the SQL editor or over a direct connection fires no webhook. When a receiver
+depends on those rows, make the write through the REST API.
+</Warning>
 
 ## Event names
 
@@ -56,13 +62,45 @@ For each affected row, one `POST` per matching enabled webhook:
 
 `Content-Type: application/json`, 8 s timeout (`helpers/webhook-sender.helper.ts`). Deliveries are fired without blocking the mutation, and a dispatcher failure is logged rather than propagated — a broken endpoint cannot fail your write.
 
+### Signature
+
+Every delivery is signed following [Standard Webhooks](https://www.standardwebhooks.com), so any of that spec's
+libraries verifies it. Each webhook has its own secret (`whsec_…`), shown and rotated from the webhook's panel in
+Studio (`POST /api/admin/webhooks/:id/rotate-secret`). Three headers ride along:
+
+| Header | Value |
+|---|---|
+| `webhook-id` | The delivery id. The same on every retry of one delivery: deduplicate on it. |
+| `webhook-timestamp` | Unix seconds when this try was sent. Reject one too far from your clock to stop replays. |
+| `webhook-signature` | `v1,` + base64 HMAC-SHA256 of `${webhook-id}.${webhook-timestamp}.${body}`, keyed by the base64-decoded part of the secret after `whsec_`. |
+
+```ts
+import { Webhook } from 'standardwebhooks'
+
+const wh = new Webhook(process.env.MOTHERBASE_WEBHOOK_SECRET) // 'whsec_…'
+const event = wh.verify(rawBody, headers) // throws when the signature or timestamp is wrong
+```
+
+Verify against the raw body, before any JSON parsing. Rotating the secret takes effect at once: the old one stops
+verifying, so update the receiver first, or accept both while you switch.
+
+### Retries
+
+A try that fails with a network error, a timeout, `408`, `425`, `429` or any `5xx` is retried after 5 s, 30 s, 2 min
+and 8 min: five tries in all over about eleven minutes, with the same `webhook-id`. Any other `4xx` is the receiver
+refusing the request and is not retried. Each retry re-reads the webhook, so it stops once the webhook is disabled or
+deleted, and it follows a new URL or secret.
+
+Retries wait in the server process. A restart drops the ones still waiting; the delivery log shows the last try that
+ran. At most 1000 retries wait at once across the project; past that, a failure is recorded and not retried.
+
 ## Delivery log
 
-Every attempt writes a `WebhookDelivery` row: `event`, `status`, `ok`, `durationMs`, `test`, `errorMessage`. Because that table is only visible from the webhook detail screen, each attempt **also** writes one line into the shared log stream with `source: 'webhook'`:
+Every try writes a `WebhookDelivery` row: `event`, `status`, `ok`, `durationMs`, `test`, `errorMessage`, and `attempt` (1 for the first try, 2 for the first retry, and so on). Because that table is only visible from the webhook detail screen, each attempt **also** writes one line into the shared log stream with `source: 'webhook'`:
 
 ```text
 [webhook] todos.created → https://example.com/hook 200 in 84ms
-[webhook] todos.created → https://example.com/hook failed — HTTP 502
+[webhook] todos.created → https://example.com/hook failed, HTTP 502, retrying in 5s
 ```
 
 So a failing endpoint is readable in **Logs**, right next to whatever triggered it.
@@ -86,7 +124,7 @@ Twilio SMS is the deliberate exception (`services/sms.service.ts`): its scheme a
 
 ## Bucket webhooks
 
-Storage has its own per-bucket hooks (`BucketWebhook`: `url` + `events[]`), configured per bucket rather than globally. See [Storage](/docs/platform/storage/).
+Storage has its own per-bucket hooks (`BucketWebhook`: `url` + `events[]` + `secret`), configured per bucket rather than globally. They are signed and retried exactly as above; their tries go to the log stream, not to the delivery log. See [Storage](/docs/platform/storage/).
 
 ## Auth event webhook
 

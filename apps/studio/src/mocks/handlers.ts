@@ -766,6 +766,8 @@ export const handlers: HttpHandler[] = [
   ...admin('patch', '/webhooks/:id', () => ok({ ok: true })),
   ...admin('delete', '/webhooks/:id', () => ok({ ok: true })),
   ...admin('post', '/webhooks/:id/test', () => ok({ ok: true, status: 200, ms: 142 })),
+  ...admin('post', '/webhooks/:id/rotate-secret', () =>
+    ok({ ...fx.webhooks[0], secret: 'whsec_' + btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32)))) })),
 
   // ── Backups (Settings) ──────────────────────────────────────────────────
   ...admin('get', '/backups', () => ok({ backups: fx.backups })),
