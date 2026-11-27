@@ -853,6 +853,12 @@
   },
   {
     "method": "POST",
+    "path": "/webhooks/:id/rotate-secret",
+    "guard": "adminOnly",
+    "handler": "rotateWebhookSecret"
+  },
+  {
+    "method": "POST",
     "path": "/webhooks/:id/test",
     "guard": "adminOnly",
     "handler": "testWebhook"
