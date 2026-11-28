@@ -79,7 +79,7 @@ Every command and subcommand the CLI registers (`packages/cli/src/commands`), in
 | `secrets` | Edge function secrets | `list`, `set`, `unset` |
 | `keys` | Project API keys (publishable and secret) | `list`, `create`, `revoke` |
 | `realtime` | Realtime configuration and channels | `config`, `channels` |
-| `webhooks` | Outgoing webhooks | `list`, `create`, `delete`, `test` |
+| `webhooks` | Outgoing webhooks | `list`, `create`, `delete`, `rotate-secret`, `test` |
 | `cron` | Scheduled jobs (pg_cron) | `list`, `create`, `delete`, `toggle` |
 | `queues` | Message queues (pgmq) | `list`, `enable`, `expose`, `create`, `drop`, `send`, `read`, `archive`, `purge` |
 | `vault` | Encrypted secrets (Vault) | `list`, `enable`, `create`, `update`, `reveal`, `delete` |

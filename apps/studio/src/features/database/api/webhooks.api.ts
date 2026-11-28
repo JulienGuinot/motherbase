@@ -34,6 +34,8 @@ export const webhooksApi = {
   update: (id: string, patch: { name?: string; url?: string; events?: string[]; enabled?: boolean }) =>
     api.patch(`/admin/webhooks/${id}`, patch),
   remove: (id: string) => api.delete(`/admin/webhooks/${id}`),
+  rotateSecret: (id: string) =>
+    api.post(`/admin/webhooks/${id}/rotate-secret`).then(r => r.data.data as Hook),
   test: (id: string) =>
     api.post(`/admin/webhooks/${id}/test`).then(r => r.data.data as WebhookTestResult),
 };

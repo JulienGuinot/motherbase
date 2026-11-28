@@ -44,6 +44,15 @@ const subcommands = {
       output(ctx, data, (d, ui) => ui.success(`Deleted webhook ${id}`));
     },
   },
+  'rotate-secret': {
+    summary: 'Replace a webhook signing secret (the old one stops verifying at once)',
+    usage: 'motherbase webhooks rotate-secret <id>',
+    async run(ctx, args) {
+      const id = requireArg(args[0], 'id');
+      const data = await api.adminRequest(ctx, 'POST', `/webhooks/${id}/rotate-secret`);
+      output(ctx, data, (d, ui) => ui.success(`New signing secret for ${id}: ${d && d.secret}`));
+    },
+  },
   test: {
     summary: 'Send a test event to a webhook',
     usage: 'motherbase webhooks test <id>',
@@ -57,6 +66,6 @@ const subcommands = {
 
 module.exports = {
   summary: 'Outgoing webhooks',
-  usage: 'motherbase webhooks <list|create|delete|test> ...',
+  usage: 'motherbase webhooks <list|create|delete|rotate-secret|test> ...',
   subcommands,
 };

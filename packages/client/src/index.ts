@@ -14,6 +14,7 @@ import type { AuthClient } from './auth/types.js';
 import { verifierStore } from './auth/pkce.js';
 import { StorageClient } from './storage/index.js';
 import { FunctionsClient } from './functions/index.js';
+import { NotificationsClient } from './notifications/index.js';
 import { RealtimeModule } from './realtime/index.js';
 import { RealtimeChannel } from './realtime/channel.js';
 import { PostgrestQueryBuilder } from './postgrest/index.js';
@@ -89,6 +90,8 @@ export class MotherbaseClient<
   readonly storage: StorageClient<Database>;
   /** Edge functions: `client.functions.invoke(name, { body })`. */
   readonly functions: FunctionsClient<Database>;
+  /** Push notifications: `client.notifications.registerDevice(token, 'ios')`. */
+  readonly notifications: NotificationsClient;
   /** Low-level realtime transport. Prefer `channel()` for the Supabase surface. */
   readonly realtime: RealtimeModule;
   /**
@@ -211,6 +214,7 @@ export class MotherbaseClient<
     this.auth = auth;
     this.storage = new StorageClient<Database>(this.http, url, fetchImpl);
     this.functions = new FunctionsClient<Database>(this.http);
+    this.notifications = new NotificationsClient(this.http);
     this.realtime = new RealtimeModule(url, this.store, fetchImpl, options.realtimeIoFactory);
 
     // supabase-js finishes an OAuth redirect on its own (detectSessionInUrl
@@ -581,6 +585,8 @@ export type {
 
 export { FunctionsError, FunctionsHttpError, FunctionsRelayError, FunctionsFetchError } from './functions/errors.js';
 export { FunctionsClient } from "./functions/index.js"
+export { NotificationsClient } from "./notifications/index.js"
+export type { DevicePlatform, PushMessage, PushResult } from "./notifications/index.js"
 export type { FunctionInvokeAuth, FunctionInvokeOptions } from './functions/types.js';
 
 export { RealtimeChannel } from './realtime/channel.js';

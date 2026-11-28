@@ -111,6 +111,17 @@ export default class AdminSettingsController {
     }
   }
 
+  @POST()
+  @route('/webhooks/:id/rotate-secret')
+  @before(adminOnly)
+  async rotateWebhookSecret(req: Request, res: Response, next: NextFunction) {
+    try {
+      return apiResponse.successResponseWithData(res, 'OK', await this.di.WebhookAdminService.rotateSecret(req.params.id));
+    } catch (error: unknown) {
+      return next(error);
+    }
+  }
+
   @GET()
   @route('/webhooks/:id/deliveries')
   @before(adminOnly)

@@ -173,7 +173,7 @@ export const openapiSpec = {
     },
     '/api/notifications/send': {
       post: {
-        summary: 'Send a push to a user (ADMIN only)',
+        summary: 'Send a push to one user (userId) or up to 1000 (userIds). Secret API key or ADMIN role.',
         security: bearer,
         responses: { '200': { description: 'Dispatch results' } },
       },

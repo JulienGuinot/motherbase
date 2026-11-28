@@ -487,12 +487,13 @@ DELETE /api/users/
 POST   /api/devices/             # register a push token   — any signed-in user
 DELETE /api/devices/             # unregister a push token — any signed-in user
 
-POST   /api/notifications/send   # send to other users     — ADMIN role only
+POST   /api/notifications/send   # send to other users     — secret API key, or ADMIN role
 POST   /api/notifications/test   # send to yourself        — any signed-in user
 ```
 
-`/api/notifications/send` is guarded by `requireRole(ADMIN)`, not just by a session:
-fan-out to arbitrary users is an operator action. Use `/test` from an app account.
+`/api/notifications/send` takes `{ userId }` or `{ userIds }` (up to 1000) plus `title`, `body` and an optional
+flat `data` map. It answers only to a secret API key (an edge function, a server, a cron job) or a session with the
+`ADMIN` role: fan-out to arbitrary users is a back-end action. Use `/test` from an app account.
 
 ---
 

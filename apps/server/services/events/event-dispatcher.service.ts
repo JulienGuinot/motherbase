@@ -1,6 +1,6 @@
 import BaseContext from '../../context/base-context';
 import { errorMessage } from '../../lib/errors';
-import { sendWebhook } from '../../helpers/webhook-sender.helper';
+import { deliverWebhook, type WebhookAttempt } from '../../helpers/webhook-sender.helper';
 import { logActivity } from '../../lib/activity-log';
 
 export type EventAction = 'created' | 'updated' | 'deleted';
@@ -60,6 +60,7 @@ interface WebhookRecord {
   url: string;
   events: string[];
   enabled: boolean;
+  secret: string;
 }
 
 function eventName(model: string, action: string): string {
@@ -193,45 +194,54 @@ export class EventDispatcherService extends BaseContext {
     return entry.hooks;
   }
 
-  private async deliverWebhook(hook: WebhookRecord, payload: EventPayload): Promise<void> {
-    let status = 0;
-    let ok = false;
-    let durationMs = 0;
-    let failure: string | null = null;
-    const started = Date.now();
-    try {
-      const result = await sendWebhook(this.di.OutboundHttpClient, hook.url, payload);
-      status = result.status;
-      ok = result.ok;
-      durationMs = result.ms;
-      if (!result.ok) failure = `HTTP ${result.status}`;
-    } catch (err) {
-      durationMs = Date.now() - started;
-      failure = errorMessage(err);
-      this.logError(`webhook ${hook.id} failed: ${failure}`);
-    }
+  /**
+   * Signed, retried on failure (helpers/webhook-sender.helper.ts). Each try
+   * re-reads the webhook, so a retry stops once it is disabled or deleted and
+   * follows a changed URL or rotated secret.
+   */
+  private deliverWebhook(hook: WebhookRecord, payload: EventPayload): Promise<void> {
+    let first = true;
+    return deliverWebhook({
+      client: this.di.OutboundHttpClient,
+      payload,
+      target: async () => {
+        if (first) {
+          first = false;
+          return hook;
+        }
+        const hooks = await this.listEnabledWebhooks().catch((): WebhookRecord[] => []);
+        return hooks.find(h => h.id === hook.id) ?? null;
+      },
+      onAttempt: result => this.recordAttempt(hook, payload, result),
+    });
+  }
+
+  private async recordAttempt(hook: WebhookRecord, payload: EventPayload, result: WebhookAttempt): Promise<void> {
+    const retry = result.retryInMs === null ? '' : `, retrying in ${Math.round(result.retryInMs / 1000)}s`;
     // Deliveries are recorded in WebhookDelivery, but that table is only visible
     // from the webhook detail screen. A failing endpoint should be readable from
     // the Logs stream as well, next to whatever triggered the event.
     logActivity(
-      ok ? 'info' : 'error',
+      result.ok ? 'info' : 'error',
       'webhook',
-      `[webhook] ${payload.event} → ${hook.url} ${ok ? `${status} in ${durationMs}ms` : `failed, ${failure}`}`
+      `[webhook] ${payload.event} → ${hook.url} ${result.ok ? `${result.status} in ${result.ms}ms` : `failed, ${result.error}${retry}`}`
     );
-    await this.recordDelivery(hook.id, payload.event, status, ok, durationMs, failure);
+    await this.recordDelivery(hook.id, payload.event, result);
   }
 
-  private async recordDelivery(
-    webhookId: string,
-    event: string,
-    status: number,
-    ok: boolean,
-    durationMs: number,
-    failure: string | null,
-  ): Promise<void> {
+  private async recordDelivery(webhookId: string, event: string, result: WebhookAttempt): Promise<void> {
     try {
       await this.di.prisma.webhookDelivery.create({
-        data: { webhookId, event, status, ok, durationMs, test: false, errorMessage: failure },
+        data: {
+          webhookId,
+          event,
+          status: result.status,
+          ok: result.ok,
+          durationMs: result.ms,
+          test: false,
+          errorMessage: result.error,
+          attempt: result.attempt,
+        },
       });
     } catch (err) {
       this.logError(`delivery log failed: ${errorMessage(err)}`);

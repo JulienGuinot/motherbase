@@ -119,6 +119,8 @@ export interface Hook {
   url: string;
   events: string[];
   enabled: boolean;
+  /** Signs every delivery (Standard Webhooks headers). */
+  secret: string;
   createdAt: string;
 }
 
@@ -130,6 +132,8 @@ export interface Delivery {
   durationMs: number;
   test: boolean;
   errorMessage: string | null;
+  /** Which try this row records; retries record one row each. */
+  attempt: number;
   createdAt: string;
 }
 

@@ -498,6 +498,24 @@ See [RLS](/docs/platform/rls) for the full `auth.uid()` / `auth.jwt()` / `anon` 
 
 `GET /api/admin/auth/status` (admin only) returns per method/provider/plugin readiness — `enabled`, `configured`, what's `missing`, and the `callbackUrl`. Studio's **Authentication** panel renders this so "what's on" reads from one source of truth and never contradicts the toggles.
 
+### A send the project cannot deliver fails
+
+A request that would send an email or an SMS the project has no way to deliver is refused with `503` before anything
+runs, rather than answering `200` and sending nothing:
+
+| Code | When |
+|---|---|
+| `email_provider_not_configured` | magic link, email OTP (sign-in, verification, password reset, email change), `send-verification-email`, `reauthenticate`, two-factor codes by email, and sign-up while email verification is required, with neither **Email · SMTP** nor an email **Auth · Delivery override** set |
+| `sms_provider_not_configured` | phone OTP and phone password reset, and two-factor codes by SMS, with neither **Phone / SMS** credentials nor an SMS delivery override set |
+
+In the SDK it is the `error` of the call: `const { error } = await client.auth.signIn.magicLink({ email })` gives
+`error.status === 503` and `error.code === 'email_provider_not_configured'`. A phone test number is exempt, since it
+sends nothing, and so is `auth.admin.generateLink`, which returns the link instead of mailing it.
+
+The check exists because Better Auth sends most of these in the background and only logs a failed send. A transport
+that is configured but fails (wrong SMTP password, Twilio refusing a number) still answers `200` on those endpoints;
+Better Auth writes the error to the server log.
+
 ## Rate limiting
 
 Sign-in, sign-up, OTP, magic-link, and password-reset routes are rate-limited per IP. Configure limits in **Project Studio → Authentication → Rate Limits**.

@@ -4,7 +4,8 @@ import { EventDispatcherService } from '../services/events/event-dispatcher.serv
 function makeService(webhooks: Array<{ id: string; url: string; events: string[]; enabled: boolean }>) {
   const requestMock = vi.fn(async () => ({ ok: true, status: 200 }));
   const webhookDelivery = { create: vi.fn(async () => ({})) };
-  const webhook = { findMany: vi.fn(async () => webhooks) };
+  // Every stored webhook has a signing secret (the column is NOT NULL).
+  const webhook = { findMany: vi.fn(async () => webhooks.map(hook => ({ secret: 'whsec_dGVzdA==', ...hook }))) };
   const di = {
     prisma: { webhook, webhookDelivery },
     OutboundHttpClient: { request: requestMock },

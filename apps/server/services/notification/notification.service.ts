@@ -5,6 +5,9 @@ import { FcmProvider } from './fcm.provider';
 import { ApnsProvider } from './apns.provider';
 import { IPushProvider, PushMessage, PushResult } from './notification.types';
 
+/** The most tokens one provider call takes (FCM's multicast limit). */
+export const PUSH_BATCH_SIZE = 500;
+
 /**
  * Device registry + push fan-out. Routes iOS tokens to APNs and Android/Web
  * tokens to FCM, then prunes any tokens the providers report as permanently
@@ -35,7 +38,12 @@ export class NotificationService extends BaseContext {
   }
 
   async sendToUser(userId: string, message: PushMessage) {
-    const devices = await this.di.prisma.device.findMany({ where: { userId } });
+    return this.sendToUsers([userId], message);
+  }
+
+  /** Every device of every listed user, in one dispatch. */
+  async sendToUsers(userIds: string[], message: PushMessage) {
+    const devices = await this.di.prisma.device.findMany({ where: { userId: { in: userIds } } });
     return this.dispatch(devices, message);
   }
 
@@ -67,6 +75,12 @@ export class NotificationService extends BaseContext {
     if (!provider.isEnabled()) {
       return tokens.map(token => ({ token, success: false, error: 'Push provider not configured' }));
     }
-    return provider.send(tokens, message);
+    // FCM's sendEachForMulticast refuses more than 500 tokens in one call; a
+    // user with many devices, or a send to many users, goes out in batches.
+    const results: PushResult[] = [];
+    for (let i = 0; i < tokens.length; i += PUSH_BATCH_SIZE) {
+      results.push(...(await provider.send(tokens.slice(i, i + PUSH_BATCH_SIZE), message)));
+    }
+    return results;
   }
 }
