@@ -9,6 +9,33 @@ then rename that heading to the version when you cut it.
 The npm packages (`@motherbase/client`, `@motherbase/cli`, ...) carry their own
 versions and are published separately; see [docs/publishing-the-sdk.md](docs/publishing-the-sdk.md).
 
+## [1.2.0] - 2026-11-28
+
+- Security: the Data API roles (`anon`, `authenticated`, `service_role`,
+  `PUBLIC`) lose every privilege on the `auth` and `platform` tables, and on
+  the `storage` and `realtime` tables except `storage.files`,
+  `storage.buckets`, `storage.objects` and `realtime.messages`. Row level
+  security is on for every table in those four schemas. Before this, a
+  SECURITY INVOKER function called through the Data API could read
+  `auth.account`, `auth.session`, `auth.twoFactor` and `auth.jwks`. The
+  migration applies on upgrade.
+- A SQL batch (`motherbase db sql`, the Studio SQL editor) runs as one
+  transaction: a failing statement rolls the whole batch back, and a
+  `ROLLBACK` in it is honoured. Statements that cannot run in a transaction
+  (`VACUUM`, `CREATE INDEX CONCURRENTLY`, ...) must be sent alone.
+- Webhooks, project and bucket, are signed with the Standard Webhooks headers
+  (`webhook-id`, `webhook-timestamp`, `webhook-signature`) and retried after
+  5s, 30s, 2m and 8m on a network error, 408, 425, 429 or 5xx. Each webhook
+  has a `whsec_` secret, shown and rotated in Studio or with
+  `motherbase webhooks rotate-secret`.
+- Push: a secret API key can send, `userIds` sends to up to 1000 users in one
+  call, and the SDK gains `client.notifications` (`registerDevice`,
+  `unregisterDevice`, `send`).
+- Auth: a magic link, OTP, verification or reset email, or an SMS code, asked
+  of a project with no provider for that channel now answers 503
+  `email_provider_not_configured` / `sms_provider_not_configured` instead of a
+  200 that sent nothing.
+
 ## [1.1.1] - 2026-11-18
 
 - A project with its edge runtime turned off no longer counts the edge
